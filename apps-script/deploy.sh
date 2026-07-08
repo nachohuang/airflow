@@ -16,10 +16,10 @@ if ! command -v clasp >/dev/null 2>&1; then
 fi
 
 if [ ! -f .clasp.json ]; then
-  echo "❌ 找不到 .clasp.json。第一次使用請先："
+  echo "❌ 找不到 .clasp.json。第一次使用請先看 README.md 的「建立 Apps Script 專案」章節："
   echo "   1) clasp login"
-  echo "   2) 還沒建立 Apps Script 專案的話： clasp create --type webapp --title \"TWSE 法人動能選股\" --rootDir src"
-  echo "      已經在網頁上手動建立過的話： 複製 .clasp.json.example 成 .clasp.json 並填入你的 scriptId"
+  echo "   2) 在跟這個 repo 無關的暫存資料夾跑 clasp create 拿到 scriptId（避免污染 src/）"
+  echo "   3) 複製 .clasp.json.example 成 .clasp.json，貼上 scriptId，rootDir 保持 \"src\""
   exit 1
 fi
 

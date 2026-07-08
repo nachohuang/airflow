@@ -50,24 +50,28 @@ Apps Script 專屬服務，所以可以直接用 Node.js 單元測試（見「�
 
 **方法 A：用 clasp（推薦，方便之後用 git 管理版本）**
 
+`clasp create` 會在執行的當下目錄「順手」建立一份預設的 `appsscript.json` / `Code.js`。
+因為這個 repo 的 `apps-script/src/` 底下已經有我們自己寫好的完整專案，為了不要讓 clasp
+在 repo 裡生出多餘的雜散檔案，建議在一個**跟 repo 無關的暫存資料夾**建立新專案，只拿它的
+`scriptId`，再手動貼進這個 repo：
+
 ```bash
 npm install -g @google/clasp
-clasp login
-cd apps-script
+clasp login                      # 跳出瀏覽器授權畫面
+
+# 1) 在暫存資料夾建立新的 Apps Script 專案（純粹只是為了拿到 scriptId）
+mkdir -p ~/twse-clasp-init && cd ~/twse-clasp-init
 clasp create --type webapp --title "TWSE 法人動能選股"
+cat .clasp.json     # 記下裡面的 scriptId，例如 "1AbCdEfG..."
+
+# 2) 回到這個 repo，把 scriptId 接到我們既有的 src/ 專案上
+cd ~/airflow/apps-script         # 換成你實際 clone 的路徑
+cp .clasp.json.example .clasp.json
+# 編輯 .clasp.json，把 scriptId 換成上一步記下的值，rootDir 保持 "src" 不要動
+clasp push -f                    # 把 src/ 底下所有程式碼推上去
 ```
 
-`clasp create` 完成後會產生一個 `.clasp.json`（含 `scriptId`），把 `rootDir` 改成 `"src"`
-（可以直接參考 `.clasp.json.example`）：
-
-```json
-{
-  "scriptId": "你的 script id",
-  "rootDir": "src"
-}
-```
-
-之後每次改完程式碼，用 `clasp push` 上傳。
+之後每次改完程式碼，用 `clasp push`（或直接跑 `./deploy.sh`）上傳。
 
 **方法 B：手動複製貼上**
 
@@ -131,9 +135,9 @@ cd airflow/apps-script
 npm install -g @google/clasp     # 如果 Cloud Shell 裡還沒裝過
 clasp login                      # 跳出瀏覽器授權（Cloud Shell 內建瀏覽器登入沒問題）
 
-# 二選一：
-clasp create --type webapp --title "TWSE 法人動能選股" --rootDir src   # 還沒建立過專案
-# 或者：cp .clasp.json.example .clasp.json 然後填入你已經在網頁上建立好的 scriptId
+# 還沒建立過 Apps Script 專案的話，照上面「1. 建立 Apps Script 專案」的方法 A 做一次
+# （在暫存資料夾 clasp create 拿 scriptId，再貼進這裡的 .clasp.json），
+# 已經建立過的話：cp .clasp.json.example .clasp.json 然後填入你的 scriptId
 
 # 想讓正式 /exec 網址也能被腳本更新的話，先查一次 deploymentId：
 clasp deployments
