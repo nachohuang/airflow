@@ -1,0 +1,3 @@
+# clasp 的 OAuth 登入憑證，絕對不要進版本控制（不是 Script ID，是真的登入 token）
+.clasprc.json
+node_modules/
