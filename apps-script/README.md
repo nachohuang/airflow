@@ -107,7 +107,7 @@ clasp push -f
 從第 3 步開始重新做就好（`SCRIPT_ID` 變數會消失，但 `~/twse-clasp-init/.clasp.json`
 裡的 scriptId 還在，用 `cat ~/twse-clasp-init/.clasp.json` 就能再看到）。
 
-之後每次改完程式碼，用 `clasp push`（或直接跑 `./deploy.sh`）上傳，不用再重複上面這串。
+之後每次改完程式碼，用 `clasp push`（或直接跑 `./deploy-stock.sh`）上傳，不用再重複上面這串。
 
 **方法 B：手動複製貼上**
 
@@ -156,7 +156,7 @@ MA60 / IBF20 / 回測，不用重新一天一天補抓。
 
 ## 之後改完程式碼要怎麼自動推上去（例如在 Cloud Shell）
 
-`deploy.sh` 把「推程式碼」跟「讓正式網址生效」這兩步包起來了。跟你現有那個專案的部署方式一樣，
+`deploy-stock.sh` 把「推程式碼」跟「讓正式網址生效」這兩步包起來了。跟你現有那個專案的部署方式一樣，
 **用同一個 Cloud Shell 就可以，不需要開別的 shell**——Cloud Shell 是綁在你 Google 帳號底下的一台持久化
 小型機器，同時放好幾個專案的 repo 完全沒問題，各自一個資料夾、各自一份 `.clasp.json`，
 `cd` 進哪個資料夾就是在對哪個專案操作，彼此不會互相影響。唯一要注意的是**不要**把兩個專案的
@@ -183,7 +183,7 @@ clasp deployments
 ```bash
 cd airflow/apps-script
 git pull                                          # 拉最新程式碼（如果我有再幫你改）
-CLASP_DEPLOYMENT_ID=你查到的deploymentId ./deploy.sh
+CLASP_DEPLOYMENT_ID=你查到的deploymentId ./deploy-stock.sh
 ```
 
 不加 `CLASP_DEPLOYMENT_ID` 也可以執行，只是那樣只會更新「HEAD/`/dev` 測試網址」，

@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# 把 src/ 底下最新程式碼推上 Apps Script，並（選擇性）更新正式 /exec 網址的部署版本。
+# 【TWSE 法人動能選股 App】把 src/ 底下最新程式碼推上 Apps Script，
+# 並（選擇性）更新正式 /exec 網址的部署版本。
+#
+# 檔名特地取 deploy-stock.sh（不是通用的 deploy.sh），避免跟你其他專案的 deploy 指令搞混。
 #
 # 用法（在已經跑過 `clasp login` 的環境，例如 Cloud Shell）：
-#   ./deploy.sh                                  只更新程式碼本體（/dev 測試網址會是最新版）
-#   CLASP_DEPLOYMENT_ID=xxxx ./deploy.sh         同時更新正式 /exec 網址（手機在用的那個網址）
+#   ./deploy-stock.sh                              只更新程式碼本體（/dev 測試網址會是最新版）
+#   CLASP_DEPLOYMENT_ID=xxxx ./deploy-stock.sh     同時更新正式 /exec 網址（手機在用的那個網址）
 #
 # CLASP_DEPLOYMENT_ID 用 `clasp deployments` 查，是「網頁應用程式」那個部署的 ID，不是 script ID。
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+echo "==> 【TWSE 法人動能選股 App】部署開始（目錄：$(pwd)）"
 
 if ! command -v clasp >/dev/null 2>&1; then
   echo "❌ 找不到 clasp。請先安裝： npm install -g @google/clasp"
@@ -32,7 +37,7 @@ if [ -n "${CLASP_DEPLOYMENT_ID:-}" ]; then
 else
   echo "ℹ️  沒有設定 CLASP_DEPLOYMENT_ID，正式 /exec 網址還是舊版本。"
   echo "    用 'clasp deployments' 查 deploymentId，之後可以："
-  echo "    CLASP_DEPLOYMENT_ID=你的deploymentId ./deploy.sh"
+  echo "    CLASP_DEPLOYMENT_ID=你的deploymentId ./deploy-stock.sh"
 fi
 
 echo "==> 完成"
