@@ -112,16 +112,21 @@ function computeFactors_(rows, portfolioMap) {
     }
 
     for (var i = 0; i < group.length; i++) {
+      group[i].Inst_Net = instNetArr[i];
       group[i].Inst_Participation = instParticipation[i];
       group[i].Inst_Part_MA5 = instPartMA5[i];
       group[i].IBF_20D = ibf20[i];
       group[i].Trend_Score = trendScore[i];
+      group[i].Vol_MA20 = volMA20[i];
       group[i].Vol_Ratio = volRatio[i];
       group[i].MA20 = ma20[i];
+      group[i].MA20_Slope = ma20Slope[i];
       group[i].MA60 = ma60[i];
       group[i].BIAS_60 = bias60[i];
       group[i].Adjusted_Peak = adjustedPeak[i];
       group[i].Daily_Return = dailyReturn[i];
+      group[i].Is_Drop = isDrop[i];
+      group[i].Is_Inst_Buy_On_Drop = isInstBuyOnDrop[i];
     }
   });
 
@@ -151,7 +156,7 @@ function computeFactors_(rows, portfolioMap) {
  */
 function runAnalysis() {
   var rawRows = readRecentHistory_(CONFIG.ANALYSIS_LOOKBACK_DAYS);
-  if (rawRows.length === 0) return { latestDate: null, report: [] };
+  if (rawRows.length === 0) return { latestDate: null, report: [], fullReport: [] };
 
   var portfolioMap = getPortfolioMap_();
   var rows = computeFactors_(rawRows, portfolioMap);
@@ -161,10 +166,11 @@ function runAnalysis() {
     var d = normalizeDateStr(r['日期']);
     if (!latestDateStr || d > latestDateStr) latestDateStr = d;
   });
-  if (!latestDateStr) return { latestDate: null, report: [] };
+  if (!latestDateStr) return { latestDate: null, report: [], fullReport: [] };
 
   var scanRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
   var report = [];
+  var fullReport = [];
   scanRows.forEach(function (r) {
     var diag = diagnoseRow_(r, portfolioMap);
     if (diag.strategy === 'Neutral') return;
@@ -182,15 +188,34 @@ function runAnalysis() {
       '監控連結': diag.url,
       '參考最高價': diag.peak
     });
+    fullReport.push(buildFullReportRow_(r, diag));
   });
   report.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
+  fullReport.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
 
-  return { latestDate: latestDateStr, report: report };
+  return { latestDate: latestDateStr, report: report, fullReport: fullReport };
+}
+
+/** 組出跟原本 Colab v17.0 to_excel() 一致的完整欄位列（見 CONFIG.FULL_REPORT_COLUMNS）。 */
+function buildFullReportRow_(r, diag) {
+  var diagFields = {
+    '操作策略': diag.strategy,
+    '建議動作': diag.action,
+    '實相解讀': diag.interpretation,
+    '監控連結': diag.url,
+    '參考最高價': diag.peak
+  };
+  var row = {};
+  CONFIG.FULL_REPORT_COLUMNS.forEach(function (col) {
+    row[col] = diagFields.hasOwnProperty(col) ? diagFields[col] : r[col];
+  });
+  return row;
 }
 
 /**
- * 執行分析並落地：寫入 Reports 分頁（同日期覆蓋）+ 匯出一份 Excel 快照到 Drive Reports 資料夾
- * （對應原本 Colab 匯出 xlsx 到 google_drive_folder_output_report_dir 的動作，也是後台管理要管的檔案）。
+ * 執行分析並落地：寫入 Reports 分頁（精簡欄位，同日期覆蓋，給手機 UI 用）+
+ * 匯出一份完整欄位的 Excel 快照到 Drive Reports 資料夾
+ * （對應原本 Colab to_excel() 到 google_drive_folder_output_report_dir 的動作，也是後台管理要管的檔案）。
  */
 function runAnalysisAndSave() {
   var result = runAnalysis();
@@ -200,7 +225,7 @@ function runAnalysisAndSave() {
   upsertRowsByDate_(sheet, CONFIG.REPORT_COLUMNS, result.report);
 
   try {
-    exportReportToDrive_(result.report, result.latestDate);
+    exportReportToDrive_(result.fullReport, result.latestDate);
   } catch (e) {
     logRun_('戰報匯出', '失敗', String(e.message || e), 0);
   }
@@ -213,15 +238,15 @@ function getDashboardReport() {
 }
 
 /**
- * 把戰報匯出成 .xlsx 存進 Drive 的 Reports 資料夾。
+ * 把戰報匯出成 .xlsx 存進 Drive 的 Reports 資料夾（完整欄位版本，對應原本 Colab 的存檔格式）。
  * 做法：先建立一份暫存 Google Sheet 寫入資料，透過 export URL 轉存 xlsx blob，再刪除暫存表單。
  */
-function exportReportToDrive_(reportRows, dateStr) {
-  if (!reportRows || reportRows.length === 0) return null;
+function exportReportToDrive_(fullReportRows, dateStr) {
+  if (!fullReportRows || fullReportRows.length === 0) return null;
   var tempName = 'tmp_export_' + dateStr;
   var tempSs = SpreadsheetApp.create(tempName);
   var tempSheet = tempSs.getSheets()[0];
-  writeSheetObjects_(tempSheet, CONFIG.REPORT_COLUMNS, reportRows);
+  writeSheetObjects_(tempSheet, CONFIG.FULL_REPORT_COLUMNS, fullReportRows);
   SpreadsheetApp.flush();
 
   var exportUrl = 'https://docs.google.com/spreadsheets/d/' + tempSs.getId() + '/export?format=xlsx';

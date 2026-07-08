@@ -127,4 +127,34 @@ function buildSyntheticHistory(days) {
   console.log('Test 4 (diagnose - holding, no stop) passed:', diag.strategy, diag.interpretation);
 }
 
+// --- 5. computeFactors_ 應該補齊完整匯出用的中間欄位（跟原本 xlsx 戰報的欄位對齊）---
+{
+  const rows = buildSyntheticHistory(40);
+  const computed = context.computeFactors_(rows, {});
+  const sorted = context.sortRows(computed, [[function (r) { return r['日期']; }, 'asc']]);
+  const last = sorted[sorted.length - 1];
+
+  ['Inst_Net', 'Is_Drop', 'Is_Inst_Buy_On_Drop', 'MA20_Slope', 'Vol_MA20'].forEach(function (field) {
+    assert.ok(last.hasOwnProperty(field), 'computeFactors_ 應該要有欄位 ' + field);
+  });
+  assert.ok(typeof last.Inst_Net === 'number');
+  console.log('Test 5 (computeFactors_ full export fields) passed.');
+}
+
+// --- 6. buildFullReportRow_ 應該產出跟 CONFIG.FULL_REPORT_COLUMNS 完全一致的欄位（供 xlsx 匯出比對）---
+{
+  const rows = buildSyntheticHistory(40);
+  const computed = context.computeFactors_(rows, {});
+  const sorted = context.sortRows(computed, [[function (r) { return r['日期']; }, 'asc']]);
+  const last = sorted[sorted.length - 1];
+  const diag = context.diagnoseRow_(last, {});
+  const fullRow = context.buildFullReportRow_(last, diag);
+
+  const expectedKeys = Array.from(context.CONFIG.FULL_REPORT_COLUMNS);
+  const actualKeys = Object.keys(fullRow);
+  assert.deepStrictEqual(actualKeys, expectedKeys);
+  assert.strictEqual(fullRow['操作策略'], diag.strategy);
+  console.log('Test 6 (buildFullReportRow_ matches FULL_REPORT_COLUMNS) passed.');
+}
+
 console.log('All Analysis.gs tests passed.');

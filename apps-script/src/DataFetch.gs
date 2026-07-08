@@ -242,7 +242,9 @@ function fetchAndMergeOneDay_(dateStr, formattedDate) {
 }
 
 /**
- * 補抓一段日期區間（跳過六日），每抓完一天立刻 upsert 進 History。
+ * 補抓/重新合併一段日期區間，每抓完一天立刻 upsert 進 History（同日期資料會被新抓到的取代）。
+ * 跳過規則跟每日排程共用一份設定（後台管理的「六日不執行」與「臨時停跑日」），
+ * 確保排程不跑的區間，手動重新彙整也一樣跳過。
  * 有 4.5 分鐘內部時間預算，超過就回傳 done:false + nextStart，前端可再呼叫一次繼續。
  */
 function backfillHistory(startStr, endStr) {
@@ -250,18 +252,22 @@ function backfillHistory(startStr, endStr) {
   var end = new Date(endStr + 'T00:00:00');
   var scriptStart = Date.now();
   var TIME_BUDGET_MS = 4.5 * 60 * 1000;
+  var settings = getScheduleSettings();
 
   var succeeded = [];
   var failed = [];
+  var skipped = [];
   var cur = new Date(start);
 
   while (cur.getTime() <= end.getTime()) {
     if (Date.now() - scriptStart > TIME_BUDGET_MS) {
-      return { done: false, succeeded: succeeded, failed: failed, nextStart: formatYmd_(cur) };
+      return { done: false, succeeded: succeeded, failed: failed, skipped: skipped, nextStart: formatYmd_(cur) };
     }
-    var dow = cur.getDay();
-    if (dow !== 0 && dow !== 6) {
-      var ymd = formatYmd_(cur);
+    var ymd = formatYmd_(cur);
+    var skip = shouldSkipDate_(cur, settings);
+    if (skip.skip) {
+      skipped.push({ date: ymd, reason: skip.reason });
+    } else {
       var slash = formatSlashDate_(cur);
       try {
         var rows = fetchAndMergeOneDay_(ymd, slash);
@@ -273,7 +279,7 @@ function backfillHistory(startStr, endStr) {
     }
     cur.setDate(cur.getDate() + 1);
   }
-  return { done: true, succeeded: succeeded, failed: failed, nextStart: null };
+  return { done: true, succeeded: succeeded, failed: failed, skipped: skipped, nextStart: null };
 }
 
 /** 手動「立即更新今日資料」按鈕用。 */

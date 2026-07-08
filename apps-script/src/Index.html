@@ -122,6 +122,36 @@
         </div>
 
         <div class="admin-section">
+          <h3>匯入既有彙整表</h3>
+          <div class="meta-bar">
+            如果你已經有先前累積的彙整表（例如原本 Colab 產出的 ALL_COMBINED.csv），
+            貼上它的 Google Drive 連結或檔案 ID，匯入後就會以它為基礎繼續往後疊加，不用重新一天一天補抓。
+            支援 CSV 或 Google 試算表，不支援 .xlsx。
+          </div>
+          <form id="importHistoryForm" class="inline-form">
+            <input type="text" id="importFileInput" placeholder="貼上 Drive 連結或檔案 ID" required>
+            <button type="submit" class="btn-primary">開始匯入</button>
+          </form>
+          <div id="importHistoryResult"></div>
+        </div>
+
+        <div class="admin-section">
+          <h3>資料範圍重新彙整</h3>
+          <div class="meta-bar">
+            選定日期區間，重新向證交所抓取並覆蓋該區間的資料（適合補救某幾天抓取失敗或資料異常的情況）。
+            區間內遇到「六日不執行」或「臨時停跑日」設定的日期，跟每日排程一樣會自動跳過。
+          </div>
+          <form id="remergeForm" class="form-card">
+            <label>起始日 <input id="remergeStart" type="date" required></label>
+            <label>結束日 <input id="remergeEnd" type="date" required></label>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">重新抓取 / 合併此區間</button>
+            </div>
+          </form>
+          <div id="remergeResult"></div>
+        </div>
+
+        <div class="admin-section">
           <h3>執行紀錄</h3>
           <div id="runLogList" class="log-list"></div>
         </div>

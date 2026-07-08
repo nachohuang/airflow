@@ -50,9 +50,23 @@ var CONFIG = {
 
   PORTFOLIO_COLUMNS: ['證券代號', '證券名稱', '成本', '買進日期', '備註'],
 
+  // 給 Reports 分頁 / 手機 UI 用的精簡欄位
   REPORT_COLUMNS: [
     '日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '建議動作',
     '實相解讀', 'Trend_Score', 'Inst_Part_Rank', 'IBF_20D_Rank', '監控連結', '參考最高價'
+  ],
+
+  // 給 Drive 上 xlsx 戰報快照用的完整欄位，跟原本 Colab v17.0 to_excel() 存出來的欄位一致
+  FULL_REPORT_COLUMNS: [
+    '日期', '證券代號', '證券名稱', '外資', '投信', '自營商', '三大法人買賣超股數',
+    '成交股數', '成交筆數', '成交金額', '開盤價', '最高價', '最低價', '收盤價',
+    '漲跌(+/-)', '漲跌價差', '最後揭示買價', '最後揭示買量', '最後揭示賣價', '最後揭示賣量',
+    '殖利率(%)', '本益比', '股價淨值比', '財報年/季',
+    'Inst_Net', 'Inst_Participation', 'Inst_Part_MA5', 'Inst_Part_Rank',
+    'Daily_Return', 'Is_Drop', 'Is_Inst_Buy_On_Drop', 'IBF_20D', 'IBF_20D_Rank',
+    'MA20', 'MA20_Slope', 'Trend_Score', 'Vol_MA20', 'Vol_Ratio', 'Vol_Ratio_Rank',
+    'MA60', 'BIAS_60', 'Armor_Score', 'Adjusted_Peak',
+    '操作策略', '建議動作', '實相解讀', '監控連結', '參考最高價'
   ],
 
   RUN_LOG_COLUMNS: ['時間戳記', '類型', '狀態', '訊息', '耗時(秒)'],

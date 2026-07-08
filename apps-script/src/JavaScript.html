@@ -427,13 +427,18 @@
     var hour = parseInt(document.getElementById('schHour').value, 10);
     var minute = parseInt(document.getElementById('schMinute').value, 10);
     var skipWeekend = document.getElementById('schSkipWeekend').checked;
-    withSpin(callServer('setSchedule', hour, minute, skipWeekend)).then(function () {
+    withSpin(callServer('setSchedule', hour, minute, skipWeekend)).then(function (s) {
       loadScheduleSettings();
+      alert('✅ 已儲存排程：每日約 ' + String(s.hour).padStart(2, '0') + ':' + String(s.minute).padStart(2, '0') +
+        (s.skipWeekends ? '（六日不跑）' : '（含六日）'));
     }).catch(function (err) { alert(err.message || err); });
   });
   document.getElementById('schDisableBtn').addEventListener('click', function () {
     if (!confirm('確定要停用每日自動排程嗎？')) return;
-    withSpin(callServer('disableSchedule')).then(loadScheduleSettings);
+    withSpin(callServer('disableSchedule')).then(function () {
+      loadScheduleSettings();
+      alert('已停用每日自動排程');
+    });
   });
   document.getElementById('skipDateForm').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -457,6 +462,65 @@
       loadedTabs.dashboard = false;
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
+
+  // ---------- 匯入既有彙整表 ----------
+  document.getElementById('importHistoryForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var input = document.getElementById('importFileInput').value.trim();
+    if (!input) return;
+    runImportLoop(input, 0, document.getElementById('importHistoryResult'), 0);
+  });
+
+  function runImportLoop(input, startRow, resultEl, iteration) {
+    if (iteration > 50) {
+      resultEl.innerHTML = errorBox('已經連續匯入 50 批還沒結束，先停下來確認一下檔案內容或執行紀錄，需要的話可以再手動繼續。');
+      return;
+    }
+    resultEl.innerHTML = '<div class="loading">匯入中' + (startRow > 0 ? '（已處理 ' + startRow + ' 列）' : '') + '，資料量大時請耐心等候...</div>';
+    withSpin(callServer('importHistoryFromDriveFile', input, startRow)).then(function (res) {
+      if (res.done) {
+        resultEl.innerHTML = '<div class="meta-bar">✅ 匯入完成，共處理 ' + res.totalRows + ' 列（來源：' + escapeHtml(res.fileName) + '）</div>';
+        loadedTabs.dashboard = false;
+      } else {
+        resultEl.innerHTML = '<div class="meta-bar">處理中… 已完成 ' + res.processedThrough + ' / ' + res.totalRows + ' 列，自動繼續下一批…</div>';
+        runImportLoop(input, res.nextStart, resultEl, iteration + 1);
+      }
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  }
+
+  // ---------- 資料範圍重新彙整 ----------
+  document.getElementById('remergeForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var start = document.getElementById('remergeStart').value;
+    var end = document.getElementById('remergeEnd').value;
+    if (!start || !end) return;
+    runRemergeLoop(start, end, document.getElementById('remergeResult'), { succeeded: [], failed: [], skipped: [] }, 0);
+  });
+
+  function runRemergeLoop(start, end, resultEl, acc, iteration) {
+    if (iteration > 50) {
+      resultEl.innerHTML = errorBox('已經連續跑了 50 批還沒結束，先停下來看看執行紀錄，需要的話可以縮小區間再試一次。');
+      return;
+    }
+    resultEl.innerHTML = '<div class="loading">重新彙整中' + (acc.succeeded.length ? '（已完成 ' + acc.succeeded.length + ' 天）' : '') + '...</div>';
+    withSpin(callServer('backfillHistory', start, end)).then(function (res) {
+      acc.succeeded = acc.succeeded.concat(res.succeeded);
+      acc.failed = acc.failed.concat(res.failed);
+      acc.skipped = acc.skipped.concat(res.skipped);
+      if (res.done) {
+        var summary = '<div class="meta-bar">✅ 完成：成功 ' + acc.succeeded.length + ' 天、略過 ' + acc.skipped.length + ' 天' +
+          (acc.failed.length ? '、失敗 ' + acc.failed.length + ' 天' : '') + '</div>';
+        var failHtml = acc.failed.length ?
+          '<div class="table-scroll"><table class="simple-table"><thead><tr><th>日期</th><th>錯誤</th></tr></thead><tbody>' +
+          acc.failed.map(function (f) { return '<tr><td>' + escapeHtml(f.date) + '</td><td>' + escapeHtml(f.error) + '</td></tr>'; }).join('') +
+          '</tbody></table></div>' : '';
+        resultEl.innerHTML = summary + failHtml;
+        loadedTabs.dashboard = false;
+      } else {
+        runRemergeLoop(res.nextStart, end, resultEl, acc, iteration + 1);
+      }
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  }
 
   function loadRunLog() {
     return callServer('getRecentRunLogs', 50).then(function (logs) {

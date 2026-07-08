@@ -94,13 +94,20 @@ function disableSchedule() {
 
 /** scheduledDailyFetch() 開跑前的守門邏輯：週末 / 使用者設定的臨時停跑日一律跳過。 */
 function shouldSkipToday_(date) {
-  var settings = getScheduleSettings();
+  return shouldSkipDate_(date, getScheduleSettings());
+}
+
+/**
+ * 跟 shouldSkipToday_ 邏輯相同，但設定值由呼叫端先讀好傳進來，
+ * 讓 backfillHistory() 補一段日期區間時不用每天都重讀一次 Script Properties / SkipDates 分頁。
+ */
+function shouldSkipDate_(date, settings) {
   var dow = date.getDay();
   if (settings.skipWeekends && (dow === 0 || dow === 6)) {
     return { skip: true, reason: '週末不執行（六日不跑設定）' };
   }
-  var todayStr = normalizeDateStr(date);
-  var match = settings.skipDates.filter(function (s) { return s.date === todayStr; })[0];
+  var dateStr = normalizeDateStr(date);
+  var match = settings.skipDates.filter(function (s) { return s.date === dateStr; })[0];
   if (match) {
     return { skip: true, reason: '設定的停跑日：' + (match.reason || '未填原因') };
   }
