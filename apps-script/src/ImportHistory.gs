@@ -14,6 +14,26 @@ function extractDriveFileId_(input) {
   return s; // 假設使用者已經直接貼了純 ID
 }
 
+/**
+ * 讓「匯入既有彙整表」也能直接從手機/電腦本機挑檔案上傳，不用先手動傳到 Drive 再貼連結。
+ * 前端把選好的檔案讀成文字後，切成幾 MB 一段依序呼叫這個函式（避免單次呼叫塞太大的文字），
+ * 第一段不帶 fileId 會建立新檔案（順便存進 Archive 資料夾，等於也留一份原始檔備份），
+ * 之後每段把內容接到同一個檔案後面；全部段落送完後，前端再呼叫既有的
+ * importHistoryFromDriveFile(fileId, 0) 走一樣的匯入流程。
+ */
+function uploadHistoryFileChunk(fileId, chunkText, fileName) {
+  var folder = getArchiveFolder_();
+  var file;
+  if (!fileId) {
+    var name = fileName || ('upload_' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyyMMdd_HHmmss') + '.csv');
+    file = folder.createFile(name, chunkText, MimeType.CSV);
+  } else {
+    file = DriveApp.getFileById(fileId);
+    file.setContent(file.getBlob().getDataAsString('UTF-8') + chunkText);
+  }
+  return { fileId: file.getId(), fileName: file.getName() };
+}
+
 var IMPORT_CHUNK_SIZE = 20000; // 每次呼叫最多處理的資料列數，避免單次執行時間/儲存格數超過上限
 
 /**

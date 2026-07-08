@@ -125,13 +125,20 @@
           <h3>匯入既有彙整表</h3>
           <div class="meta-bar">
             如果你已經有先前累積的彙整表（例如原本 Colab 產出的 ALL_COMBINED.csv），
-            貼上它的 Google Drive 連結或檔案 ID，匯入後就會以它為基礎繼續往後疊加，不用重新一天一天補抓。
-            支援 CSV 或 Google 試算表，不支援 .xlsx。
+            匯入後就會以它為基礎繼續往後疊加，不用重新一天一天補抓。支援 CSV 或 Google 試算表，不支援 .xlsx。
           </div>
-          <form id="importHistoryForm" class="inline-form">
-            <input type="text" id="importFileInput" placeholder="貼上 Drive 連結或檔案 ID" required>
-            <button type="submit" class="btn-primary">開始匯入</button>
+
+          <form id="importUploadForm" class="inline-form">
+            <input type="file" id="importUploadInput" accept=".csv,text/csv" required>
+            <button type="submit" class="btn-primary">直接上傳 CSV 並匯入</button>
           </form>
+
+          <div class="meta-bar" style="margin-top:10px;">或者，如果檔案已經在 Google Drive 上：</div>
+          <form id="importHistoryForm" class="inline-form">
+            <input type="text" id="importFileInput" placeholder="貼上 Drive 連結或檔案 ID">
+            <button type="submit" class="btn-secondary">用 Drive 連結匯入</button>
+          </form>
+
           <div id="importHistoryResult"></div>
         </div>
 

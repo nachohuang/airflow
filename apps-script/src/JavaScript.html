@@ -471,6 +471,48 @@
     runImportLoop(input, 0, document.getElementById('importHistoryResult'), 0);
   });
 
+  document.getElementById('importUploadForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var fileInput = document.getElementById('importUploadInput');
+    var file = fileInput.files[0];
+    var resultEl = document.getElementById('importHistoryResult');
+    if (!file) return;
+    resultEl.innerHTML = '<div class="loading">讀取檔案中...</div>';
+    var reader = new FileReader();
+    reader.onload = function () { uploadHistoryFileInChunks(reader.result, file.name, resultEl); };
+    reader.onerror = function () { resultEl.innerHTML = errorBox('讀取檔案失敗，請確認檔案格式是 CSV。'); };
+    reader.readAsText(file, 'UTF-8');
+  });
+
+  function uploadHistoryFileInChunks(text, fileName, resultEl) {
+    var CHUNK_CHARS = 2 * 1024 * 1024; // 每段約 2MB 文字，避免單次呼叫塞太大
+    var lines = text.split(/\r\n|\n/);
+    var chunks = [];
+    var cur = '';
+    for (var i = 0; i < lines.length; i++) {
+      var lineWithBreak = lines[i] + '\n';
+      if (cur.length > 0 && cur.length + lineWithBreak.length > CHUNK_CHARS) {
+        chunks.push(cur);
+        cur = '';
+      }
+      cur += lineWithBreak;
+    }
+    if (cur.length > 0) chunks.push(cur);
+    sendUploadChunk_(chunks, 0, null, fileName, resultEl);
+  }
+
+  function sendUploadChunk_(chunks, index, fileId, fileName, resultEl) {
+    resultEl.innerHTML = '<div class="loading">上傳中（第 ' + (index + 1) + ' / ' + chunks.length + ' 段）...</div>';
+    withSpin(callServer('uploadHistoryFileChunk', fileId, chunks[index], fileName)).then(function (res) {
+      if (index + 1 < chunks.length) {
+        sendUploadChunk_(chunks, index + 1, res.fileId, fileName, resultEl);
+      } else {
+        resultEl.innerHTML = '<div class="meta-bar">✅ 上傳完成，開始匯入...</div>';
+        runImportLoop(res.fileId, 0, resultEl, 0);
+      }
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  }
+
   function runImportLoop(input, startRow, resultEl, iteration) {
     if (iteration > 50) {
       resultEl.innerHTML = errorBox('已經連續匯入 50 批還沒結束，先停下來確認一下檔案內容或執行紀錄，需要的話可以再手動繼續。');
