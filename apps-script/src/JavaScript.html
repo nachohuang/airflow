@@ -1,0 +1,528 @@
+<script>
+(function () {
+  'use strict';
+
+  // ---------- 共用工具 ----------
+  function escapeHtml(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function callServer(fnName) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      var runner = google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(function (err) { reject(err); });
+      runner[fnName].apply(runner, args);
+    });
+  }
+
+  function fmtNum(v, digits) {
+    if (v === null || v === undefined || isNaN(v)) return '-';
+    return Number(v).toLocaleString('zh-TW', { maximumFractionDigits: digits === undefined ? 2 : digits });
+  }
+
+  function errorBox(msg) {
+    return '<div class="error-box">⚠️ ' + escapeHtml(msg && msg.message ? msg.message : msg) + '</div>';
+  }
+
+  var refreshBtn = document.getElementById('refreshBtn');
+  function withSpin(promise) {
+    refreshBtn.classList.add('spinning');
+    return promise.finally(function () { refreshBtn.classList.remove('spinning'); });
+  }
+
+  // ---------- Tab 切換 ----------
+  var TAB_TITLES = {
+    dashboard: '今日戰報', portfolio: '持股管理', stock: '個股分析',
+    research: '回測研究', admin: '後台管理'
+  };
+  var loadedTabs = {};
+
+  function activateTab(tab) {
+    document.querySelectorAll('.tab-panel').forEach(function (el) { el.classList.remove('active'); });
+    document.querySelectorAll('.nav-btn').forEach(function (el) { el.classList.remove('active'); });
+    document.getElementById('tab-' + tab).classList.add('active');
+    document.querySelector('.nav-btn[data-tab="' + tab + '"]').classList.add('active');
+    document.getElementById('topbarTitle').textContent = TAB_TITLES[tab];
+    ensureTabLoaded(tab);
+  }
+
+  function ensureTabLoaded(tab, force) {
+    if (loadedTabs[tab] && !force) return;
+    loadedTabs[tab] = true;
+    if (tab === 'dashboard') loadDashboard();
+    if (tab === 'portfolio') loadPortfolio();
+    if (tab === 'admin') loadAdmin();
+  }
+
+  document.querySelectorAll('.nav-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () { activateTab(btn.getAttribute('data-tab')); });
+  });
+
+  refreshBtn.addEventListener('click', function () {
+    var activeTab = document.querySelector('.nav-btn.active').getAttribute('data-tab');
+    if (activeTab === 'dashboard') withSpin(loadDashboard(true));
+    else if (activeTab === 'portfolio') withSpin(loadPortfolio());
+    else if (activeTab === 'admin') withSpin(loadAdmin());
+    else if (activeTab === 'stock' && currentStockCode) withSpin(loadStock(currentStockCode));
+  });
+
+  // ---------- 今日戰報 ----------
+  var STRATEGY_HINT = {
+    '🛑 止盈/止損': 'var(--red)',
+    '🛡️ 持股守護': 'var(--green)',
+    '🚀 趨勢啟動': 'var(--accent)',
+    '🔥 趨勢領航': 'var(--amber)'
+  };
+
+  function loadDashboard(forceRefresh) {
+    var listEl = document.getElementById('dashboardList');
+    var metaEl = document.getElementById('dashboardMeta');
+    listEl.innerHTML = '<div class="loading">分析中，第一次執行可能要等資料抓取…</div>';
+    var fn = forceRefresh ? 'runManualFullUpdate' : 'getDashboardReport';
+    return withSpin(callServer(fn)).then(function (res) {
+      if (forceRefresh && res.fetch && !res.fetch.ok) {
+        metaEl.textContent = '';
+        listEl.innerHTML = errorBox('今日資料抓取失敗：' + res.fetch.error);
+        return;
+      }
+      var result = forceRefresh ? res.analysis : res;
+      if (!result || !result.latestDate) {
+        metaEl.textContent = '目前還沒有資料，請先到「後台管理」執行一次資料抓取。';
+        listEl.innerHTML = '';
+        return;
+      }
+      metaEl.textContent = '資料日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號';
+      if (result.report.length === 0) {
+        listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>';
+        return;
+      }
+      listEl.innerHTML = result.report.map(function (r) {
+        var color = STRATEGY_HINT[r['操作策略']] || 'var(--text)';
+        return '<div class="stock-card">' +
+          '<div class="stock-card-head">' +
+          '<span><span class="stock-card-code">' + escapeHtml(r['證券代號']) + '</span>' +
+          '<span class="stock-card-name">' + escapeHtml(r['證券名稱']) + '</span></span>' +
+          '<span class="stock-card-score">' + fmtNum(r['Armor_Score'], 1) + '</span>' +
+          '</div>' +
+          '<div class="stock-card-strategy" style="color:' + color + '">' + escapeHtml(r['操作策略']) + ' · ' + escapeHtml(r['建議動作']) + '</div>' +
+          '<div class="stock-card-note">' + escapeHtml(r['實相解讀']) + '</div>' +
+          '<a class="stock-card-link" href="' + escapeHtml(r['監控連結']) + '" target="_blank" rel="noopener">查看個股詳情 ↗</a>' +
+          '</div>';
+      }).join('');
+    }).catch(function (err) {
+      metaEl.textContent = '';
+      listEl.innerHTML = errorBox(err);
+    });
+  }
+
+  // ---------- 持股管理 ----------
+  var pfForm = document.getElementById('portfolioForm');
+  var pfClearBtn = document.getElementById('pfClearBtn');
+
+  function loadPortfolio() {
+    var listEl = document.getElementById('portfolioList');
+    listEl.innerHTML = '<div class="loading">載入中...</div>';
+    return callServer('getPortfolio').then(function (items) {
+      if (!items.length) {
+        listEl.innerHTML = '<div class="empty-hint">尚未新增任何持股</div>';
+        return;
+      }
+      listEl.innerHTML = items.map(function (it) {
+        var profit = (it.cost && it.latestClose !== null) ? (it.latestClose - it.cost) / it.cost * 100 : null;
+        var profitHtml = profit === null ? '' :
+          '<div class="stock-card-strategy" style="color:' + (profit >= 0 ? 'var(--green)' : 'var(--red)') + '">' +
+          '現價 ' + fmtNum(it.latestClose) + '　損益 ' + (profit >= 0 ? '+' : '') + fmtNum(profit, 1) + '%</div>';
+        return '<div class="stock-card">' +
+          '<div class="stock-card-head">' +
+          '<span><span class="stock-card-code">' + escapeHtml(it.code) + '</span>' +
+          '<span class="stock-card-name">' + escapeHtml(it.name) + '</span></span>' +
+          '</div>' +
+          '<div class="stock-card-note">成本 ' + fmtNum(it.cost) + '　買進日 ' + escapeHtml(it.buyDate || '-') + '</div>' +
+          profitHtml +
+          (it.note ? '<div class="stock-card-note">備註：' + escapeHtml(it.note) + '</div>' : '') +
+          '<div class="form-actions">' +
+          '<button type="button" class="btn-secondary pf-edit" data-code="' + escapeHtml(it.code) + '">編輯</button>' +
+          '<button type="button" class="btn-danger pf-delete" data-code="' + escapeHtml(it.code) + '">刪除</button>' +
+          '</div></div>';
+      }).join('');
+
+      var byCode = {};
+      items.forEach(function (it) { byCode[it.code] = it; });
+      listEl.querySelectorAll('.pf-edit').forEach(function (btn) {
+        btn.addEventListener('click', function () { fillPortfolioForm(byCode[btn.getAttribute('data-code')]); });
+      });
+      listEl.querySelectorAll('.pf-delete').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var code = btn.getAttribute('data-code');
+          if (!confirm('確定要刪除持股 ' + code + ' 嗎？')) return;
+          callServer('deletePortfolioItem', code).then(function () { loadPortfolio(); });
+        });
+      });
+    }).catch(function (err) { listEl.innerHTML = errorBox(err); });
+  }
+
+  function fillPortfolioForm(it) {
+    document.getElementById('portfolioFormTitle').textContent = '編輯持股 ' + it.code;
+    document.getElementById('pfOriginalCode').value = it.code;
+    document.getElementById('pfCode').value = it.code;
+    document.getElementById('pfName').value = it.name || '';
+    document.getElementById('pfCost').value = it.cost;
+    document.getElementById('pfBuyDate').value = it.buyDate || '';
+    document.getElementById('pfNote').value = it.note || '';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  pfClearBtn.addEventListener('click', function () {
+    pfForm.reset();
+    document.getElementById('portfolioFormTitle').textContent = '新增持股';
+    document.getElementById('pfOriginalCode').value = '';
+  });
+
+  pfForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var item = {
+      code: document.getElementById('pfCode').value.trim(),
+      name: document.getElementById('pfName').value.trim(),
+      cost: parseFloat(document.getElementById('pfCost').value),
+      buyDate: document.getElementById('pfBuyDate').value,
+      note: document.getElementById('pfNote').value.trim()
+    };
+    callServer('savePortfolioItem', item).then(function () {
+      pfForm.reset();
+      document.getElementById('portfolioFormTitle').textContent = '新增持股';
+      document.getElementById('pfOriginalCode').value = '';
+      loadPortfolio();
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  // ---------- 個股分析 ----------
+  var stockSearchInput = document.getElementById('stockSearchInput');
+  var stockSearchResults = document.getElementById('stockSearchResults');
+  var currentStockCode = null;
+  var priceChart = null, instChart = null;
+  var searchDebounceTimer = null;
+
+  stockSearchInput.addEventListener('input', function () {
+    clearTimeout(searchDebounceTimer);
+    var q = stockSearchInput.value.trim();
+    if (!q) { stockSearchResults.innerHTML = ''; return; }
+    searchDebounceTimer = setTimeout(function () {
+      callServer('searchStockCodes', q).then(function (results) {
+        if (!results.length) { stockSearchResults.innerHTML = '<div class="search-result-item">找不到符合的股票</div>'; return; }
+        stockSearchResults.innerHTML = results.map(function (r) {
+          return '<div class="search-result-item" data-code="' + escapeHtml(r.code) + '">' +
+            escapeHtml(r.code) + ' ' + escapeHtml(r.name) + '</div>';
+        }).join('');
+        stockSearchResults.querySelectorAll('.search-result-item[data-code]').forEach(function (el) {
+          el.addEventListener('click', function () {
+            stockSearchInput.value = el.getAttribute('data-code') + ' ' + el.textContent.replace(el.getAttribute('data-code'), '').trim();
+            stockSearchResults.innerHTML = '';
+            loadStock(el.getAttribute('data-code'));
+          });
+        });
+      });
+    }, 250);
+  });
+  document.addEventListener('click', function (e) {
+    if (!stockSearchResults.contains(e.target) && e.target !== stockSearchInput) stockSearchResults.innerHTML = '';
+  });
+
+  function loadStock(code) {
+    currentStockCode = code;
+    var detailEl = document.getElementById('stockDetail');
+    detailEl.innerHTML = '<div class="loading">載入走勢中...</div>';
+    return withSpin(callServer('getStockTimeSeries', code)).then(function (data) {
+      if (!data.series.length) {
+        detailEl.innerHTML = '<div class="empty-hint">目前沒有 ' + escapeHtml(code) + ' 的歷史資料</div>';
+        return;
+      }
+      detailEl.innerHTML =
+        '<div class="chart-card"><h4>' + escapeHtml(data.code) + ' ' + escapeHtml(data.name) + '　收盤價 / MA5 / MA20 / MA60</h4>' +
+        '<canvas id="priceChartCanvas" height="220"></canvas></div>' +
+        '<div class="chart-card"><h4>法人買賣超（投信+外資+自營商合計，股數）</h4>' +
+        '<canvas id="instChartCanvas" height="160"></canvas></div>' +
+        '<div class="chart-card"><h4>歷史 Armor_Score / 操作策略（每日戰報累積紀錄）</h4>' +
+        '<div class="table-scroll">' + renderScoreHistoryTable(data.scoreHistory) + '</div></div>';
+
+      renderPriceChart(data.series);
+      renderInstChart(data.series);
+    }).catch(function (err) { detailEl.innerHTML = errorBox(err); });
+  }
+
+  function renderScoreHistoryTable(rows) {
+    if (!rows || !rows.length) return '<div class="empty-hint">尚無戰報歷史紀錄</div>';
+    var recent = rows.slice(-30).reverse();
+    var body = recent.map(function (r) {
+      return '<tr><td>' + escapeHtml(r.date) + '</td><td>' + fmtNum(r.armorScore, 1) + '</td>' +
+        '<td>' + escapeHtml(r.strategy || '-') + '</td><td>' + escapeHtml(r.action || '-') + '</td></tr>';
+    }).join('');
+    return '<table class="simple-table"><thead><tr><th>日期</th><th>Armor_Score</th><th>策略</th><th>建議</th></tr></thead><tbody>' + body + '</tbody></table>';
+  }
+
+  function renderPriceChart(series) {
+    var ctx = document.getElementById('priceChartCanvas').getContext('2d');
+    if (priceChart) priceChart.destroy();
+    priceChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: series.map(function (r) { return r.date; }),
+        datasets: [
+          { label: '收盤價', data: series.map(function (r) { return r.close; }), borderColor: '#2563eb', pointRadius: 0, tension: 0.1 },
+          { label: 'MA5', data: series.map(function (r) { return r.ma5; }), borderColor: '#16a34a', pointRadius: 0, borderWidth: 1 },
+          { label: 'MA20', data: series.map(function (r) { return r.ma20; }), borderColor: '#d97706', pointRadius: 0, borderWidth: 1 },
+          { label: 'MA60', data: series.map(function (r) { return r.ma60; }), borderColor: '#9333ea', pointRadius: 0, borderWidth: 1 }
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        scales: { x: { ticks: { maxTicksLimit: 6 } } },
+        plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } }
+      }
+    });
+  }
+
+  function renderInstChart(series) {
+    var ctx = document.getElementById('instChartCanvas').getContext('2d');
+    if (instChart) instChart.destroy();
+    instChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: series.map(function (r) { return r.date; }),
+        datasets: [{
+          label: '法人買賣超',
+          data: series.map(function (r) { return r.instNet; }),
+          backgroundColor: series.map(function (r) { return r.instNet >= 0 ? '#dc2626' : '#16a34a'; })
+        }]
+      },
+      options: {
+        responsive: true,
+        scales: { x: { ticks: { maxTicksLimit: 6 } } },
+        plugins: { legend: { display: false } }
+      }
+    });
+  }
+
+  // ---------- 回測研究 ----------
+  document.querySelectorAll('.sub-tab-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.sub-tab-btn').forEach(function (b) { b.classList.remove('active'); });
+      document.querySelectorAll('.sub-tab-panel').forEach(function (p) { p.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById('subtab-' + btn.getAttribute('data-subtab')).classList.add('active');
+    });
+  });
+
+  var lastBacktestResult = null;
+  document.getElementById('backtestForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var start = document.getElementById('btStart').value;
+    var end = document.getElementById('btEnd').value;
+    var liquidity = parseFloat(document.getElementById('btLiquidity').value) || 20000000;
+    var target = parseFloat(document.getElementById('btTarget').value) || 5;
+    var resultEl = document.getElementById('backtestResult');
+    resultEl.innerHTML = '<div class="loading">回測執行中...</div>';
+    document.getElementById('btSaveBtn').disabled = true;
+    withSpin(callServer('runBacktest', start, end, liquidity, target)).then(function (res) {
+      if (res.error) { resultEl.innerHTML = errorBox(res.error); return; }
+      lastBacktestResult = res;
+      document.getElementById('btSaveBtn').disabled = !(res.results && res.results.length);
+      if (res.warning) { resultEl.innerHTML = errorBox(res.warning); return; }
+      var s = res.summary;
+      var summaryHtml = '<div class="meta-bar">樣本數 ' + s.sampleSize +
+        '　正報酬勝率 ' + s.winRate + '%　目標達成率 ' + s.targetHitRate + '%' +
+        (s.avgDaysToTarget !== null ? '　平均達標天數 ' + s.avgDaysToTarget : '') +
+        (s.topIbfAvgReturn !== null ? '　IBF前10平均報酬 ' + s.topIbfAvgReturn + '%' : '') + '</div>';
+      var rows = res.results.slice(0, 30).map(function (r) {
+        return '<tr><td>' + escapeHtml(r['證券代號']) + ' ' + escapeHtml(r['證券名稱']) + '</td>' +
+          '<td>' + fmtNum(r['Peak_Return%']) + '%</td><td>' + fmtNum(r['Final_Return%']) + '%</td>' +
+          '<td>' + fmtNum(r['進場IBF_Rank']) + '</td><td>' + r['Days_to_Peak'] + '</td></tr>';
+      }).join('');
+      resultEl.innerHTML = summaryHtml + '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
+        '<th>股票</th><th>最高報酬</th><th>結束報酬</th><th>進場IBF</th><th>達峰天數</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
+  document.getElementById('btSaveBtn').addEventListener('click', function () {
+    if (!lastBacktestResult) return;
+    callServer('saveBacktestToDrive', lastBacktestResult).then(function (f) {
+      alert('已存檔：' + f.name);
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  var lastFactorScanResult = null;
+  document.getElementById('factorScanForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var start = document.getElementById('fsStart').value || null;
+    var end = document.getElementById('fsEnd').value || null;
+    var resultEl = document.getElementById('factorScanResult');
+    resultEl.innerHTML = '<div class="loading">掃描中，資料量大時可能要一點時間...</div>';
+    document.getElementById('fsSaveBtn').disabled = true;
+    withSpin(callServer('runFactorCorrelationScan', start, end)).then(function (res) {
+      if (res.warning) { resultEl.innerHTML = errorBox(res.warning); return; }
+      if (!res.correlations.length) { resultEl.innerHTML = '<div class="empty-hint">沒有可分析的資料</div>'; return; }
+      lastFactorScanResult = res;
+      document.getElementById('fsSaveBtn').disabled = false;
+      var rows = res.correlations.map(function (c) {
+        return '<tr><td>' + escapeHtml(c.factor) + '</td><td>' + (c.correlation === null ? '-' : fmtNum(c.correlation, 4)) + '</td></tr>';
+      }).join('');
+      resultEl.innerHTML = '<div class="meta-bar">樣本數 ' + res.sampleSize + '</div>' +
+        '<table class="simple-table"><thead><tr><th>因子</th><th>與未來5日報酬相關係數</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
+  document.getElementById('fsSaveBtn').addEventListener('click', function () {
+    if (!lastFactorScanResult) return;
+    callServer('saveFactorScanToDrive', lastFactorScanResult).then(function (f) {
+      alert('已存檔：' + f.name);
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  // ---------- 後台管理 ----------
+  function populateTimeSelects() {
+    var hourSel = document.getElementById('schHour');
+    var minSel = document.getElementById('schMinute');
+    if (!hourSel.children.length) {
+      for (var h = 0; h < 24; h++) hourSel.innerHTML += '<option value="' + h + '">' + String(h).padStart(2, '0') + '</option>';
+      for (var m = 0; m < 60; m += 5) minSel.innerHTML += '<option value="' + m + '">' + String(m).padStart(2, '0') + '</option>';
+    }
+  }
+
+  function loadAdmin() {
+    populateTimeSelects();
+    document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
+    return Promise.all([loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder)]);
+  }
+
+  function loadScheduleSettings() {
+    return callServer('getScheduleSettings').then(function (s) {
+      document.getElementById('schHour').value = s.hour;
+      document.getElementById('schMinute').value = Math.round(s.minute / 5) * 5;
+      document.getElementById('schSkipWeekend').checked = s.skipWeekends;
+      document.getElementById('scheduleStatus').textContent = s.enabled
+        ? '目前排程：每日約 ' + String(s.hour).padStart(2, '0') + ':' + String(s.minute).padStart(2, '0') + (s.skipWeekends ? '（六日不跑）' : '（含六日）') + ' 執行中'
+        : '目前排程：尚未啟用自動排程';
+      renderSkipDates(s.skipDates);
+    });
+  }
+
+  function renderSkipDates(dates) {
+    var el = document.getElementById('skipDateList');
+    if (!dates.length) { el.innerHTML = '<div class="empty-hint" style="padding:8px 0;">尚未設定臨時停跑日</div>'; return; }
+    el.innerHTML = dates.map(function (d) {
+      return '<span class="chip">' + escapeHtml(d.date) + (d.reason ? '（' + escapeHtml(d.reason) + '）' : '') +
+        '<button data-date="' + escapeHtml(d.date) + '">✕</button></span>';
+    }).join('');
+    el.querySelectorAll('button[data-date]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        callServer('removeSkipDate', btn.getAttribute('data-date')).then(renderSkipDates);
+      });
+    });
+  }
+
+  document.getElementById('scheduleForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var hour = parseInt(document.getElementById('schHour').value, 10);
+    var minute = parseInt(document.getElementById('schMinute').value, 10);
+    var skipWeekend = document.getElementById('schSkipWeekend').checked;
+    withSpin(callServer('setSchedule', hour, minute, skipWeekend)).then(function () {
+      loadScheduleSettings();
+    }).catch(function (err) { alert(err.message || err); });
+  });
+  document.getElementById('schDisableBtn').addEventListener('click', function () {
+    if (!confirm('確定要停用每日自動排程嗎？')) return;
+    withSpin(callServer('disableSchedule')).then(loadScheduleSettings);
+  });
+  document.getElementById('skipDateForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var date = document.getElementById('skipDateInput').value;
+    var reason = document.getElementById('skipDateReason').value.trim();
+    callServer('addSkipDate', date, reason).then(function (dates) {
+      document.getElementById('skipDateForm').reset();
+      renderSkipDates(dates);
+    });
+  });
+  document.getElementById('manualRunBtn').addEventListener('click', function () {
+    var resultEl = document.getElementById('manualRunResult');
+    resultEl.innerHTML = '<div class="loading">執行中，可能需要數十秒...</div>';
+    withSpin(callServer('runManualFullUpdate')).then(function (res) {
+      if (!res.fetch.ok) { resultEl.innerHTML = errorBox('資料抓取失敗：' + res.fetch.error); }
+      else {
+        resultEl.innerHTML = '<div class="meta-bar">✅ 已更新 ' + res.fetch.date + '，' + res.fetch.count + ' 檔股票' +
+          (res.analysis && res.analysis.latestDate ? '，戰報產出 ' + res.analysis.report.length + ' 檔訊號' : '') + '</div>';
+      }
+      loadRunLog();
+      loadedTabs.dashboard = false;
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
+
+  function loadRunLog() {
+    return callServer('getRecentRunLogs', 50).then(function (logs) {
+      var el = document.getElementById('runLogList');
+      if (!logs.length) { el.innerHTML = '<div class="empty-hint">尚無執行紀錄</div>'; return; }
+      el.innerHTML = logs.map(function (l) {
+        var cls = l['狀態'] === '成功' ? 'ok' : (l['狀態'] === '失敗' ? 'fail' : 'skip');
+        return '<div class="log-item"><span class="log-status ' + cls + '">[' + escapeHtml(l['狀態']) + ']</span> ' +
+          escapeHtml(l['時間戳記']) + ' · ' + escapeHtml(l['類型']) + '<br>' + escapeHtml(l['訊息']) + '</div>';
+      }).join('');
+    });
+  }
+
+  var currentFolder = 'archive';
+  document.querySelectorAll('.folder-tab-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.folder-tab-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentFolder = btn.getAttribute('data-folder');
+      loadFileList(currentFolder);
+    });
+  });
+
+  function loadFileList(folderKey) {
+    var el = document.getElementById('fileList');
+    el.innerHTML = '<div class="loading">載入中...</div>';
+    return callServer('listFiles', folderKey).then(function (files) {
+      if (!files.length) { el.innerHTML = '<div class="empty-hint">這個資料夾目前沒有檔案</div>'; return; }
+      el.innerHTML = files.map(function (f) {
+        return '<div class="file-item"><div><div>' + escapeHtml(f.name) + '</div>' +
+          '<div class="file-meta">' + escapeHtml(f.sizeLabel) + ' · ' + escapeHtml(f.updated) + '</div></div>' +
+          '<div class="form-actions" style="margin:0;"><a href="' + escapeHtml(f.url) + '" target="_blank" rel="noopener">開啟</a>' +
+          '<button type="button" class="btn-danger file-delete" data-id="' + escapeHtml(f.id) + '">刪除</button></div></div>';
+      }).join('');
+      el.querySelectorAll('.file-delete').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          if (!confirm('確定要刪除這個檔案嗎？（會移到 Google Drive 垃圾桶）')) return;
+          callServer('deleteFile', btn.getAttribute('data-id')).then(function () { loadFileList(currentFolder); });
+        });
+      });
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  }
+
+  document.getElementById('archiveNowBtn').addEventListener('click', function () {
+    withSpin(callServer('exportHistorySnapshotToDrive')).then(function (f) {
+      alert('已封存：' + f.name);
+      if (currentFolder === 'archive') loadFileList('archive');
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  // ---------- App 開機 ----------
+  function boot() {
+    var today = new Date().toISOString().slice(0, 10);
+    document.getElementById('btEnd').value = today;
+    var d = new Date(); d.setDate(d.getDate() - 30);
+    document.getElementById('btStart').value = d.toISOString().slice(0, 10);
+
+    callServer('bootstrap').then(function (info) {
+      window.__spreadsheetUrl = info.spreadsheetUrl;
+      document.getElementById('spreadsheetLink').setAttribute('href', info.spreadsheetUrl);
+      loadDashboard();
+    }).catch(function (err) {
+      document.getElementById('dashboardList').innerHTML = errorBox(err);
+    });
+  }
+
+  boot();
+})();
+</script>

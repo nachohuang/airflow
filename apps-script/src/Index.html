@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+  <base target="_top">
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="topbar-title" id="topbarTitle">今日戰報</div>
+      <button class="icon-btn" id="refreshBtn" title="重新整理">⟳</button>
+    </header>
+
+    <main id="content">
+
+      <section id="tab-dashboard" class="tab-panel active">
+        <div id="dashboardMeta" class="meta-bar">載入中...</div>
+        <div id="dashboardList" class="card-list"></div>
+      </section>
+
+      <section id="tab-portfolio" class="tab-panel">
+        <form id="portfolioForm" class="form-card">
+          <h3 id="portfolioFormTitle">新增持股</h3>
+          <input type="hidden" id="pfOriginalCode">
+          <label>股票代號
+            <input id="pfCode" required maxlength="6" placeholder="例如 2330">
+          </label>
+          <label>名稱（選填）
+            <input id="pfName" placeholder="例如 台積電">
+          </label>
+          <label>成本
+            <input id="pfCost" type="number" step="0.01" required>
+          </label>
+          <label>買進日期
+            <input id="pfBuyDate" type="date" required>
+          </label>
+          <label>備註（選填）
+            <input id="pfNote">
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary">儲存</button>
+            <button type="button" id="pfClearBtn" class="btn-secondary">清空</button>
+          </div>
+        </form>
+        <div id="portfolioList" class="card-list"></div>
+      </section>
+
+      <section id="tab-stock" class="tab-panel">
+        <div class="search-bar">
+          <input id="stockSearchInput" placeholder="輸入股票代號或名稱搜尋（例如 2330 或 台積電）">
+          <div id="stockSearchResults" class="search-results"></div>
+        </div>
+        <div id="stockDetail">
+          <div class="empty-hint">搜尋並選擇一檔股票查看走勢</div>
+        </div>
+      </section>
+
+      <section id="tab-research" class="tab-panel">
+        <div class="sub-tabs">
+          <button class="sub-tab-btn active" data-subtab="backtest">回測</button>
+          <button class="sub-tab-btn" data-subtab="factorscan">因子相關性</button>
+        </div>
+
+        <div id="subtab-backtest" class="sub-tab-panel active">
+          <form id="backtestForm" class="form-card">
+            <h3>v16.10 Alpha 回測</h3>
+            <label>進場日 <input id="btStart" type="date" required></label>
+            <label>結束日（追蹤到） <input id="btEnd" type="date" required></label>
+            <label>流動性門檻（成交金額，元） <input id="btLiquidity" type="number" value="20000000"></label>
+            <label>目標報酬（%） <input id="btTarget" type="number" value="5" step="0.1"></label>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">開始回測</button>
+              <button type="button" id="btSaveBtn" class="btn-secondary" disabled>存成檔案</button>
+            </div>
+          </form>
+          <div id="backtestResult"></div>
+        </div>
+
+        <div id="subtab-factorscan" class="sub-tab-panel">
+          <form id="factorScanForm" class="form-card">
+            <h3>因子相關性掃描</h3>
+            <label>起始日（選填，留空用全部資料） <input id="fsStart" type="date"></label>
+            <label>結束日（選填） <input id="fsEnd" type="date"></label>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">開始掃描</button>
+              <button type="button" id="fsSaveBtn" class="btn-secondary" disabled>存成檔案</button>
+            </div>
+          </form>
+          <div id="factorScanResult"></div>
+        </div>
+      </section>
+
+      <section id="tab-admin" class="tab-panel">
+        <div class="admin-section">
+          <h3>每日自動排程</h3>
+          <form id="scheduleForm" class="form-card" style="margin-bottom:0;">
+            <label>啟動時間
+              <div class="time-row">
+                <select id="schHour"></select> <span>:</span> <select id="schMinute"></select>
+              </div>
+            </label>
+            <label class="checkbox-row"><input type="checkbox" id="schSkipWeekend"> 六日不執行</label>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">儲存排程</button>
+              <button type="button" id="schDisableBtn" class="btn-secondary">停用自動排程</button>
+            </div>
+          </form>
+          <div id="scheduleStatus" class="meta-bar"></div>
+
+          <h4>臨時停跑日（例如颱風假）</h4>
+          <form id="skipDateForm" class="inline-form">
+            <input type="date" id="skipDateInput" required>
+            <input type="text" id="skipDateReason" placeholder="原因（選填）">
+            <button type="submit" class="btn-secondary">新增</button>
+          </form>
+          <div id="skipDateList" class="chip-list"></div>
+
+          <div class="form-actions">
+            <button type="button" id="manualRunBtn" class="btn-primary">立即測試執行（抓今日資料＋重跑分析）</button>
+          </div>
+          <div id="manualRunResult"></div>
+        </div>
+
+        <div class="admin-section">
+          <h3>執行紀錄</h3>
+          <div id="runLogList" class="log-list"></div>
+        </div>
+
+        <div class="admin-section">
+          <h3>檔案管理</h3>
+          <div class="folder-tabs">
+            <button class="folder-tab-btn active" data-folder="archive">歷史封存</button>
+            <button class="folder-tab-btn" data-folder="reports">每日戰報</button>
+            <button class="folder-tab-btn" data-folder="regression">回測/研究</button>
+          </div>
+          <div class="form-actions">
+            <button type="button" id="archiveNowBtn" class="btn-secondary">立即封存目前 History 為 CSV</button>
+          </div>
+          <div id="fileList" class="file-list"></div>
+        </div>
+
+        <div class="admin-section">
+          <a id="spreadsheetLink" href="#">在 Google Sheets 開啟資料庫</a>
+        </div>
+      </section>
+
+    </main>
+
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-tab="dashboard"><span class="nav-icon">📊</span><span>今日戰報</span></button>
+      <button class="nav-btn" data-tab="portfolio"><span class="nav-icon">💼</span><span>持股管理</span></button>
+      <button class="nav-btn" data-tab="stock"><span class="nav-icon">🔍</span><span>個股分析</span></button>
+      <button class="nav-btn" data-tab="research"><span class="nav-icon">🧪</span><span>回測研究</span></button>
+      <button class="nav-btn" data-tab="admin"><span class="nav-icon">⚙️</span><span>後台管理</span></button>
+    </nav>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <?!= include('JavaScript'); ?>
+</body>
+</html>

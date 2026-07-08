@@ -1,0 +1,323 @@
+/**
+ * DataFetch.gs
+ * 對應 Colab Cell 1：每日向 TWSE 抓 T86(三大法人) / MI_INDEX(收盤行情) / BWIBBU_d(本益比等)，
+ * 清理、合併後 upsert 進 History 分頁。
+ *
+ * 與原本 Colab 版本的差異：
+ * - 原本是整段日期一次抓完、全部成功才落地存檔，任何一天失敗就整批放棄。
+ * - 這裡改成「一天抓完就立刻寫入 Sheet」，單日失敗不影響已成功的其他日期，
+ *   更符合 Apps Script 逐日觸發、且有 6 分鐘執行上限的執行模式。
+ */
+
+function fetchCsvText_(url) {
+  var resp = UrlFetchApp.fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    muteHttpExceptions: true
+  });
+  var code = resp.getResponseCode();
+  if (code !== 200) throw new Error('HTTP ' + code + ' - ' + url);
+  return resp.getContentText('Big5');
+}
+
+function splitLines_(text) {
+  return text.replace(/\r\n/g, '\n').split('\n');
+}
+
+function parseCsvLine_(line) {
+  if (!line || line.trim() === '') return [];
+  var parsed = Utilities.parseCsv(line);
+  return parsed.length ? parsed[0] : [];
+}
+
+function indexHeaders_(headers) {
+  var m = {};
+  headers.forEach(function (h, i) { m[String(h).trim()] = i; });
+  return m;
+}
+
+/** 對應 pandas 清理 '證券代號' 欄位：去掉 ="..." 包裝與多餘引號/空白。 */
+function cleanCode_(v) {
+  if (v === null || v === undefined) return '';
+  var s = String(v).split('="').join('');
+  s = s.replace(/^"+|"+$/g, '');
+  return s.trim();
+}
+
+function formatYmd_(date) {
+  return Utilities.formatDate(date, 'Asia/Taipei', 'yyyyMMdd');
+}
+
+function formatSlashDate_(date) {
+  return Utilities.formatDate(date, 'Asia/Taipei', 'yyyy/MM/dd');
+}
+
+// ============================================================
+// T86：三大法人買賣超
+// ============================================================
+function fetchT86_(dateStr) {
+  var url = 'https://www.twse.com.tw/rwd/zh/fund/T86?date=' + dateStr + '&selectType=ALL&response=csv';
+  var text = fetchCsvText_(url);
+  var lines = splitLines_(text);
+  if (lines.length < 4) throw new Error('T86 資料過少 (' + dateStr + ')');
+
+  var headers = parseCsvLine_(lines[1]); // pandas header=1
+  var idx = indexHeaders_(headers);
+  if (idx['證券代號'] === undefined) throw new Error('T86 找不到證券代號欄位 (' + dateStr + ')');
+
+  var rows = [];
+  for (var i = 2; i < lines.length; i++) {
+    var line = lines[i];
+    if (!line || line.indexOf(',') === -1) continue;
+    var fields = parseCsvLine_(line);
+    if (fields.length < headers.length - 2) continue; // 跳過頁尾註記列
+    var code = cleanCode_(fields[idx['證券代號']]);
+    if (!code) continue;
+
+    var dealerSelf = toNumber(fields[idx['自營商買賣超股數(自行買賣)']]);
+    var dealerHedge = toNumber(fields[idx['自營商買賣超股數(避險)']]);
+
+    rows.push({
+      '證券代號': code,
+      '證券名稱': (fields[idx['證券名稱']] || '').trim(),
+      '外資': toNumber(fields[idx['外陸資買賣超股數(不含外資自營商)']]),
+      '投信': toNumber(fields[idx['投信買賣超股數']]),
+      '自營商': dealerSelf + dealerHedge,
+      '三大法人買賣超股數': toNumber(fields[idx['三大法人買賣超股數']])
+    });
+  }
+  if (rows.length < 5) throw new Error('T86 資料過少或格式異常 (' + dateStr + ')');
+  return rows;
+}
+
+// ============================================================
+// MI_INDEX：每日收盤行情
+// ============================================================
+function fetchMiIndex_(dateStr) {
+  var url = 'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=' + dateStr + '&type=ALL&response=csv';
+  var text = fetchCsvText_(url);
+  var lines = splitLines_(text);
+
+  var startIdx = -1;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf('每日收盤行情(全部)') !== -1) { startIdx = i; break; }
+  }
+  if (startIdx === -1) throw new Error('MI_INDEX 找不到「每日收盤行情(全部)」區塊 (' + dateStr + ')');
+
+  var headerIdx = -1;
+  for (var j = startIdx; j < Math.min(startIdx + 10, lines.length); j++) {
+    if (lines[j].indexOf('證券代號') !== -1) { headerIdx = j; break; }
+  }
+  if (headerIdx === -1) throw new Error('MI_INDEX 找不到證券代號標題列 (' + dateStr + ')');
+
+  var cleaned = [];
+  for (var k = headerIdx; k < lines.length; k++) {
+    var line = lines[k];
+    var commaCount = (line.match(/,/g) || []).length;
+    if (commaCount >= 10) cleaned.push(line.split('="').join('"'));
+  }
+  if (cleaned.length < 2) throw new Error('MI_INDEX 資料為空或格式異常 (' + dateStr + ')');
+
+  var headers = parseCsvLine_(cleaned[0]).map(function (h) { return String(h).trim(); });
+  var idx = indexHeaders_(headers);
+  if (idx['證券代號'] === undefined) throw new Error('MI_INDEX 找不到證券代號欄位 (' + dateStr + ')');
+
+  var rows = [];
+  for (var r = 1; r < cleaned.length; r++) {
+    var fields = parseCsvLine_(cleaned[r]);
+    if (fields.length < headers.length - 2) continue;
+    var code = (fields[idx['證券代號']] || '').trim();
+    if (!code || code === '證券代號') continue;
+
+    rows.push({
+      '證券代號': code,
+      '證券名稱': idx['證券名稱'] !== undefined ? (fields[idx['證券名稱']] || '').trim() : '',
+      '成交股數': toNumber(fields[idx['成交股數']]),
+      '成交筆數': toNumber(fields[idx['成交筆數']]),
+      '成交金額': toNumber(fields[idx['成交金額']]),
+      '開盤價': toNumber(fields[idx['開盤價']]),
+      '最高價': toNumber(fields[idx['最高價']]),
+      '最低價': toNumber(fields[idx['最低價']]),
+      '收盤價': toNumber(fields[idx['收盤價']]),
+      '漲跌(+/-)': idx['漲跌(+/-)'] !== undefined ? (fields[idx['漲跌(+/-)']] || '').trim() : '',
+      '漲跌價差': toNumber(fields[idx['漲跌價差']]),
+      '最後揭示買價': toNumber(fields[idx['最後揭示買價']]),
+      '最後揭示買量': toNumber(fields[idx['最後揭示買量']]),
+      '最後揭示賣價': toNumber(fields[idx['最後揭示賣價']]),
+      '最後揭示賣量': toNumber(fields[idx['最後揭示賣量']]),
+      '本益比': toNumber(fields[idx['本益比']])
+    });
+  }
+  if (rows.length < 5) throw new Error('MI_INDEX 資料過少 (' + dateStr + ')');
+  return rows;
+}
+
+// ============================================================
+// BWIBBU_d：殖利率 / 本益比 / 股價淨值比
+// ============================================================
+function fetchBwibbu_(dateStr) {
+  var url = 'https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?date=' + dateStr + '&selectType=ALL&response=csv';
+  var text = fetchCsvText_(url);
+  var lines = splitLines_(text);
+
+  var headerIdx = -1;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf('證券代號') !== -1) { headerIdx = i; break; }
+  }
+  if (headerIdx === -1) throw new Error('BWIBBU 找不到證券代號標題列 (' + dateStr + ')');
+
+  var dataLines = [];
+  for (var k = headerIdx; k < lines.length; k++) {
+    var line = lines[k];
+    var commaCount = (line.match(/,/g) || []).length;
+    if (commaCount >= 5) dataLines.push(line);
+  }
+  if (dataLines.length < 2) throw new Error('BWIBBU 資料為空或格式異常 (' + dateStr + ')');
+
+  var headers = parseCsvLine_(dataLines[0]).map(function (h) { return String(h).trim(); });
+  var idx = indexHeaders_(headers);
+  if (idx['證券代號'] === undefined) throw new Error('BWIBBU 找不到證券代號欄位 (' + dateStr + ')');
+
+  var rows = [];
+  for (var r = 1; r < dataLines.length; r++) {
+    var fields = parseCsvLine_(dataLines[r]);
+    if (fields.length < headers.length - 2) continue;
+    var code = cleanCode_(fields[idx['證券代號']]);
+    if (!code) continue;
+    rows.push({
+      '證券代號': code,
+      '殖利率(%)': idx['殖利率(%)'] !== undefined ? toNumber(fields[idx['殖利率(%)']]) : 0,
+      '本益比': idx['本益比'] !== undefined ? toNumber(fields[idx['本益比']]) : 0,
+      '股價淨值比': idx['股價淨值比'] !== undefined ? toNumber(fields[idx['股價淨值比']]) : 0,
+      '財報年/季': idx['財報年/季'] !== undefined ? (fields[idx['財報年/季']] || '').trim() : ''
+    });
+  }
+  return rows;
+}
+
+/** 抓單一日期，合併 T86 (inner) + MI_INDEX + BWIBBU (left)，回傳 History 欄位格式的列陣列。 */
+function fetchAndMergeOneDay_(dateStr, formattedDate) {
+  var t86Rows = fetchT86_(dateStr);
+  var miRows = fetchMiIndex_(dateStr);
+  var bwRows = fetchBwibbu_(dateStr);
+
+  var miByCode = {};
+  miRows.forEach(function (r) { miByCode[r['證券代號']] = r; });
+  var bwByCode = {};
+  bwRows.forEach(function (r) { bwByCode[r['證券代號']] = r; });
+
+  var merged = [];
+  t86Rows.forEach(function (t) {
+    var mi = miByCode[t['證券代號']];
+    if (!mi) return; // inner join：MI_INDEX 沒有這檔就跳過（比照原本 pandas inner merge）
+    var bw = bwByCode[t['證券代號']] || {};
+    merged.push({
+      '日期': formattedDate,
+      '證券代號': t['證券代號'],
+      '證券名稱': t['證券名稱'] || mi['證券名稱'] || '',
+      '外資': t['外資'],
+      '投信': t['投信'],
+      '自營商': t['自營商'],
+      '三大法人買賣超股數': t['三大法人買賣超股數'],
+      '成交股數': mi['成交股數'],
+      '成交筆數': mi['成交筆數'],
+      '成交金額': mi['成交金額'],
+      '開盤價': mi['開盤價'],
+      '最高價': mi['最高價'],
+      '最低價': mi['最低價'],
+      '收盤價': mi['收盤價'],
+      '漲跌(+/-)': mi['漲跌(+/-)'],
+      '漲跌價差': mi['漲跌價差'],
+      '最後揭示買價': mi['最後揭示買價'],
+      '最後揭示買量': mi['最後揭示買量'],
+      '最後揭示賣價': mi['最後揭示賣價'],
+      '最後揭示賣量': mi['最後揭示賣量'],
+      '殖利率(%)': bw['殖利率(%)'] !== undefined ? bw['殖利率(%)'] : 0,
+      '本益比': bw['本益比'] !== undefined ? bw['本益比'] : mi['本益比'],
+      '股價淨值比': bw['股價淨值比'] !== undefined ? bw['股價淨值比'] : 0,
+      '財報年/季': bw['財報年/季'] || ''
+    });
+  });
+  if (merged.length === 0) throw new Error('T86 與 MI_INDEX 合併後沒有資料 (' + dateStr + ')');
+  return merged;
+}
+
+/**
+ * 補抓一段日期區間（跳過六日），每抓完一天立刻 upsert 進 History。
+ * 有 4.5 分鐘內部時間預算，超過就回傳 done:false + nextStart，前端可再呼叫一次繼續。
+ */
+function backfillHistory(startStr, endStr) {
+  var start = new Date(startStr + 'T00:00:00');
+  var end = new Date(endStr + 'T00:00:00');
+  var scriptStart = Date.now();
+  var TIME_BUDGET_MS = 4.5 * 60 * 1000;
+
+  var succeeded = [];
+  var failed = [];
+  var cur = new Date(start);
+
+  while (cur.getTime() <= end.getTime()) {
+    if (Date.now() - scriptStart > TIME_BUDGET_MS) {
+      return { done: false, succeeded: succeeded, failed: failed, nextStart: formatYmd_(cur) };
+    }
+    var dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) {
+      var ymd = formatYmd_(cur);
+      var slash = formatSlashDate_(cur);
+      try {
+        var rows = fetchAndMergeOneDay_(ymd, slash);
+        upsertHistoryRows_(rows);
+        succeeded.push(ymd);
+      } catch (e) {
+        failed.push({ date: ymd, error: String(e.message || e) });
+      }
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return { done: true, succeeded: succeeded, failed: failed, nextStart: null };
+}
+
+/** 手動「立即更新今日資料」按鈕用。 */
+function runManualFetchToday() {
+  var startTime = Date.now();
+  var today = new Date();
+  var ymd = formatYmd_(today);
+  var slash = formatSlashDate_(today);
+  try {
+    var rows = fetchAndMergeOneDay_(ymd, slash);
+    var result = upsertHistoryRows_(rows);
+    var dur = Math.round((Date.now() - startTime) / 1000);
+    logRun_('手動更新', '成功', '已更新 ' + ymd + '，' + rows.length + ' 檔股票', dur);
+    return { ok: true, date: ymd, count: rows.length, totalRows: result.totalRows };
+  } catch (e) {
+    var dur2 = Math.round((Date.now() - startTime) / 1000);
+    logRun_('手動更新', '失敗', String(e.message || e), dur2);
+    return { ok: false, date: ymd, error: String(e.message || e) };
+  }
+}
+
+/** 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。 */
+function scheduledDailyFetch() {
+  var startTime = Date.now();
+  var today = new Date();
+  var skip = shouldSkipToday_(today);
+  if (skip.skip) {
+    logRun_('每日排程', '略過', skip.reason, 0);
+    return;
+  }
+  var ymd = formatYmd_(today);
+  var slash = formatSlashDate_(today);
+  try {
+    var rows = fetchAndMergeOneDay_(ymd, slash);
+    upsertHistoryRows_(rows);
+    try {
+      runAnalysisAndSave();
+    } catch (analysisErr) {
+      logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);
+    }
+    var dur = Math.round((Date.now() - startTime) / 1000);
+    logRun_('每日排程', '成功', '已更新 ' + ymd + '，' + rows.length + ' 檔股票', dur);
+  } catch (e) {
+    var dur2 = Math.round((Date.now() - startTime) / 1000);
+    logRun_('每日排程', '失敗', String(e.message || e), dur2);
+  }
+}
