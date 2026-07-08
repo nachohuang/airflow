@@ -114,6 +114,53 @@ MA60 / IBF20 / 回測，不用重新一天一天補抓。
 抓當天資料、重跑分析、寫執行紀錄。如果那天證交所延後公布資料導致抓取失敗，
 「執行紀錄」會看到失敗訊息，可以回來調整時間或改天手動補跑。
 
+## 之後改完程式碼要怎麼自動推上去（例如在 Cloud Shell）
+
+`deploy.sh` 把「推程式碼」跟「讓正式網址生效」這兩步包起來了。跟你現有那個專案的部署方式一樣，
+**用同一個 Cloud Shell 就可以，不需要開別的 shell**——Cloud Shell 是綁在你 Google 帳號底下的一台持久化
+小型機器，同時放好幾個專案的 repo 完全沒問題，各自一個資料夾、各自一份 `.clasp.json`，
+`cd` 進哪個資料夾就是在對哪個專案操作，彼此不會互相影響。唯一要注意的是**不要**把兩個專案的
+`.clasp.json`（裡面是 scriptId）搞混。
+
+**第一次設定（只需要做一次）：**
+
+```bash
+# 在 Cloud Shell 裡
+git clone <這個 repo 的網址>
+cd airflow/apps-script
+npm install -g @google/clasp     # 如果 Cloud Shell 裡還沒裝過
+clasp login                      # 跳出瀏覽器授權（Cloud Shell 內建瀏覽器登入沒問題）
+
+# 二選一：
+clasp create --type webapp --title "TWSE 法人動能選股" --rootDir src   # 還沒建立過專案
+# 或者：cp .clasp.json.example .clasp.json 然後填入你已經在網頁上建立好的 scriptId
+
+# 想讓正式 /exec 網址也能被腳本更新的話，先查一次 deploymentId：
+clasp deployments
+```
+
+**之後每次要推新版本：**
+
+```bash
+cd airflow/apps-script
+git pull                                          # 拉最新程式碼（如果我有再幫你改）
+CLASP_DEPLOYMENT_ID=你查到的deploymentId ./deploy.sh
+```
+
+不加 `CLASP_DEPLOYMENT_ID` 也可以執行，只是那樣只會更新「HEAD/`/dev` 測試網址」，
+手機在用的正式 `/exec` 網址不會變——這是 Apps Script 部署機制本身的行為（`clasp push`
+只更新程式碼本體，要 `clasp deploy -i <deploymentId>` 才會把新版本套用到已發佈的 `/exec` 網址上），
+不是這個腳本的限制。
+
+**我這邊需要什麼資訊嗎？** 不需要你把任何密碼、OAuth token 貼給我——`clasp login` 這個授權動作
+一定要在你自己能完成 Google 登入畫面的環境做（Cloud Shell 正合適），我這個 remote sandbox
+沒有瀏覽器，沒辦法也不應該幫你完成登入。我只需要知道：
+1. 你是要新建一個 Apps Script 專案，還是已經有一個現成的 scriptId 要沿用？
+2. 如果之後想要「每次 git push 這個 repo 就自動部署」（不用手動進 Cloud Shell 跑），
+   我可以另外幫你寫一份 GitHub Actions workflow，但那需要你自己把 `clasp login` 產生的
+   `~/.clasprc.json` 內容存成 GitHub repo 的 Secret（一樣不透過我，直接在 GitHub 網頁設定），
+   要不要做這個我可以再幫你評估。
+
 ## 測試
 
 `Utils.gs` / `Analysis.gs` / `FactorScan.gs` / `Backtest.gs` 裡的核心運算都是純函式（不呼叫任何
