@@ -15,7 +15,10 @@ var CONFIG = {
     TRIGGER_ID: 'TRIGGER_ID',
     TRIGGER_HOUR: 'TRIGGER_HOUR',
     TRIGGER_MINUTE: 'TRIGGER_MINUTE',
-    SKIP_WEEKENDS: 'SKIP_WEEKENDS'
+    SKIP_WEEKENDS: 'SKIP_WEEKENDS',
+    ANTHROPIC_API_KEY: 'ANTHROPIC_API_KEY',
+    AI_DAILY_ENABLED: 'AI_DAILY_ENABLED',
+    AI_DAILY_TOP_N: 'AI_DAILY_TOP_N'
   },
 
   ROOT_FOLDER_NAME: 'TWSE_App',
@@ -30,8 +33,16 @@ var CONFIG = {
     RUN_LOG: 'RunLog',
     SKIP_DATES: 'SkipDates',
     BACKTEST: 'BacktestResults',
-    FACTOR_SCAN: 'FactorScanResults'
+    FACTOR_SCAN: 'FactorScanResults',
+    AI_DIAGNOSIS: 'AiDiagnosis'
   },
+
+  AI_DIAGNOSIS_COLUMNS: ['日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '最終建議', '診斷內容', '時間戳記'],
+
+  // Claude API 設定：模型可依需要換成 claude-opus-4-8 (更貴更強) 或 claude-haiku-4-5-20251001 (更便宜)
+  CLAUDE_MODEL: 'claude-sonnet-5',
+  CLAUDE_MAX_TOKENS: 3000,
+  AI_DAILY_TOP_N_DEFAULT: 3,
 
   // History 分頁欄位 - 對應 Colab final_df 的 desired_final_columns
   HISTORY_COLUMNS: [
@@ -175,6 +186,7 @@ function initializeProject() {
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.REPORTS, CONFIG.REPORT_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.RUN_LOG, CONFIG.RUN_LOG_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.SKIP_DATES, CONFIG.SKIP_DATES_COLUMNS);
+  ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.AI_DIAGNOSIS, CONFIG.AI_DIAGNOSIS_COLUMNS);
 
   // 預設分頁 'Sheet1' 若還存在且是空的，就把它砍掉，保持整潔
   var def = ss.getSheetByName('工作表1') || ss.getSheetByName('Sheet1');

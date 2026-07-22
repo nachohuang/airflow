@@ -159,6 +159,29 @@
         </div>
 
         <div class="admin-section">
+          <h3>AI 深度診斷設定</h3>
+          <div class="meta-bar">
+            對戰報裡的個股呼叫 Claude API 做財報/籌碼/技術面的第二層深度診斷。
+            需要你自己的 Anthropic API 金鑰，每次診斷會產生實際 API 費用（大約幾分錢等級）。
+          </div>
+          <form id="aiKeyForm" class="inline-form">
+            <input type="password" id="aiKeyInput" placeholder="貼上 Anthropic API 金鑰（sk-ant-...）">
+            <button type="submit" class="btn-primary">儲存金鑰</button>
+          </form>
+          <div id="aiKeyStatus" class="meta-bar"></div>
+
+          <form id="aiDailyForm" class="form-card" style="margin-top:10px;">
+            <label class="checkbox-row"><input type="checkbox" id="aiDailyEnabled"> 每日排程自動產生 AI 診斷</label>
+            <label>每日診斷前幾名（依 Armor_Score）
+              <input id="aiDailyTopN" type="number" min="1" max="10" value="3">
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">儲存設定</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="admin-section">
           <h3>執行紀錄</h3>
           <div id="runLogList" class="log-list"></div>
         </div>

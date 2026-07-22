@@ -102,21 +102,89 @@
       }
       listEl.innerHTML = result.report.map(function (r) {
         var color = STRATEGY_HINT[r['操作策略']] || 'var(--text)';
+        var code = r['證券代號'];
         return '<div class="stock-card">' +
           '<div class="stock-card-head">' +
-          '<span><span class="stock-card-code">' + escapeHtml(r['證券代號']) + '</span>' +
+          '<span><span class="stock-card-code">' + escapeHtml(code) + '</span>' +
           '<span class="stock-card-name">' + escapeHtml(r['證券名稱']) + '</span></span>' +
           '<span class="stock-card-score">' + fmtNum(r['Armor_Score'], 1) + '</span>' +
           '</div>' +
           '<div class="stock-card-strategy" style="color:' + color + '">' + escapeHtml(r['操作策略']) + ' · ' + escapeHtml(r['建議動作']) + '</div>' +
           '<div class="stock-card-note">' + escapeHtml(r['實相解讀']) + '</div>' +
+          '<div class="form-actions">' +
           '<a class="stock-card-link" href="' + escapeHtml(r['監控連結']) + '" target="_blank" rel="noopener">查看個股詳情 ↗</a>' +
+          '<button type="button" class="btn-secondary ai-diagnose-btn" data-code="' + escapeHtml(code) + '">🧠 AI 深度診斷</button>' +
+          '</div>' +
+          '<div id="aiResult-' + escapeHtml(code) + '"></div>' +
           '</div>';
       }).join('');
+      listEl.querySelectorAll('.ai-diagnose-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          runAiDiagnosisForButton_(btn.getAttribute('data-code'), document.getElementById('aiResult-' + btn.getAttribute('data-code')));
+        });
+      });
     }).catch(function (err) {
       metaEl.textContent = '';
       listEl.innerHTML = errorBox(err);
     });
+  }
+
+  /** 供 Dashboard 卡片與個股分析頁共用：跑一次 AI 診斷並把結果渲染進指定容器。 */
+  function runAiDiagnosisForButton_(code, containerEl) {
+    containerEl.innerHTML = '<div class="loading">AI 診斷中，會需要一點時間（要呼叫 Claude API + 抓 Goodinfo）...</div>';
+    withSpin(callServer('runAiDiagnosis', [code])).then(function (results) {
+      var res = results[0];
+      if (!res.ok) { containerEl.innerHTML = errorBox(res.error); return; }
+      containerEl.innerHTML =
+        '<div class="ai-report">' +
+        '<div>最終建議：<span class="ai-verdict-badge">' + escapeHtml(res.verdict) + '</span></div>' +
+        renderMarkdownLite(res.text) +
+        '</div>';
+    }).catch(function (err) { containerEl.innerHTML = errorBox(err); });
+  }
+
+  /** 輕量 markdown -> HTML（只處理 AI 診斷模板用到的標題/表格/引用/粗體/清單，不是完整 markdown 解析器）。 */
+  function renderMarkdownLite(md) {
+    if (!md) return '';
+    var lines = String(md).split(/\r?\n/);
+    var out = [];
+    var tableRows = [];
+
+    function inlineMd(s) {
+      return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    }
+    function flushTable() {
+      if (tableRows.length === 0) return;
+      var rowsHtml = tableRows.map(function (cells, idx) {
+        var tag = idx === 0 ? 'th' : 'td';
+        return '<tr>' + cells.map(function (c) { return '<' + tag + '>' + inlineMd(c.trim()) + '</' + tag + '>'; }).join('') + '</tr>';
+      }).join('');
+      out.push('<div class="table-scroll"><table class="simple-table">' + rowsHtml + '</table></div>');
+      tableRows = [];
+    }
+
+    lines.forEach(function (line) {
+      var tableMatch = line.match(/^\s*\|(.+)\|\s*$/);
+      if (tableMatch) {
+        var cells = tableMatch[1].split('|');
+        var isSeparator = cells.every(function (c) { return /^\s*:?-+:?\s*$/.test(c); });
+        if (!isSeparator) tableRows.push(cells);
+        return;
+      }
+      flushTable();
+
+      if (/^\s*---+\s*$/.test(line)) { out.push('<hr>'); return; }
+      var h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { out.push('<h' + (h[1].length <= 2 ? 4 : 5) + '>' + inlineMd(h[2]) + '</h' + (h[1].length <= 2 ? 4 : 5) + '>'); return; }
+      var bq = line.match(/^>\s?(.*)$/);
+      if (bq) { out.push('<blockquote>' + inlineMd(bq[1]) + '</blockquote>'); return; }
+      var li = line.match(/^\s*[*-]\s+(.*)$/);
+      if (li) { out.push('<div class="md-li">• ' + inlineMd(li[1]) + '</div>'); return; }
+      if (line.trim() === '') return;
+      out.push('<p>' + inlineMd(line) + '</p>');
+    });
+    flushTable();
+    return out.join('\n');
   }
 
   // ---------- 持股管理 ----------
@@ -246,11 +314,31 @@
         '<div class="chart-card"><h4>法人買賣超（投信+外資+自營商合計，股數）</h4>' +
         '<canvas id="instChartCanvas" height="160"></canvas></div>' +
         '<div class="chart-card"><h4>歷史 Armor_Score / 操作策略（每日戰報累積紀錄）</h4>' +
-        '<div class="table-scroll">' + renderScoreHistoryTable(data.scoreHistory) + '</div></div>';
+        '<div class="table-scroll">' + renderScoreHistoryTable(data.scoreHistory) + '</div></div>' +
+        '<div class="chart-card"><h4>AI 深度診斷</h4>' +
+        '<div class="form-actions"><button type="button" class="btn-primary" id="stockAiDiagnoseBtn">🧠 針對 ' + escapeHtml(data.code) + ' 跑一次 AI 診斷</button></div>' +
+        '<div id="stockAiResult"></div>' +
+        '<div id="stockAiHistory"></div></div>';
 
       renderPriceChart(data.series);
       renderInstChart(data.series);
+      document.getElementById('stockAiDiagnoseBtn').addEventListener('click', function () {
+        runAiDiagnosisForButton_(data.code, document.getElementById('stockAiResult'));
+      });
+      loadAiDiagnosisHistory_(data.code);
     }).catch(function (err) { detailEl.innerHTML = errorBox(err); });
+  }
+
+  function loadAiDiagnosisHistory_(code) {
+    var el = document.getElementById('stockAiHistory');
+    if (!el) return;
+    callServer('getAiDiagnosisHistoryForCode', code).then(function (history) {
+      if (!history.length) { el.innerHTML = '<div class="empty-hint">尚無 AI 診斷歷史紀錄</div>'; return; }
+      el.innerHTML = '<h4 style="margin-top:12px;">過去診斷紀錄</h4>' + history.map(function (h) {
+        return '<div class="ai-report"><div>' + escapeHtml(h.date) + '　最終建議：<span class="ai-verdict-badge">' + escapeHtml(h.verdict) + '</span></div>' +
+          renderMarkdownLite(h.text) + '</div>';
+      }).join('');
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
   }
 
   function renderScoreHistoryTable(rows) {
@@ -393,8 +481,38 @@
   function loadAdmin() {
     populateTimeSelects();
     document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
-    return Promise.all([loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder)]);
+    return Promise.all([loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder), loadAiSettings()]);
   }
+
+  // ---------- AI 深度診斷設定 ----------
+  function loadAiSettings() {
+    return callServer('getAiSettings').then(function (s) {
+      document.getElementById('aiKeyStatus').textContent = s.hasApiKey ? '✅ 已設定 API 金鑰' : '尚未設定 API 金鑰';
+      document.getElementById('aiDailyEnabled').checked = s.dailyEnabled;
+      document.getElementById('aiDailyTopN').value = s.topN;
+    });
+  }
+
+  document.getElementById('aiKeyForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var key = document.getElementById('aiKeyInput').value.trim();
+    if (!key) return;
+    withSpin(callServer('setAnthropicApiKey', key)).then(function () {
+      document.getElementById('aiKeyInput').value = '';
+      loadAiSettings();
+      alert('✅ 已儲存 API 金鑰');
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  document.getElementById('aiDailyForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var enabled = document.getElementById('aiDailyEnabled').checked;
+    var topN = parseInt(document.getElementById('aiDailyTopN').value, 10) || 3;
+    withSpin(callServer('setAiDailySettings', enabled, topN)).then(function () {
+      loadAiSettings();
+      alert('✅ 已儲存 AI 診斷排程設定');
+    }).catch(function (err) { alert(err.message || err); });
+  });
 
   function loadScheduleSettings() {
     return callServer('getScheduleSettings').then(function (s) {

@@ -320,6 +320,11 @@ function scheduledDailyFetch() {
     } catch (analysisErr) {
       logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);
     }
+    try {
+      runDailyAiDiagnosisForTopPicks();
+    } catch (aiErr) {
+      logRun_('每日排程-AI診斷', '失敗', String(aiErr.message || aiErr), 0);
+    }
     var dur = Math.round((Date.now() - startTime) / 1000);
     logRun_('每日排程', '成功', '已更新 ' + ymd + '，' + rows.length + ' 檔股票', dur);
   } catch (e) {

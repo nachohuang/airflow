@@ -10,6 +10,7 @@ Google Apps Script Web App。資料庫改用 Google Sheets，報表/回測結果
 
 1. **今日戰報**：對應 Colab Cell 2（v17.0）。每天自動（或手動）算出 `Armor_Score`，
    針對持股給「續抱/止盈止損」建議，針對觀察名單給「趨勢啟動/趨勢領航」買進建議。
+   每檔訊號都有「🧠 AI 深度診斷」按鈕，呼叫 Claude API 做財報/籌碼/技術三流派辯證分析（見下方「AI 深度診斷」）。
 2. **持股管理**：對應原本寫死在程式碼裡的 `user_portfolio`，現在可以直接在手機上新增/編輯/刪除持股
    （代號、成本、買進日期），並即時顯示現價損益。
 3. **個股分析**：搜尋任一股票代號，看收盤價 + MA5/MA20/MA60 走勢圖、法人買賣超柱狀圖，
@@ -204,6 +205,31 @@ CLASP_DEPLOYMENT_ID=你查到的deploymentId ./deploy-stock.sh
    我可以另外幫你寫一份 GitHub Actions workflow，但那需要你自己把 `clasp login` 產生的
    `~/.clasprc.json` 內容存成 GitHub repo 的 Secret（一樣不透過我，直接在 GitHub 網頁設定），
    要不要做這個我可以再幫你評估。
+
+## AI 深度診斷
+
+對「今日戰報」裡的個股（或個股分析頁面查到的任一股票），可以呼叫 Claude API 做一次財報/籌碼/技術面的
+「第二層思考」深度診斷——這是把你原本會不定期手動貼給 AI 分析的 prompt 直接做進 App 裡，
+輸出格式（5年+TTM財務健檢表、三大流派辯證、CoVE 自我驗證、最終決策）完全比照你提供的原始 prompt，
+只有第 1 條規則做了調整：原本假設模型自己能上網查 Goodinfo，但 Claude API 預設沒有瀏覽能力，
+所以改成 Apps Script 自己抓 Goodinfo 頁面文字（`fetchGoodinfoText_`，粗略的 HTML 去標籤，
+抓不到 Goodinfo 動態載入的部分）當作參考資料一起餵給模型。
+
+**設定步驟：**
+1. 到 [console.anthropic.com](https://console.anthropic.com) 申請一組 API 金鑰。
+2. 打開 App →「後台管理」→「AI 深度診斷設定」→ 貼上金鑰 →「儲存金鑰」
+   （金鑰存在 Script Properties，前端拿不到、也不會進 git）。
+3. 「今日戰報」每張卡片、「個股分析」頁面都有「🧠 AI 深度診斷」按鈕，按下去即時呼叫一次。
+4. 如果想要每天排程自動對 Armor_Score 前幾名的訊號跑一次，勾選「每日排程自動產生 AI 診斷」並設定要跑前幾名，
+   會在 `scheduledDailyFetch()` 抓完資料、跑完分析之後自動接著跑。
+
+**成本提醒：** 每次診斷都是一次真實的 Claude API 呼叫，會計入你自己 Anthropic 帳號的用量
+（單次診斷落在幾分錢等級，不會太貴，但不是免費的，這點跟 App 其他部分都跑在 Apps Script 免費額度內不一樣）。
+開啟「每日自動」前建議先手動試個幾次，確認輸出品質跟費用可以接受。
+
+**Goodinfo 抓取的限制：** 用的是最陽春的「抓 HTML 後用正則去標籤」，Goodinfo 頁面有一部分內容
+是前端 JS 動態載入的，這部分抓不到；抓不到或抓取失敗時模型還是會產出診斷，只是那部分會註明
+「缺乏即時資料」，不會讓整個流程中斷或編造數字。
 
 ## 測試
 
