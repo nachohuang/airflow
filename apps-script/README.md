@@ -208,28 +208,38 @@ CLASP_DEPLOYMENT_ID=你查到的deploymentId ./deploy-stock.sh
 
 ## AI 深度診斷
 
-對「今日戰報」裡的個股（或個股分析頁面查到的任一股票），可以呼叫 Claude API 做一次財報/籌碼/技術面的
+對「今日戰報」裡的個股（或個股分析頁面查到的任一股票），可以呼叫 AI 做一次財報/籌碼/技術面的
 「第二層思考」深度診斷——這是把你原本會不定期手動貼給 AI 分析的 prompt 直接做進 App 裡，
-輸出格式（5年+TTM財務健檢表、三大流派辯證、CoVE 自我驗證、最終決策）完全比照你提供的原始 prompt，
-只有第 1 條規則做了調整：原本假設模型自己能上網查 Goodinfo，但 Claude API 預設沒有瀏覽能力，
-所以改成 Apps Script 自己抓 Goodinfo 頁面文字（`fetchGoodinfoText_`，粗略的 HTML 去標籤，
-抓不到 Goodinfo 動態載入的部分）當作參考資料一起餵給模型。
+輸出格式（5年+TTM財務健檢表、三大流派辯證、CoVE 自我驗證、最終決策）完全比照你提供的原始 prompt。
+Claude 跟 Gemini 都支援，兩邊金鑰都設定的話可以在後台管理隨時切換／比較輸出品質：
+
+- **Claude**：沒有原生瀏覽能力，所以由 Apps Script 自己抓 Goodinfo 頁面文字
+  （`fetchGoodinfoText_`，粗略的 HTML 去標籤，抓不到 Goodinfo 動態載入的部分）當作參考資料餵給模型
+  （這也是原始 prompt 第 1 條規則的調整之處，原版假設模型自己能上網查）。
+- **Gemini**：呼叫時開啟了 Google 原生的 `google_search` grounding 工具，模型自己也能查即時資訊，
+  不完全依賴我們餵的 Goodinfo 摘要（兩者會一起送給模型參考）。
 
 **設定步驟：**
-1. 到 [console.anthropic.com](https://console.anthropic.com) 申請一組 API 金鑰。
-2. 打開 App →「後台管理」→「AI 深度診斷設定」→ 貼上金鑰 →「儲存金鑰」
+1. Claude：到 [console.anthropic.com](https://console.anthropic.com) 申請一組 API 金鑰；
+   Gemini：到 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) 申請（通常有免費額度）。
+2. 打開 App →「後台管理」→「AI 深度診斷設定」→ 選要用哪個 AI → 貼上對應的金鑰 →「儲存」
    （金鑰存在 Script Properties，前端拿不到、也不會進 git）。
 3. 「今日戰報」每張卡片、「個股分析」頁面都有「🧠 AI 深度診斷」按鈕，按下去即時呼叫一次。
 4. 如果想要每天排程自動對 Armor_Score 前幾名的訊號跑一次，勾選「每日排程自動產生 AI 診斷」並設定要跑前幾名，
-   會在 `scheduledDailyFetch()` 抓完資料、跑完分析之後自動接著跑。
+   會在 `scheduledDailyFetch()` 抓完資料、跑完分析之後自動接著跑（用的是當下設定的那個 AI 供應商）。
 
-**成本提醒：** 每次診斷都是一次真實的 Claude API 呼叫，會計入你自己 Anthropic 帳號的用量
-（單次診斷落在幾分錢等級，不會太貴，但不是免費的，這點跟 App 其他部分都跑在 Apps Script 免費額度內不一樣）。
+**成本提醒：** 每次診斷都是一次真實的 API 呼叫。Claude 沒有免費額度（單次落在幾分錢等級）；
+Gemini 透過 AI Studio 申請的 key 通常有免費額度，一天呼叫幾次的用量大概率整個月都在額度內。
 開啟「每日自動」前建議先手動試個幾次，確認輸出品質跟費用可以接受。
 
-**Goodinfo 抓取的限制：** 用的是最陽春的「抓 HTML 後用正則去標籤」，Goodinfo 頁面有一部分內容
+**Goodinfo 抓取的限制（Claude 路徑）：** 用的是最陽春的「抓 HTML 後用正則去標籤」，Goodinfo 頁面有一部分內容
 是前端 JS 動態載入的，這部分抓不到；抓不到或抓取失敗時模型還是會產出診斷，只是那部分會註明
 「缺乏即時資料」，不會讓整個流程中斷或編造數字。
+
+**Gemini 模型名稱會過期：** `Config.gs` 的 `GEMINI_MODEL` 是寫死的模型名稱字串，Google 三不五時會
+淘汰舊模型、推出新版。如果 Gemini 呼叫失敗且錯誤是 HTTP 404，去
+[ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models) 查目前可用的模型名稱，
+改掉 `GEMINI_MODEL` 這個常數就好。
 
 ## 測試
 

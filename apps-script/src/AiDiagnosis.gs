@@ -85,11 +85,35 @@ function clearAnthropicApiKey() {
   return { ok: true };
 }
 
+function setGeminiApiKey(key) {
+  var trimmed = String(key || '').trim();
+  if (!trimmed) throw new Error('API 金鑰不可為空');
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.GEMINI_API_KEY, trimmed);
+  logRun_('AI設定', '成功', '已更新 Gemini API 金鑰', 0);
+  return { ok: true };
+}
+
+function clearGeminiApiKey() {
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.GEMINI_API_KEY);
+  logRun_('AI設定', '成功', '已清除 Gemini API 金鑰', 0);
+  return { ok: true };
+}
+
+/** 切換要用 Claude 還是 Gemini 來跑 AI 深度診斷。 */
+function setAiProvider(provider) {
+  var valid = (provider === 'gemini') ? 'gemini' : 'claude';
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.AI_PROVIDER, valid);
+  logRun_('AI設定', '成功', 'AI 診斷供應商切換為：' + (valid === 'gemini' ? 'Gemini' : 'Claude'), 0);
+  return getAiSettings();
+}
+
 /** 供前端顯示狀態用：只回傳「有沒有設定」，絕不回傳金鑰本身。 */
 function getAiSettings() {
   var props = PropertiesService.getScriptProperties();
   return {
-    hasApiKey: !!props.getProperty(CONFIG.PROP_KEYS.ANTHROPIC_API_KEY),
+    hasClaudeKey: !!props.getProperty(CONFIG.PROP_KEYS.ANTHROPIC_API_KEY),
+    hasGeminiKey: !!props.getProperty(CONFIG.PROP_KEYS.GEMINI_API_KEY),
+    provider: props.getProperty(CONFIG.PROP_KEYS.AI_PROVIDER) === 'gemini' ? 'gemini' : 'claude',
     dailyEnabled: props.getProperty(CONFIG.PROP_KEYS.AI_DAILY_ENABLED) === 'true',
     topN: parseInt(props.getProperty(CONFIG.PROP_KEYS.AI_DAILY_TOP_N), 10) || CONFIG.AI_DAILY_TOP_N_DEFAULT
   };
@@ -195,6 +219,50 @@ function callClaude_(systemPrompt, userPrompt) {
   return (json.content || []).map(function (block) { return block.text || ''; }).join('\n');
 }
 
+/**
+ * Gemini（Generative Language API / Google AI Studio 的 key）呼叫。
+ * 有開啟 google_search grounding，讓模型自己也能查即時資訊，不是只靠我們餵的 Goodinfo 摘要。
+ * 如果 CONFIG.GEMINI_MODEL 這個模型名稱被 Google 淘汰導致 404，去
+ * https://ai.google.dev/gemini-api/docs/models 查目前可用的模型名稱，改 Config.gs 就好。
+ */
+function callGemini_(systemPrompt, userPrompt) {
+  var apiKey = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.GEMINI_API_KEY);
+  if (!apiKey) throw new Error('尚未設定 Gemini API 金鑰，請先到後台管理輸入。');
+
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + CONFIG.GEMINI_MODEL +
+    ':generateContent?key=' + encodeURIComponent(apiKey);
+
+  var resp = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      tools: [{ google_search: {} }],
+      generationConfig: { maxOutputTokens: CONFIG.GEMINI_MAX_TOKENS }
+    }),
+    muteHttpExceptions: true
+  });
+
+  var code = resp.getResponseCode();
+  var body = resp.getContentText('UTF-8');
+  if (code !== 200) {
+    throw new Error('Gemini API 呼叫失敗 HTTP ' + code + '：' + body.slice(0, 300));
+  }
+  var json = JSON.parse(body);
+  var candidate = (json.candidates || [])[0];
+  if (!candidate || !candidate.content || !candidate.content.parts) {
+    throw new Error('Gemini 回傳格式異常（可能被安全過濾擋下或模型無回應）：' + body.slice(0, 300));
+  }
+  return candidate.content.parts.map(function (p) { return p.text || ''; }).join('');
+}
+
+/** 依目前設定的 provider 分派到 Claude 或 Gemini，其餘程式碼都呼叫這個，不用管實際用哪個供應商。 */
+function callLlm_(systemPrompt, userPrompt) {
+  var provider = getAiSettings().provider;
+  return provider === 'gemini' ? callGemini_(systemPrompt, userPrompt) : callClaude_(systemPrompt, userPrompt);
+}
+
 function extractVerdict_(text) {
   var options = ['強力買入', '分批布局', '觀望不追', '立刻退出'];
   for (var i = 0; i < options.length; i++) {
@@ -264,7 +332,7 @@ function runAiDiagnosis(codes) {
 
       var goodinfoText = fetchGoodinfoText_(code);
       var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, timestampLabel);
-      var diagnosisText = callClaude_(AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
+      var diagnosisText = callLlm_(AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
       var verdict = extractVerdict_(diagnosisText);
 
       upsertAiDiagnosisRow_({
@@ -295,7 +363,8 @@ function runAiDiagnosis(codes) {
 function runDailyAiDiagnosisForTopPicks() {
   var settings = getAiSettings();
   if (!settings.dailyEnabled) return { skipped: true, reason: '每日自動 AI 診斷未開啟' };
-  if (!settings.hasApiKey) return { skipped: true, reason: '尚未設定 Anthropic API 金鑰' };
+  var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
+  if (!hasKey) return { skipped: true, reason: '尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰' };
 
   var reportRows = readSheetObjects_(getReportsSheet_());
   var latestDate = null;

@@ -487,11 +487,19 @@
   // ---------- AI 深度診斷設定 ----------
   function loadAiSettings() {
     return callServer('getAiSettings').then(function (s) {
-      document.getElementById('aiKeyStatus').textContent = s.hasApiKey ? '✅ 已設定 API 金鑰' : '尚未設定 API 金鑰';
+      document.getElementById('aiProviderSelect').value = s.provider;
+      document.getElementById('aiKeyStatus').textContent = s.hasClaudeKey ? '✅ 已設定 Claude API 金鑰' : '尚未設定 Claude API 金鑰';
+      document.getElementById('geminiKeyStatus').textContent = s.hasGeminiKey ? '✅ 已設定 Gemini API 金鑰' : '尚未設定 Gemini API 金鑰';
       document.getElementById('aiDailyEnabled').checked = s.dailyEnabled;
       document.getElementById('aiDailyTopN').value = s.topN;
     });
   }
+
+  document.getElementById('aiProviderSelect').addEventListener('change', function () {
+    withSpin(callServer('setAiProvider', this.value)).then(function () {
+      loadAiSettings();
+    }).catch(function (err) { alert(err.message || err); });
+  });
 
   document.getElementById('aiKeyForm').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -500,7 +508,18 @@
     withSpin(callServer('setAnthropicApiKey', key)).then(function () {
       document.getElementById('aiKeyInput').value = '';
       loadAiSettings();
-      alert('✅ 已儲存 API 金鑰');
+      alert('✅ 已儲存 Claude API 金鑰');
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  document.getElementById('geminiKeyForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var key = document.getElementById('geminiKeyInput').value.trim();
+    if (!key) return;
+    withSpin(callServer('setGeminiApiKey', key)).then(function () {
+      document.getElementById('geminiKeyInput').value = '';
+      loadAiSettings();
+      alert('✅ 已儲存 Gemini API 金鑰');
     }).catch(function (err) { alert(err.message || err); });
   });
 

@@ -161,14 +161,32 @@
         <div class="admin-section">
           <h3>AI 深度診斷設定</h3>
           <div class="meta-bar">
-            對戰報裡的個股呼叫 Claude API 做財報/籌碼/技術面的第二層深度診斷。
-            需要你自己的 Anthropic API 金鑰，每次診斷會產生實際 API 費用（大約幾分錢等級）。
+            對戰報裡的個股呼叫 AI 做財報/籌碼/技術面的第二層深度診斷。可以選 Claude 或 Gemini，
+            兩邊都設定金鑰的話可以隨時切換比較。每次診斷會產生實際 API 費用
+            （Claude 沒有免費額度；Gemini 透過 Google AI Studio 申請的 key 通常有免費額度）。
           </div>
+
+          <label style="display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--text-muted); margin-bottom:10px;">
+            目前使用的 AI
+            <select id="aiProviderSelect">
+              <option value="claude">Claude（Anthropic）</option>
+              <option value="gemini">Gemini（Google，含即時搜尋）</option>
+            </select>
+          </label>
+
+          <div class="meta-bar">Claude API 金鑰</div>
           <form id="aiKeyForm" class="inline-form">
             <input type="password" id="aiKeyInput" placeholder="貼上 Anthropic API 金鑰（sk-ant-...）">
-            <button type="submit" class="btn-primary">儲存金鑰</button>
+            <button type="submit" class="btn-primary">儲存</button>
           </form>
           <div id="aiKeyStatus" class="meta-bar"></div>
+
+          <div class="meta-bar" style="margin-top:10px;">Gemini API 金鑰（去 aistudio.google.com/apikey 申請）</div>
+          <form id="geminiKeyForm" class="inline-form">
+            <input type="password" id="geminiKeyInput" placeholder="貼上 Gemini API 金鑰（AIza...）">
+            <button type="submit" class="btn-primary">儲存</button>
+          </form>
+          <div id="geminiKeyStatus" class="meta-bar"></div>
 
           <form id="aiDailyForm" class="form-card" style="margin-top:10px;">
             <label class="checkbox-row"><input type="checkbox" id="aiDailyEnabled"> 每日排程自動產生 AI 診斷</label>

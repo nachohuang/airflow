@@ -17,6 +17,8 @@ var CONFIG = {
     TRIGGER_MINUTE: 'TRIGGER_MINUTE',
     SKIP_WEEKENDS: 'SKIP_WEEKENDS',
     ANTHROPIC_API_KEY: 'ANTHROPIC_API_KEY',
+    GEMINI_API_KEY: 'GEMINI_API_KEY',
+    AI_PROVIDER: 'AI_PROVIDER', // 'claude' | 'gemini'
     AI_DAILY_ENABLED: 'AI_DAILY_ENABLED',
     AI_DAILY_TOP_N: 'AI_DAILY_TOP_N'
   },
@@ -42,6 +44,13 @@ var CONFIG = {
   // Claude API 設定：模型可依需要換成 claude-opus-4-8 (更貴更強) 或 claude-haiku-4-5-20251001 (更便宜)
   CLAUDE_MODEL: 'claude-sonnet-5',
   CLAUDE_MAX_TOKENS: 3000,
+
+  // Gemini API 設定（透過 Google AI Studio 申請的 key，走 Generative Language API）。
+  // 模型名稱 Google 三不五時會更新/淘汰，如果呼叫失敗（HTTP 404）記得去
+  // https://ai.google.dev/gemini-api/docs/models 查目前可用的模型名稱換掉。
+  GEMINI_MODEL: 'gemini-2.5-flash',
+  GEMINI_MAX_TOKENS: 3000,
+
   AI_DAILY_TOP_N_DEFAULT: 3,
 
   // History 分頁欄位 - 對應 Colab final_df 的 desired_final_columns
