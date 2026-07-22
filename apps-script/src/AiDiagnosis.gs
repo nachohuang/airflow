@@ -216,7 +216,15 @@ function callClaude_(systemPrompt, userPrompt) {
     throw new Error('Claude API 呼叫失敗 HTTP ' + code + '：' + body.slice(0, 300));
   }
   var json = JSON.parse(body);
-  return (json.content || []).map(function (block) { return block.text || ''; }).join('\n');
+  var text = (json.content || []).map(function (block) { return block.text || ''; }).join('\n');
+  var usage = json.usage || {};
+  return {
+    text: text,
+    inputTokens: usage.input_tokens || 0,
+    outputTokens: usage.output_tokens || 0,
+    provider: 'claude',
+    model: CONFIG.CLAUDE_MODEL
+  };
 }
 
 /**
@@ -254,13 +262,102 @@ function callGemini_(systemPrompt, userPrompt) {
   if (!candidate || !candidate.content || !candidate.content.parts) {
     throw new Error('Gemini 回傳格式異常（可能被安全過濾擋下或模型無回應）：' + body.slice(0, 300));
   }
-  return candidate.content.parts.map(function (p) { return p.text || ''; }).join('');
+  var text = candidate.content.parts.map(function (p) { return p.text || ''; }).join('');
+  var usage = json.usageMetadata || {};
+  return {
+    text: text,
+    inputTokens: usage.promptTokenCount || 0,
+    outputTokens: usage.candidatesTokenCount || 0,
+    provider: 'gemini',
+    model: CONFIG.GEMINI_MODEL
+  };
 }
 
-/** 依目前設定的 provider 分派到 Claude 或 Gemini，其餘程式碼都呼叫這個，不用管實際用哪個供應商。 */
+/**
+ * 依目前設定的 provider 分派到 Claude 或 Gemini，其餘程式碼都呼叫這個，不用管實際用哪個供應商。
+ * 回傳 {text, inputTokens, outputTokens, provider, model}，方便呼叫端順便記使用量/估算費用。
+ */
 function callLlm_(systemPrompt, userPrompt) {
   var provider = getAiSettings().provider;
   return provider === 'gemini' ? callGemini_(systemPrompt, userPrompt) : callClaude_(systemPrompt, userPrompt);
+}
+
+// ---------------- 使用量 / 費用估算 ----------------
+
+/** 供前端顯示與編輯：參考單價（USD / 每百萬 tokens），存在 Script Properties，抓錯了可以自己改。 */
+function getPricingSettings() {
+  var props = PropertiesService.getScriptProperties();
+  function num(key, def) {
+    var v = parseFloat(props.getProperty(key));
+    return isNaN(v) ? def : v;
+  }
+  return {
+    claudeInputPerM: num(CONFIG.PROP_KEYS.CLAUDE_PRICE_INPUT, CONFIG.CLAUDE_PRICE_INPUT_PER_M_DEFAULT),
+    claudeOutputPerM: num(CONFIG.PROP_KEYS.CLAUDE_PRICE_OUTPUT, CONFIG.CLAUDE_PRICE_OUTPUT_PER_M_DEFAULT),
+    geminiInputPerM: num(CONFIG.PROP_KEYS.GEMINI_PRICE_INPUT, CONFIG.GEMINI_PRICE_INPUT_PER_M_DEFAULT),
+    geminiOutputPerM: num(CONFIG.PROP_KEYS.GEMINI_PRICE_OUTPUT, CONFIG.GEMINI_PRICE_OUTPUT_PER_M_DEFAULT)
+  };
+}
+
+function setPricingSettings(claudeIn, claudeOut, geminiIn, geminiOut) {
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(CONFIG.PROP_KEYS.CLAUDE_PRICE_INPUT, String(parseFloat(claudeIn) || 0));
+  props.setProperty(CONFIG.PROP_KEYS.CLAUDE_PRICE_OUTPUT, String(parseFloat(claudeOut) || 0));
+  props.setProperty(CONFIG.PROP_KEYS.GEMINI_PRICE_INPUT, String(parseFloat(geminiIn) || 0));
+  props.setProperty(CONFIG.PROP_KEYS.GEMINI_PRICE_OUTPUT, String(parseFloat(geminiOut) || 0));
+  logRun_('AI設定', '成功', '已更新 AI 費用參考單價', 0);
+  return getPricingSettings();
+}
+
+function calcCost_(provider, inputTokens, outputTokens) {
+  var pricing = getPricingSettings();
+  var inRate = provider === 'gemini' ? pricing.geminiInputPerM : pricing.claudeInputPerM;
+  var outRate = provider === 'gemini' ? pricing.geminiOutputPerM : pricing.claudeOutputPerM;
+  return (inputTokens / 1e6) * inRate + (outputTokens / 1e6) * outRate;
+}
+
+function getAiUsageSheet_() {
+  return ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.AI_USAGE, CONFIG.AI_USAGE_COLUMNS);
+}
+
+function logAiUsage_(record) {
+  appendSheetObjects_(getAiUsageSheet_(), CONFIG.AI_USAGE_COLUMNS, [record]);
+}
+
+/** 供「後台管理」顯示：最近 N 天每天的呼叫次數/tokens/預估費用，加上總計。 */
+function getAiUsageSummary(days) {
+  days = days || 30;
+  var rows = readSheetObjects_(getAiUsageSheet_());
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  var cutoffStr = normalizeDateStr(cutoff);
+  var recent = rows.filter(function (r) { return normalizeDateStr(r['日期']) >= cutoffStr; });
+
+  var byDate = {};
+  recent.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!byDate[d]) byDate[d] = { date: d, calls: 0, inputTokens: 0, outputTokens: 0, cost: 0 };
+    byDate[d].calls += 1;
+    byDate[d].inputTokens += toNumber(r['輸入Tokens']);
+    byDate[d].outputTokens += toNumber(r['輸出Tokens']);
+    byDate[d].cost += toNumber(r['預估費用(USD)']);
+  });
+  var daily = Object.keys(byDate).map(function (d) { return byDate[d]; })
+    .sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+
+  var totalCost = 0;
+  recent.forEach(function (r) { totalCost += toNumber(r['預估費用(USD)']); });
+
+  var todayStr = normalizeDateStr(new Date());
+  var todayCost = byDate[todayStr] ? byDate[todayStr].cost : 0;
+
+  return {
+    daily: daily,
+    totalCost: round_(totalCost, 4),
+    totalCalls: recent.length,
+    todayCost: round_(todayCost, 4),
+    days: days
+  };
 }
 
 function extractVerdict_(text) {
@@ -332,8 +429,11 @@ function runAiDiagnosis(codes) {
 
       var goodinfoText = fetchGoodinfoText_(code);
       var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, timestampLabel);
-      var diagnosisText = callLlm_(AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
+      var llmResult = callLlm_(AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
+      var diagnosisText = llmResult.text;
       var verdict = extractVerdict_(diagnosisText);
+      var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+      var todayStr = normalizeDateStr(new Date());
 
       upsertAiDiagnosisRow_({
         '日期': normalizeDateStr(row['日期']),
@@ -346,9 +446,21 @@ function runAiDiagnosis(codes) {
         '時間戳記': timestampLabel
       });
 
+      logAiUsage_({
+        '日期': todayStr,
+        '時間戳記': timestampLabel,
+        '供應商': llmResult.provider,
+        '模型': llmResult.model,
+        '證券代號': code,
+        '輸入Tokens': llmResult.inputTokens,
+        '輸出Tokens': llmResult.outputTokens,
+        '預估費用(USD)': round_(cost, 6)
+      });
+
       var dur = Math.round((Date.now() - startTime) / 1000);
-      logRun_('AI診斷', '成功', code + ' ' + (row['證券名稱'] || '') + ' -> ' + verdict, dur);
-      results.push({ ok: true, code: code, name: row['證券名稱'], verdict: verdict, text: diagnosisText });
+      logRun_('AI診斷', '成功', code + ' ' + (row['證券名稱'] || '') + ' -> ' + verdict +
+        '（約 $' + round_(cost, 4) + '）', dur);
+      results.push({ ok: true, code: code, name: row['證券名稱'], verdict: verdict, text: diagnosisText, cost: round_(cost, 4) });
     } catch (e) {
       var dur2 = Math.round((Date.now() - startTime) / 1000);
       logRun_('AI診斷', '失敗', code + '：' + String(e.message || e), dur2);

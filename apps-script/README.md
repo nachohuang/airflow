@@ -241,6 +241,14 @@ Gemini 透過 AI Studio 申請的 key 通常有免費額度，一天呼叫幾次
 [ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models) 查目前可用的模型名稱，
 改掉 `GEMINI_MODEL` 這個常數就好。
 
+**每日用量與預估費用：** 每次 AI 診斷（不管是手動按按鈕還是每日排程自動跑）都會記錄輸入/輸出
+token 數，並用「後台管理 → AI 使用量與預估費用」裡設定的參考單價概算一次費用，存進 `AiUsage` 分頁。
+那個區塊會顯示今天的預估費用、近 30 天每天的呼叫次數/tokens/費用。**參考單價是概略預設值**
+（`Config.gs` 的 `*_PRICE_*_PER_M_DEFAULT`），不是即時同步的官方價格，第一次用之前建議先去
+[Anthropic 定價頁](https://www.anthropic.com/pricing#api)、[Gemini 定價頁](https://ai.google.dev/gemini-api/docs/pricing)
+核對一次，在「參考單價」表單填入正確數字——這樣估算出來的費用才會貼近實際帳單，正確金額還是
+以你各自帳號後台的用量頁面為準。
+
 ## 測試
 
 `Utils.gs` / `Analysis.gs` / `FactorScan.gs` / `Backtest.gs` 裡的核心運算都是純函式（不呼叫任何

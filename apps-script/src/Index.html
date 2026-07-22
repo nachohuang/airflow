@@ -200,6 +200,27 @@
         </div>
 
         <div class="admin-section">
+          <h3>AI 使用量與預估費用</h3>
+          <div class="meta-bar">
+            費用是用下面的「參考單價」概算出來的，不是 Anthropic / Google 官方帳單金額，
+            正確費用請以你各自帳號後台的用量頁面為準；單價不對可以自己改，改完估算才會準。
+          </div>
+          <div id="aiUsageSummary" class="meta-bar"></div>
+          <div id="aiUsageTable"></div>
+
+          <form id="aiPricingForm" class="form-card" style="margin-top:10px;">
+            <h4 style="margin:0 0 4px 0;">參考單價（USD / 每百萬 tokens）</h4>
+            <label>Claude 輸入 <input id="priceClaudeIn" type="number" step="0.01"></label>
+            <label>Claude 輸出 <input id="priceClaudeOut" type="number" step="0.01"></label>
+            <label>Gemini 輸入 <input id="priceGeminiIn" type="number" step="0.01"></label>
+            <label>Gemini 輸出 <input id="priceGeminiOut" type="number" step="0.01"></label>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">儲存單價</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="admin-section">
           <h3>執行紀錄</h3>
           <div id="runLogList" class="log-list"></div>
         </div>

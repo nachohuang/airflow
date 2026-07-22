@@ -20,7 +20,11 @@ var CONFIG = {
     GEMINI_API_KEY: 'GEMINI_API_KEY',
     AI_PROVIDER: 'AI_PROVIDER', // 'claude' | 'gemini'
     AI_DAILY_ENABLED: 'AI_DAILY_ENABLED',
-    AI_DAILY_TOP_N: 'AI_DAILY_TOP_N'
+    AI_DAILY_TOP_N: 'AI_DAILY_TOP_N',
+    CLAUDE_PRICE_INPUT: 'CLAUDE_PRICE_INPUT',
+    CLAUDE_PRICE_OUTPUT: 'CLAUDE_PRICE_OUTPUT',
+    GEMINI_PRICE_INPUT: 'GEMINI_PRICE_INPUT',
+    GEMINI_PRICE_OUTPUT: 'GEMINI_PRICE_OUTPUT'
   },
 
   ROOT_FOLDER_NAME: 'TWSE_App',
@@ -36,10 +40,13 @@ var CONFIG = {
     SKIP_DATES: 'SkipDates',
     BACKTEST: 'BacktestResults',
     FACTOR_SCAN: 'FactorScanResults',
-    AI_DIAGNOSIS: 'AiDiagnosis'
+    AI_DIAGNOSIS: 'AiDiagnosis',
+    AI_USAGE: 'AiUsage'
   },
 
   AI_DIAGNOSIS_COLUMNS: ['日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '最終建議', '診斷內容', '時間戳記'],
+
+  AI_USAGE_COLUMNS: ['日期', '時間戳記', '供應商', '模型', '證券代號', '輸入Tokens', '輸出Tokens', '預估費用(USD)'],
 
   // Claude API 設定：模型可依需要換成 claude-opus-4-8 (更貴更強) 或 claude-haiku-4-5-20251001 (更便宜)
   CLAUDE_MODEL: 'claude-sonnet-5',
@@ -50,6 +57,14 @@ var CONFIG = {
   // https://ai.google.dev/gemini-api/docs/models 查目前可用的模型名稱換掉。
   GEMINI_MODEL: 'gemini-2.5-flash',
   GEMINI_MAX_TOKENS: 3000,
+
+  // 費用估算用的「參考單價」（USD / 每百萬 tokens）。這些是概略預設值，不是即時公告的官方價格，
+  // 一定會跟你實際帳單有落差，請自行到官方頁面核對後在「後台管理」修改：
+  // Claude: https://www.anthropic.com/pricing#api　Gemini: https://ai.google.dev/gemini-api/docs/pricing
+  CLAUDE_PRICE_INPUT_PER_M_DEFAULT: 3,
+  CLAUDE_PRICE_OUTPUT_PER_M_DEFAULT: 15,
+  GEMINI_PRICE_INPUT_PER_M_DEFAULT: 0.3,
+  GEMINI_PRICE_OUTPUT_PER_M_DEFAULT: 2.5,
 
   AI_DAILY_TOP_N_DEFAULT: 3,
 
@@ -196,6 +211,7 @@ function initializeProject() {
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.RUN_LOG, CONFIG.RUN_LOG_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.SKIP_DATES, CONFIG.SKIP_DATES_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.AI_DIAGNOSIS, CONFIG.AI_DIAGNOSIS_COLUMNS);
+  ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.AI_USAGE, CONFIG.AI_USAGE_COLUMNS);
 
   // 預設分頁 'Sheet1' 若還存在且是空的，就把它砍掉，保持整潔
   var def = ss.getSheetByName('工作表1') || ss.getSheetByName('Sheet1');

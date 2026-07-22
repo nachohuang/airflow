@@ -137,7 +137,8 @@
       if (!res.ok) { containerEl.innerHTML = errorBox(res.error); return; }
       containerEl.innerHTML =
         '<div class="ai-report">' +
-        '<div>最終建議：<span class="ai-verdict-badge">' + escapeHtml(res.verdict) + '</span></div>' +
+        '<div>最終建議：<span class="ai-verdict-badge">' + escapeHtml(res.verdict) + '</span>' +
+        (res.cost !== undefined ? '　<span class="meta-bar" style="display:inline;">本次預估費用 $' + fmtNum(res.cost, 4) + '</span>' : '') + '</div>' +
         renderMarkdownLite(res.text) +
         '</div>';
     }).catch(function (err) { containerEl.innerHTML = errorBox(err); });
@@ -481,7 +482,10 @@
   function loadAdmin() {
     populateTimeSelects();
     document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
-    return Promise.all([loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder), loadAiSettings()]);
+    return Promise.all([
+      loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder),
+      loadAiSettings(), loadAiUsage_(), loadAiPricing_()
+    ]);
   }
 
   // ---------- AI 深度診斷設定 ----------
@@ -530,6 +534,43 @@
     withSpin(callServer('setAiDailySettings', enabled, topN)).then(function () {
       loadAiSettings();
       alert('✅ 已儲存 AI 診斷排程設定');
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  function loadAiUsage_() {
+    return callServer('getAiUsageSummary', 30).then(function (s) {
+      document.getElementById('aiUsageSummary').textContent =
+        '今天預估費用：$' + fmtNum(s.todayCost, 4) + '　近 ' + s.days + ' 天共 ' + s.totalCalls +
+        ' 次呼叫，預估總費用 $' + fmtNum(s.totalCost, 4);
+      var tableEl = document.getElementById('aiUsageTable');
+      if (!s.daily.length) { tableEl.innerHTML = ''; return; }
+      var rows = s.daily.map(function (d) {
+        return '<tr><td>' + escapeHtml(d.date) + '</td><td>' + d.calls + '</td>' +
+          '<td>' + fmtNum(d.inputTokens, 0) + '</td><td>' + fmtNum(d.outputTokens, 0) + '</td>' +
+          '<td>$' + fmtNum(d.cost, 4) + '</td></tr>';
+      }).join('');
+      tableEl.innerHTML = '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
+        '<th>日期</th><th>次數</th><th>輸入Tokens</th><th>輸出Tokens</th><th>預估費用</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    }).catch(function (err) { document.getElementById('aiUsageSummary').innerHTML = errorBox(err); });
+  }
+
+  function loadAiPricing_() {
+    return callServer('getPricingSettings').then(function (p) {
+      document.getElementById('priceClaudeIn').value = p.claudeInputPerM;
+      document.getElementById('priceClaudeOut').value = p.claudeOutputPerM;
+      document.getElementById('priceGeminiIn').value = p.geminiInputPerM;
+      document.getElementById('priceGeminiOut').value = p.geminiOutputPerM;
+    });
+  }
+
+  document.getElementById('aiPricingForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var claudeIn = document.getElementById('priceClaudeIn').value;
+    var claudeOut = document.getElementById('priceClaudeOut').value;
+    var geminiIn = document.getElementById('priceGeminiIn').value;
+    var geminiOut = document.getElementById('priceGeminiOut').value;
+    withSpin(callServer('setPricingSettings', claudeIn, claudeOut, geminiIn, geminiOut)).then(function () {
+      alert('✅ 已儲存單價設定');
     }).catch(function (err) { alert(err.message || err); });
   });
 
