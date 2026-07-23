@@ -57,13 +57,10 @@ function appendSheetObjects_(sheet, columns, objects) {
   sheet.getRange(startRow, 1, data.length, columns.length).setValues(data);
 }
 
-function getHistorySheet_() {
-  return ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.HISTORY, CONFIG.HISTORY_COLUMNS);
-}
-
 /**
  * 通用「依日期整批取代」upsert：任何「新資料涵蓋到的日期」，既有資料會先整批移除再放入新資料，
- * 對應原本 Colab 「dates_to_remove」那段邏輯（避免同一天重複資料)。History 和 Reports 都靠這個函式寫入。
+ * 對應原本 Colab 「dates_to_remove」那段邏輯（避免同一天重複資料)。Reports 分頁靠這個函式寫入
+ * （History 已經改成 Drive 上的月份 CSV 檔，見 upsertHistoryRows_ 跟 HistoryFiles.gs）。
  */
 function upsertRowsByDate_(sheet, columns, newRows) {
   if (!newRows || newRows.length === 0) return { added: 0, replacedDates: [], totalRows: 0 };
@@ -83,44 +80,24 @@ function upsertRowsByDate_(sheet, columns, newRows) {
   return { added: newRows.length, replacedDates: Object.keys(newDateSet), totalRows: merged.length };
 }
 
+/**
+ * History 現在存在 Drive 上按月分開的 CSV 檔（HistoryFiles.gs），不是 Google Sheets 分頁。
+ * 這三個函式維持原本的名稱與介面，只是內部改成呼叫檔案版實作 —— Analysis.gs / Backtest.gs /
+ * FactorScan.gs / DataFetch.gs / ImportHistory.gs / Portfolio.gs / StockAnalysis.gs
+ * 完全不需要跟著改，一樣呼叫 upsertHistoryRows_ / readRecentHistory_ / readHistoryRange_ 就好。
+ */
 function upsertHistoryRows_(newRows) {
-  var result = upsertRowsByDate_(getHistorySheet_(), CONFIG.HISTORY_COLUMNS, newRows);
-  try {
-    archiveOldHistory_();
-  } catch (e) {
-    logRun_('自動封存', '失敗', String(e.message || e), 0);
-  }
-  return result;
+  return upsertHistoryRowsToMonthlyFiles_(newRows);
 }
 
-/** 只讀最近 N 天（含）的 History 資料，給每日分析用，避免全表重算拖慢執行。 */
+/** 只讀最近 N 天（含）的歷史資料，給每日分析用，避免不必要地讀太多月份的檔案。 */
 function readRecentHistory_(days) {
-  var rows = readSheetObjects_(getHistorySheet_());
-  var cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
-  var cutoffStr = normalizeDateStr(cutoff);
-  return rows.filter(function (r) { return normalizeDateStr(r['日期']) >= cutoffStr; });
+  return readRecentHistoryFromFiles_(days);
 }
 
-/** 讀取指定日期區間（含頭尾）的 History 資料，給回測/因子掃描用。 */
+/** 讀取指定日期區間（含頭尾）的歷史資料，給回測/因子掃描用。 */
 function readHistoryRange_(startStr, endStr) {
-  var rows = readSheetObjects_(getHistorySheet_());
-  return rows.filter(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    return (!startStr || d >= startStr) && (!endStr || d <= endStr);
-  });
-}
-
-function getHistoryDateBounds() {
-  var rows = readSheetObjects_(getHistorySheet_());
-  if (rows.length === 0) return { min: null, max: null, count: 0 };
-  var min = null, max = null;
-  rows.forEach(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    if (!min || d < min) min = d;
-    if (!max || d > max) max = d;
-  });
-  return { min: min, max: max, count: rows.length };
+  return readHistoryRangeFromFiles_(startStr, endStr);
 }
 
 /** 寫入一筆執行紀錄（成功/失敗），供後台管理頁面顯示，並自動裁剪舊紀錄。 */

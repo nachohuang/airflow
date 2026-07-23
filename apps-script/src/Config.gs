@@ -27,13 +27,19 @@ var CONFIG = {
     GEMINI_PRICE_OUTPUT: 'GEMINI_PRICE_OUTPUT'
   },
 
-  ROOT_FOLDER_NAME: 'TWSE_App',
-  ARCHIVE_FOLDER_NAME: 'Consolidated_file',
+  // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
+  // 不會再另外包一層自動建立的資料夾。要換掉的話，改這兩個 ID 就好（或透過 Script Properties 覆蓋）。
+  DEFAULT_PARENT_FOLDER_ID: '1Phjl3LTlvJxIz49vH8KxXF2mV3v9VZeR',
+  // 每月一份 ALL_COMBINED 歷史資料 CSV 放的資料夾（對應原本 Consolidated_file 的角色）。
+  DEFAULT_HISTORY_FILES_FOLDER_ID: '10Eq1V9r_Wt9B7sqE2tEKuno8v4CmP-tP',
+
   REPORTS_FOLDER_NAME: 'Reports',
   REGRESSION_FOLDER_NAME: 'Regression',
 
+  // 每月歷史資料檔名格式：YYYY-MM_ALL_COMBINED.csv
+  HISTORY_FILE_SUFFIX: '_ALL_COMBINED.csv',
+
   SHEET_NAMES: {
-    HISTORY: 'History',
     PORTFOLIO: 'Portfolio',
     REPORTS: 'Reports',
     RUN_LOG: 'RunLog',
@@ -114,24 +120,18 @@ var CONFIG = {
     TRAILING_STOP_PERCENT: 0.025
   },
 
-  // Analysis.gs 每次只讀取最近 N 天的 History 資料來算 rolling 指標
-  // （MA60 需要 60 個交易日 + IBF20/Vol20 緩衝，120 天日曆天數綽綽有餘，
-  //  這是為了讓 Apps Script 6 分鐘執行上限下仍可全量重算，而不必無限制吃全部歷史）
+  // Analysis.gs 每次只讀最近 N 天的歷史資料來算 rolling 指標
+  // （MA60 需要 60 個交易日 + IBF20/Vol20 緩衝，120 天日曆天數綽綽有餘）。
+  // 歷史資料是按月分開存檔（HistoryFiles.gs），所以這裡只是決定要讀哪幾個月份的檔案，
+  // 不會有 Google Sheets 儲存格數量上限的問題（那是舊版設計，已經不適用）。
   ANALYSIS_LOOKBACK_DAYS: 150,
-
-  // Google Sheets 單一試算表上限是 10,000,000 個儲存格。History 有 24 欄，
-  // 台股上市櫃合計約 1,700+ 檔，等於一個交易日大約增加 4 萬格。
-  // 保留 270 天（約 9 個月，180 個交易日）大致落在 ~700 萬格，留給 Portfolio/Reports/RunLog 等分頁空間。
-  // 超過保留天數的舊資料不會被丟掉，會先封存成 CSV 存進 Archive 資料夾（後台管理可以看到/下載），
-  // 再從 History 分頁移除，需要更長歷史時可以調高這個數字或去 Archive 資料夾撈檔案。
-  HISTORY_RETENTION_DAYS: 270,
 
   DEFAULT_TRIGGER_HOUR: 20,
   DEFAULT_TRIGGER_MINUTE: 30
 };
 
 /**
- * 取得（或建立）主要 Spreadsheet。
+ * 取得（或建立）主要 Spreadsheet，並確保它放在使用者指定的根資料夾裡（不是 Drive 根目錄）。
  */
 function getSpreadsheet_() {
   var props = PropertiesService.getScriptProperties();
@@ -147,8 +147,23 @@ function getSpreadsheet_() {
   if (!ss) {
     ss = SpreadsheetApp.create('TWSE 法人動能選股 App 資料庫');
     props.setProperty(CONFIG.PROP_KEYS.SPREADSHEET_ID, ss.getId());
+    moveFileIntoFolder_(ss.getId(), getRootFolder_());
   }
   return ss;
+}
+
+/** 把檔案從目前所在的父資料夾移到指定資料夾（Apps Script 沒有直接的「搬移」API，用移除舊parent+加新parent達成）。 */
+function moveFileIntoFolder_(fileId, destFolder) {
+  try {
+    var file = DriveApp.getFileById(fileId);
+    var parents = file.getParents();
+    while (parents.hasNext()) {
+      parents.next().removeFile(file);
+    }
+    destFolder.addFile(file);
+  } catch (e) {
+    // 搬移失敗不影響功能本身（例如權限問題），檔案還是能正常使用，只是位置沒搬過去
+  }
 }
 
 function getOrCreateFolder_(parent, name) {
@@ -157,23 +172,27 @@ function getOrCreateFolder_(parent, name) {
   return parent.createFolder(name);
 }
 
+/** App 的「家目錄」——使用者指定的既有資料夾，Spreadsheet 跟 Reports/Regression 都放在這底下。 */
 function getRootFolder_() {
-  var props = PropertiesService.getScriptProperties();
-  var id = props.getProperty(CONFIG.PROP_KEYS.ROOT_FOLDER_ID);
-  if (id) {
-    try {
-      return DriveApp.getFolderById(id);
-    } catch (e) {
-      // fall through and recreate
-    }
-  }
-  var folder = getOrCreateFolder_(DriveApp.getRootFolder(), CONFIG.ROOT_FOLDER_NAME);
-  props.setProperty(CONFIG.PROP_KEYS.ROOT_FOLDER_ID, folder.getId());
-  return folder;
+  return getFolderById_(CONFIG.PROP_KEYS.ROOT_FOLDER_ID, CONFIG.DEFAULT_PARENT_FOLDER_ID, '根');
 }
 
+/** 每月一份歷史資料 CSV 存放的資料夾（對應原本 Consolidated_file，也是使用者指定的既有資料夾）。 */
 function getArchiveFolder_() {
-  return getNamedSubfolder_(CONFIG.PROP_KEYS.ARCHIVE_FOLDER_ID, CONFIG.ARCHIVE_FOLDER_NAME);
+  return getFolderById_(CONFIG.PROP_KEYS.ARCHIVE_FOLDER_ID, CONFIG.DEFAULT_HISTORY_FILES_FOLDER_ID, '歷史資料');
+}
+
+/** 依 Script Properties 記住的 ID（或預設 ID）直接取用一個既有資料夾；資料夾一定要已經存在，不會自動建立。 */
+function getFolderById_(propKey, defaultId, label) {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty(propKey) || defaultId;
+  try {
+    var folder = DriveApp.getFolderById(id);
+    props.setProperty(propKey, folder.getId());
+    return folder;
+  } catch (e) {
+    throw new Error('找不到「' + label + '」資料夾（ID: ' + id + '），請確認資料夾 ID 正確，且這個 Google 帳號有權限存取。');
+  }
 }
 
 function getReportsFolder_() {
@@ -184,6 +203,7 @@ function getRegressionFolder_() {
   return getNamedSubfolder_(CONFIG.PROP_KEYS.REGRESSION_FOLDER_ID, CONFIG.REGRESSION_FOLDER_NAME);
 }
 
+/** Reports / Regression 沒有各自的既有資料夾 ID，所以在根資料夾（使用者指定的那個）底下自動建立同名子資料夾。 */
 function getNamedSubfolder_(propKey, folderName) {
   var props = PropertiesService.getScriptProperties();
   var id = props.getProperty(propKey);
@@ -200,12 +220,18 @@ function getNamedSubfolder_(propKey, folderName) {
 }
 
 /**
- * 初始化整個專案：建立 Spreadsheet + 分頁 + Drive 資料夾。
+ * 初始化整個專案：建立 Spreadsheet + 分頁 + 確認 Drive 資料夾都存在。
  * 第一次部署後，先手動執行這個函式一次（或由 doGet 的 setup 頁觸發）。
+ *
+ * 會建立的東西（都在 CONFIG.DEFAULT_PARENT_FOLDER_ID 這個資料夾裡）：
+ *   - 1 份 Spreadsheet「TWSE 法人動能選股 App 資料庫」，內含 Portfolio / Reports / RunLog /
+ *     SkipDates / AiDiagnosis / AiUsage 這幾個分頁（History 已改成 Drive 上的月份 CSV 檔，不是分頁）
+ *   - Reports/ 資料夾（每日戰報 xlsx 快照）
+ *   - Regression/ 資料夾（回測/因子掃描結果 CSV）
+ * 另外 CONFIG.DEFAULT_HISTORY_FILES_FOLDER_ID 這個資料夾放每月一份的 ALL_COMBINED 歷史資料 CSV。
  */
 function initializeProject() {
   var ss = getSpreadsheet_();
-  ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.HISTORY, CONFIG.HISTORY_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.PORTFOLIO, CONFIG.PORTFOLIO_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.REPORTS, CONFIG.REPORT_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.RUN_LOG, CONFIG.RUN_LOG_COLUMNS);

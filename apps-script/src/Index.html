@@ -228,18 +228,17 @@
         <div class="admin-section">
           <h3>檔案管理</h3>
           <div class="folder-tabs">
-            <button class="folder-tab-btn active" data-folder="archive">歷史封存</button>
+            <button class="folder-tab-btn active" data-folder="archive">歷史資料</button>
             <button class="folder-tab-btn" data-folder="reports">每日戰報</button>
             <button class="folder-tab-btn" data-folder="regression">回測/研究</button>
           </div>
-          <div class="form-actions">
-            <button type="button" id="archiveNowBtn" class="btn-secondary">立即封存目前 History 為 CSV</button>
-          </div>
+          <div class="meta-bar">「歷史資料」是每月一份的 ALL_COMBINED CSV，每天自動抓的資料都會直接更新對應月份的檔案。</div>
           <div id="fileList" class="file-list"></div>
         </div>
 
         <div class="admin-section">
-          <a id="spreadsheetLink" href="#">在 Google Sheets 開啟資料庫</a>
+          <div><a id="spreadsheetLink" href="#">在 Google Sheets 開啟資料庫</a></div>
+          <div style="margin-top:6px;"><a id="historyFolderLink" href="#">在 Google Drive 開啟歷史資料資料夾</a></div>
         </div>
       </section>
 

@@ -23,20 +23,12 @@ function include(filename) {
 function bootstrap() {
   initializeProject();
   var ss = getSpreadsheet_();
-  var historySheet = ss.getSheetByName(CONFIG.SHEET_NAMES.HISTORY);
-  var lastRow = historySheet.getLastRow();
-  var latestDate = null;
-  if (lastRow > 1) {
-    var dates = historySheet.getRange(2, 1, lastRow - 1, 1).getValues();
-    for (var i = 0; i < dates.length; i++) {
-      var d = dates[i][0];
-      if (d && (!latestDate || d > latestDate)) latestDate = d;
-    }
-  }
+  var bounds = getHistoryDateBounds();
   return {
     spreadsheetUrl: ss.getUrl(),
-    historyRowCount: Math.max(0, lastRow - 1),
-    latestHistoryDate: latestDate ? Utilities.formatDate(new Date(latestDate), 'Asia/Taipei', 'yyyy-MM-dd') : null,
+    historyFolderUrl: getArchiveFolder_().getUrl(),
+    monthsAvailable: bounds.monthsAvailable,
+    latestHistoryDate: bounds.max,
     schedule: getScheduleSettings()
   };
 }

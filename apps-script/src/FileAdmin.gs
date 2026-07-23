@@ -1,7 +1,8 @@
 /**
  * FileAdmin.gs
- * 「後台管理」頁面：瀏覽/刪除 Config.gs 定義的三個 Drive 資料夾裡的檔案，
- * 並提供把 History / 回測 / 因子掃描結果封存成檔案的動作（讓這些資料夾裡真的有東西可以管理）。
+ * 「後台管理」頁面：瀏覽/刪除 Config.gs 定義的三個 Drive 資料夾裡的檔案。
+ * 'archive' 這個資料夾現在就是每月一份歷史資料 CSV 實際存放的地方（見 HistoryFiles.gs），
+ * 不再是「超過保留期限才搬過去的封存」，資料本來就在這裡，這裡看到的就是即時的完整歷史。
  * 刪除採「移到垃圾桶」而非永久刪除，保留復原空間。
  */
 
@@ -47,7 +48,7 @@ function listFiles(folderKey) {
 function getFolderSummary() {
   var keys = ['archive', 'reports', 'regression'];
   var labels = {
-    archive: CONFIG.ARCHIVE_FOLDER_NAME,
+    archive: '歷史資料',
     reports: CONFIG.REPORTS_FOLDER_NAME,
     regression: CONFIG.REGRESSION_FOLDER_NAME
   };
@@ -89,54 +90,6 @@ function rowsToCsv_(columns, rows) {
   return lines.join('\n');
 }
 
-/**
- * 把超過 CONFIG.HISTORY_RETENTION_DAYS 的舊 History 資料封存成 CSV 存進 Archive 資料夾，
- * 再從 History 分頁移除，避免 Sheets 撞到 10,000,000 格的硬上限。
- * 由 SheetUtils.upsertHistoryRows_ 在每次寫入資料後自動呼叫，不需要手動觸發。
- */
-function archiveOldHistory_() {
-  var sheet = getHistorySheet_();
-  var rows = readSheetObjects_(sheet);
-  if (rows.length === 0) return { archived: 0 };
-
-  var cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - CONFIG.HISTORY_RETENTION_DAYS);
-  var cutoffStr = normalizeDateStr(cutoff);
-
-  var oldRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) < cutoffStr; });
-  if (oldRows.length === 0) return { archived: 0 };
-
-  var dates = oldRows.map(function (r) { return normalizeDateStr(r['日期']); });
-  var minD = dates.reduce(function (a, b) { return a < b ? a : b; });
-  var maxD = dates.reduce(function (a, b) { return a > b ? a : b; });
-  var csv = '\uFEFF' + rowsToCsv_(CONFIG.HISTORY_COLUMNS, oldRows);
-  var fileName = minD.replace(/-/g, '') + '_' + maxD.replace(/-/g, '') + '_ALL_COMBINED_archived.csv';
-  var blob = Utilities.newBlob(csv, 'text/csv', fileName);
-  getArchiveFolder_().createFile(blob);
-
-  var keptRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) >= cutoffStr; });
-  writeSheetObjects_(sheet, CONFIG.HISTORY_COLUMNS, keptRows);
-
-  logRun_('自動封存', '成功',
-    '已封存 ' + oldRows.length + ' 筆超過 ' + CONFIG.HISTORY_RETENTION_DAYS + ' 天的舊資料到 ' + fileName +
-    '，History 分頁現在保留 ' + keptRows.length + ' 筆', 0);
-  return { archived: oldRows.length, fileName: fileName, remaining: keptRows.length };
-}
-
-/** 把整份 History 封存成 CSV 存進 Archive 資料夾，對應原本的 ALL_COMBINED.csv。 */
-function exportHistorySnapshotToDrive() {
-  var rows = readSheetObjects_(getHistorySheet_());
-  if (rows.length === 0) throw new Error('History 目前沒有資料可封存');
-  var dates = rows.map(function (r) { return normalizeDateStr(r['日期']); });
-  var minD = dates.reduce(function (a, b) { return a < b ? a : b; });
-  var maxD = dates.reduce(function (a, b) { return a > b ? a : b; });
-  var csv = '\uFEFF' + rowsToCsv_(CONFIG.HISTORY_COLUMNS, rows);
-  var fileName = minD.replace(/-/g, '') + '_' + maxD.replace(/-/g, '') + '_ALL_COMBINED.csv';
-  var blob = Utilities.newBlob(csv, 'text/csv', fileName);
-  var file = getArchiveFolder_().createFile(blob);
-  logRun_('後台管理', '成功', '已封存 History 快照：' + fileName, 0);
-  return { id: file.getId(), name: fileName, url: file.getUrl() };
-}
 
 /** 把「回測研究」頁面跑出來的回測結果存成 CSV，放進 Regression 資料夾。 */
 function saveBacktestToDrive(backtestResult) {

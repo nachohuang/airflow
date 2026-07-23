@@ -686,12 +686,16 @@
         sendUploadChunk_(chunks, index + 1, res.fileId, fileName, resultEl);
       } else {
         resultEl.innerHTML = '<div class="meta-bar">✅ 上傳完成，開始匯入...</div>';
-        runImportLoop(res.fileId, 0, resultEl, 0);
+        var uploadedFileId = res.fileId;
+        runImportLoop(uploadedFileId, 0, resultEl, 0, function () {
+          // 上傳用的暫存原始檔匯完就沒用了，清掉避免堆積在歷史資料資料夾裡
+          callServer('deleteFile', uploadedFileId).catch(function () { /* 清理失敗不影響匯入結果，忽略即可 */ });
+        });
       }
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   }
 
-  function runImportLoop(input, startRow, resultEl, iteration) {
+  function runImportLoop(input, startRow, resultEl, iteration, onDone) {
     if (iteration > 50) {
       resultEl.innerHTML = errorBox('已經連續匯入 50 批還沒結束，先停下來確認一下檔案內容或執行紀錄，需要的話可以再手動繼續。');
       return;
@@ -701,9 +705,10 @@
       if (res.done) {
         resultEl.innerHTML = '<div class="meta-bar">✅ 匯入完成，共處理 ' + res.totalRows + ' 列（來源：' + escapeHtml(res.fileName) + '）</div>';
         loadedTabs.dashboard = false;
+        if (onDone) onDone();
       } else {
         resultEl.innerHTML = '<div class="meta-bar">處理中… 已完成 ' + res.processedThrough + ' / ' + res.totalRows + ' 列，自動繼續下一批…</div>';
-        runImportLoop(input, res.nextStart, resultEl, iteration + 1);
+        runImportLoop(input, res.nextStart, resultEl, iteration + 1, onDone);
       }
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   }
@@ -784,12 +789,6 @@
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   }
 
-  document.getElementById('archiveNowBtn').addEventListener('click', function () {
-    withSpin(callServer('exportHistorySnapshotToDrive')).then(function (f) {
-      alert('已封存：' + f.name);
-      if (currentFolder === 'archive') loadFileList('archive');
-    }).catch(function (err) { alert(err.message || err); });
-  });
 
   // ---------- App 開機 ----------
   function boot() {
@@ -801,6 +800,7 @@
     callServer('bootstrap').then(function (info) {
       window.__spreadsheetUrl = info.spreadsheetUrl;
       document.getElementById('spreadsheetLink').setAttribute('href', info.spreadsheetUrl);
+      document.getElementById('historyFolderLink').setAttribute('href', info.historyFolderUrl || '#');
       loadDashboard();
     }).catch(function (err) {
       document.getElementById('dashboardList').innerHTML = errorBox(err);

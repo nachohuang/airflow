@@ -1,7 +1,8 @@
 # TWSE 法人動能選股 App（Google Apps Script 版）
 
 把原本在 Google Colab 跑的「v17.0 趨勢共鳴版」台股法人動能選股筆記本，移植成一個能在手機瀏覽器上使用的
-Google Apps Script Web App。資料庫改用 Google Sheets，報表/回測結果仍然以檔案形式存進 Google Drive，
+Google Apps Script Web App。歷史資料以「每月一份 CSV」的形式存在你指定的 Google Drive 資料夾裡
+（見下方「資料存放位置」），持股清單/戰報/執行紀錄等體積小的資料用 Google Sheets，
 並提供一個後台管理頁面管理這些檔案與每日排程。
 
 ## 這個 App 有什麼
@@ -21,23 +22,68 @@ Google Apps Script Web App。資料庫改用 Google Sheets，報表/回測結果
    - 每日自動抓資料的**排程時間**可調（預設 20:30，證交所收盤資料公告時間如果變動可以自己改）
    - 可設定**六日不執行**、可新增**臨時停跑日**（颱風假之類）
    - **執行紀錄**：每次自動/手動執行的成功/失敗/略過都看得到
-   - **匯入既有彙整表**：貼上 Drive 連結或檔案 ID，把先前已經累積的 CSV/試算表匯入成 History
-     起始資料，之後就是在這份資料上繼續往後疊加，不用重新從零開始抓
+   - **匯入既有彙整表**：直接上傳 CSV，或貼 Drive 連結/檔案 ID，把先前已經累積的資料匯入——
+     會依日期自動拆進對應月份的檔案（見下方「資料存放位置」），不用重新從零開始抓
    - **資料範圍重新彙整**：選定日期區間重新向證交所抓取並覆蓋該區間資料（補救某幾天抓取失敗用），
      跟每日排程共用同一份「六日不執行 / 臨時停跑日」設定，該跳過的日期一樣會跳過
-   - **檔案管理**：瀏覽/刪除 Drive 上「歷史封存」「每日戰報」「回測/研究」三個資料夾的檔案
+   - **檔案管理**：瀏覽/刪除 Drive 上「歷史資料」「每日戰報」「回測/研究」三個資料夾的檔案
+
+## 資料存放位置
+
+App 不會自己亂建資料夾，全部東西的位置都是固定的、寫在 `Config.gs` 裡：
+
+**Spreadsheet「TWSE 法人動能選股 App 資料庫」**（`initializeProject()` 第一次執行時建立，
+放在下面的「主資料夾」裡），裡面有這幾個分頁：
+
+| 分頁 | 內容 |
+|---|---|
+| `Portfolio` | 持股清單（代號/成本/買進日期/備註） |
+| `Reports` | 每日戰報精簡版（給手機 UI 用），依日期覆蓋 |
+| `RunLog` | 執行紀錄（自動保留最近 500 筆） |
+| `SkipDates` | 臨時停跑日清單 |
+| `AiDiagnosis` | AI 深度診斷結果歷史 |
+| `AiUsage` | AI 呼叫的 token 用量/預估費用紀錄 |
+
+**Google Drive 資料夾**（都是 `Config.gs` 裡指定的既有資料夾 ID，不是自動建立的新資料夾）：
+
+| 資料夾 | 對應 Config.gs | 內容 |
+|---|---|---|
+| 主資料夾（`DEFAULT_PARENT_FOLDER_ID`） | `getRootFolder_()` | 放上面那份 Spreadsheet，以及底下的 `Reports/`、`Regression/` 兩個自動建立的子資料夾 |
+| 歷史資料資料夾（`DEFAULT_HISTORY_FILES_FOLDER_ID`） | `getArchiveFolder_()` | **每月一份** `YYYY-MM_ALL_COMBINED.csv`（例如 `2026-07_ALL_COMBINED.csv`），這是歷史資料真正的存放位置，見下一節 |
+| 主資料夾/`Reports/` | `getReportsFolder_()` | 每日戰報 xlsx 快照（完整欄位版） |
+| 主資料夾/`Regression/` | `getRegressionFolder_()` | 回測結果、因子相關性掃描結果 CSV |
+
+要換掉這些資料夾，改 `Config.gs` 的 `DEFAULT_PARENT_FOLDER_ID` / `DEFAULT_HISTORY_FILES_FOLDER_ID`
+兩個常數就好（資料夾一定要先存在，App 不會自動幫你在別的地方新建）。
+
+### 歷史資料為什麼是「每月一份檔案」，不是一份 Sheets 分頁或一份大 CSV
+
+早期版本把整份歷史資料放在 Google Sheets 的 `History` 分頁裡，後來發現兩個問題：
+Google Sheets 單一試算表有 10,000,000 格上限（台股 1,700+ 檔股票，一天就吃掉約 4 萬格，
+撐不了太久）；而且不管是 Sheets 還是單一大 CSV，只要資料檔案大到一個程度，
+Apps Script 讀取檔案內容這個動作本身就會直接失敗（讀不進記憶體），跟存在哪裡無關。
+
+改成「每月一份 CSV」之後：
+- 每天自動抓資料，只需要讀寫「當月」那一份檔案，檔案大小永遠有界（最多一個月的量），
+  不會有讀不進去的問題。
+- 需要算 rolling 指標（例如 MA60）時，`readRecentHistory_(days)` 會自動算出需要讀哪幾個月的檔案，
+  不會每次都把全部歷史掃過一遍。
+- 「匯入既有彙整表」如果你丟一份橫跨很多個月的大檔案進去，一樣可能會撞到讀取上限——
+  這種情況建議先把大檔案按月拆開（見下方「補歷史資料」），拆完的小檔案本來就是這個資料夾要的格式，
+  甚至可以不透過 App，直接在 Google Drive 網頁介面把拆好的檔案丟進歷史資料資料夾就好，
+  下次排程跑的時候會自動偵測到、疊加上去。
 
 ## 架構對照（原 Colab → 這個專案）
 
 | 原本 Colab | 這裡 |
 |---|---|
-| Cell 0：掛載 Drive、設定路徑 | `Config.gs`（Script Properties 存 Spreadsheet ID / 三個 Drive 資料夾 ID） |
-| Cell 1：抓 T86/MI_INDEX/BWIBBU_d、合併存檔 | `DataFetch.gs` + `SheetUtils.upsertHistoryRows_` |
+| Cell 0：掛載 Drive、設定路徑 | `Config.gs`（Script Properties + 兩個使用者指定的既有 Drive 資料夾 ID） |
+| Cell 1：抓 T86/MI_INDEX/BWIBBU_d、合併存檔 | `DataFetch.gs` + `SheetUtils.upsertHistoryRows_`（實作在 `HistoryFiles.gs`） |
 | Cell 2：v17.0 評分/診斷 | `Analysis.gs` |
 | Cell 4：因子相關性掃描 | `FactorScan.gs` |
 | Cell 5：v16.10 Alpha 回測 | `Backtest.gs` |
 | pandas groupby/rolling/rank | `Utils.gs`（純 JS 重寫，見下方「為什麼要重寫」） |
-| `google_drive_output_dir`（ALL_COMBINED.csv） | Sheets 的 `History` 分頁 + Drive `Consolidated_file` 資料夾（封存用） |
+| `google_drive_output_dir`（ALL_COMBINED.csv） | 歷史資料資料夾裡每月一份的 `YYYY-MM_ALL_COMBINED.csv`（`HistoryFiles.gs`） |
 | `google_drive_folder_output_report_dir`（Reports） | Sheets 的 `Reports` 分頁 + Drive `Reports` 資料夾（xlsx 快照） |
 | `google_drive_folder_output_report_dir2`（Regression） | Drive `Regression` 資料夾（回測/因子掃描 CSV） |
 | Cell 6-14（v16 / v16.5 / v16.6 舊版持股清單迭代） | 沒有搬，v17.0 是目前邏輯最完整的版本；持股清單改成「持股管理」頁面可編輯 |
@@ -123,11 +169,10 @@ clasp push -f
 ### 2. 第一次授權
 
 在 Apps Script 編輯器選一個函式（例如 `initializeProject`）直接執行一次，Google 會跳出授權畫面，
-同意存取 Google Sheets / Google Drive。這個步驟會自動建立：
-
-- 一份新的 Google Sheets（名稱「TWSE 法人動能選股 App 資料庫」），內含 `History` / `Portfolio` /
-  `Reports` / `RunLog` / `SkipDates` 分頁
-- Google Drive 裡的 `TWSE_App` 資料夾，底下有 `Consolidated_file` / `Reports` / `Regression` 三個子資料夾
+同意存取 Google Sheets / Google Drive。這個步驟會建立「資料存放位置」那節列出的 Spreadsheet
+分頁，並確認/建立 `Reports`、`Regression` 兩個子資料夾——**前提是 `Config.gs` 裡
+`DEFAULT_PARENT_FOLDER_ID` / `DEFAULT_HISTORY_FILES_FOLDER_ID` 這兩個資料夾 ID 已經是你自己
+Drive 上真實存在、這個 Google 帳號有權限的資料夾**（不會自動幫你建立新資料夾，找不到會直接報錯）。
 
 （其實不用手動做這步也可以，Web App 開啟時 `bootstrap()` 會自動呼叫 `initializeProject()`；
 先手動跑一次純粹是為了在部署前就把授權跳窗處理掉。）
@@ -144,10 +189,16 @@ Apps Script 編輯器右上角「部署」→「新增部署作業」→ 類型�
 
 ### 4. 補歷史資料（選擇性）
 
-如果你原本在 Colab 已經有一份 `ALL_COMBINED.csv`，打開 App →「後台管理」→「匯入既有彙整表」，
-貼上這份檔案的 Google Drive 連結（或檔案 ID）→ 按「開始匯入」，就會以它為基礎繼續往後疊加，
-不用重新一天一天補抓。支援 CSV 或 Google 試算表，資料量大的話會自動分批處理並持續顯示進度，
-不支援 `.xlsx`（Apps Script 沒有原生解析器，需要先在 Drive 另存成 Google 試算表或 CSV 再匯入）。
+如果你原本在 Colab 已經有一份 `ALL_COMBINED.csv`，有兩種方式讓它成為起始資料：
+
+- **App 裡匯入**：打開 App →「後台管理」→「匯入既有彙整表」，直接上傳檔案或貼 Drive 連結/檔案 ID →
+  按「開始匯入」，資料會依日期自動拆進歷史資料資料夾對應月份的檔案。支援 CSV 或 Google 試算表，
+  資料量大的話會自動分批處理並持續顯示進度，不支援 `.xlsx`（Apps Script 沒有原生解析器）。
+- **直接丟進資料夾**：如果檔案橫跨的月份很多、一次匯入容易撞到 Apps Script 讀取大檔案的上限，
+  先自己按月拆開（例如用 pandas 依 `日期` 欄位 `groupby` 月份存成多個 CSV），檔名取
+  `YYYY-MM_ALL_COMBINED.csv`（例如 `2026-01_ALL_COMBINED.csv`），直接在 Google Drive
+  網頁介面把拆好的檔案丟進「歷史資料資料夾」（`DEFAULT_HISTORY_FILES_FOLDER_ID` 那個），
+  完全不用透過 App——下次讀取歷史資料時就會自動抓到。
 
 如果沒有舊資料，就到「後台管理」按「立即測試執行」抓當天的資料；之後想針對某個區間重新抓取
 （例如補救某幾天抓取失敗），用「資料範圍重新彙整」選定日期區間即可，一樣支援分批處理與進度顯示，
@@ -261,11 +312,10 @@ npm test
 
 ## 已知限制
 
-- **Google Sheets 上限**：單一試算表最多 10,000,000 格。台股上市櫃合計約 1,700+ 檔，
-  `History` 一天就會增加約 4 萬格。為了不要撞到這個上限，`History` 分頁只會保留最近
-  `Config.gs` 裡 `HISTORY_RETENTION_DAYS`（預設 270 天）的資料，超過的會自動封存成 CSV
-  放進 Drive 的「歷史封存」資料夾（後台管理可以看到），再從 Sheets 移除。需要更長的歷史資料
-  做研究時，去那個資料夾把舊檔案下載回來就有。
+- **單一檔案不能太大**：歷史資料按月分檔後，正常情況下每個月的檔案都夠小、讀寫沒問題；
+  但如果用「匯入既有彙整表」一次塞一份橫跨很多個月的巨大檔案，還是可能撞到 Apps Script
+  讀取檔案內容的上限（這是平台限制，不是儲存位置的問題）。碰到這種情況請先按月拆開再匯入，
+  見「補歷史資料」那節。
 - **Apps Script 單次執行 6 分鐘上限**：`scheduledDailyFetch()` 一天只抓一天資料，沒有這個問題；
   但 `backfillHistory()` 補多天歷史、或 `runFactorCorrelationScan()` 在資料量很大時，
   有內部時間預算保護，超時會提前結束並告訴你進度。
@@ -278,5 +328,5 @@ npm test
   這個網址不是 Google 正式公開文件的一部分，理論上未來有變動風險；如果哪天匯出失敗，
   改存 CSV（`saveBacktestToDrive` 用的做法）是更穩的備案。
 - **為什麼歷史資料用 CSV 不用 Excel**：這也是沿用原本 Colab 的教訓——資料量大了以後 Excel
-  讀寫會變很慢。`History` 的即時查詢/運算都是 Google Sheets（比較快、原生支援），
-  但落地封存（歷史封存、匯入既有彙整表）都是 CSV，不會有 Excel 資料量一大就變慢的問題。
+  讀寫會變很慢。歷史資料（每月一份）跟匯入既有彙整表都是 CSV，不會有 Excel 資料量一大就變慢的問題；
+  只有每日戰報快照跟原本 Colab 一樣輸出成 xlsx（單一天的資料量很小，沒有這個顧慮）。
