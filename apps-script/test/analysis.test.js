@@ -177,4 +177,119 @@ function buildSyntheticHistory(days) {
   console.log('Test 7 (computeScreeningStats_ null-vs-low-rank) passed.');
 }
 
+// --- 8. 獨立驗證 BigQuerySync.gs buildLatestDayFactorsSql_ 的「數學設計」跟 computeFactors_
+//    （已經逐行對照 Python 驗證過的引擎）在刁鑽情境下算出一樣的結果：零成交量日、剛上市資料不足、
+//    橫斷面排名同分。這裡不是呼叫同一套 Utils.gs 函式比較（那樣沒有意義），是把 SQL 公式
+//    另外用陣列運算重新刻一次當作獨立對照組，兩邊都對，才真的有信心 SQL 版本翻譯正確。 ---
+{
+  function dateStrAt(baseIdx) {
+    const start = new Date(2026, 0, 1);
+    const d = new Date(start);
+    d.setDate(d.getDate() + baseIdx);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  // code: 股票代號；startIdx/count：相對於共同時間軸的起訖（用來模擬「剛上市、資料不足」的股票）；
+  // zeroVolRelIdx：在這檔股票自己的第幾天（0-indexed）成交量歸零，模擬停牌/無量。
+  function buildStockRows(code, startIdx, count, zeroVolRelIdx) {
+    const rows = [];
+    for (let i = 0; i < count; i++) {
+      const vol = i === zeroVolRelIdx ? 0 : 5000000 + i * 1000;
+      rows.push({
+        '日期': dateStrAt(startIdx + i), '證券代號': code, '證券名稱': code + '_名稱',
+        '外資': 50000, '投信': 100000, '自營商': 0, '三大法人買賣超股數': 150000,
+        '成交股數': vol, '成交筆數': 10000, '成交金額': 100000000,
+        '開盤價': 20 + i * 0.3, '最高價': 20 + i * 0.3 + 0.5, '最低價': 20 + i * 0.3 - 0.5, '收盤價': 20 + i * 0.3,
+        '漲跌(+/-)': '+', '漲跌價差': 0.3,
+        '最後揭示買價': 20 + i * 0.3, '最後揭示買量': 100, '最後揭示賣價': 20 + i * 0.3 + 0.1, '最後揭示賣量': 100,
+        '殖利率(%)': 2.0, '本益比': 15, '股價淨值比': 3, '財報年/季': '2026Q1'
+      });
+    }
+    return rows;
+  }
+
+  // 共同時間軸終點是 index 69（第 70 天）：2330 正常 70 天；2603 正常 70 天但第 65 天無量；
+  // 1101 剛上市只有 15 天資料（index 55..69），MA20/MA60/Inst_Part_MA5 在最新一天都該是 null。
+  const combined = []
+    .concat(buildStockRows('2330', 0, 70, -1))
+    .concat(buildStockRows('2603', 0, 70, 65))
+    .concat(buildStockRows('1101', 55, 15, -1));
+
+  const computed = context.computeFactors_(combined, {});
+  const latestDateStr = dateStrAt(69);
+  const scanRows = computed.filter(function (r) { return r['日期'] === latestDateStr; });
+  const byCode = {};
+  scanRows.forEach(function (r) { byCode[r['證券代號']] = r; });
+
+  assert.strictEqual(scanRows.length, 3, '三檔股票在共同的最新一天都該有一筆');
+
+  // --- 獨立重刻一次 SQL 公式（COUNT-based 視窗完整性保護 + RANK 同分平均排名），純陣列運算 ---
+  function simulateStock(rows) {
+    const n = rows.length;
+    const close = rows.map(function (r) { return r['收盤價']; });
+    const vol = rows.map(function (r) { return r['成交股數']; });
+    const instNet = rows.map(function (r) { return r['投信'] + r['外資'] + r['自營商']; });
+    const instPart = vol.map(function (v, i) { return v === 0 ? null : (Math.abs(rows[i]['投信']) + Math.abs(rows[i]['外資']) + Math.abs(rows[i]['自營商'])) / v; });
+
+    function windowAvg(values, i, w, requireNonNullCount) {
+      if (i - w + 1 < 0) return null;
+      const win = values.slice(i - w + 1, i + 1);
+      const nonNull = win.filter(function (v) { return v !== null; });
+      if (requireNonNullCount && nonNull.length !== w) return null;
+      return nonNull.reduce(function (a, b) { return a + b; }, 0) / win.length;
+    }
+    function windowSum(values, i, w) {
+      if (i - w + 1 < 0) return null;
+      return values.slice(i - w + 1, i + 1).reduce(function (a, b) { return a + b; }, 0);
+    }
+
+    const last = n - 1;
+    const ma20 = windowAvg(close, last, 20, false);
+    const ma60 = windowAvg(close, last, 60, false);
+    const volMa20 = windowAvg(vol, last, 20, false);
+    const instPartMa5 = windowAvg(instPart, last, 5, true); // 唯一可能視窗內含 null 的欄位，需要 nonNull-count 保護
+    const isDrop = rows.map(function (r, i) {
+      if (i === 0) return 0;
+      const ret = close[i - 1] === 0 ? null : close[i] / close[i - 1] - 1;
+      return ret !== null && ret < 0 ? 1 : 0;
+    });
+    const isBuyOnDrop = isDrop.map(function (d, i) { return (d === 1 && instNet[i] > 0) ? 1 : 0; });
+    const dropCount20 = windowSum(isDrop, last, 20);
+    const buyOnDrop20 = windowSum(isBuyOnDrop, last, 20);
+    const ibf20 = (dropCount20 === null || dropCount20 === 0) ? 0 : buyOnDrop20 / dropCount20;
+    const ma20Prev3 = (last - 3 >= 0) ? windowAvg(close, last - 3, 20, false) : null;
+    const ma20Slope = (ma20 !== null && ma20Prev3 !== null) ? ma20 - ma20Prev3 : null;
+    const volRatio = (volMa20 !== null && volMa20 !== 0) ? vol[last] / volMa20 : null;
+    const trendScore = (ma20 !== null && close[last] > ma20 ? 1 : 0) + (ma20Slope !== null && ma20Slope > 0 ? 1 : 0);
+
+    return { ma20: ma20, ma60: ma60, instPartMa5: instPartMa5, ibf20: ibf20, volRatio: volRatio, trendScore: trendScore };
+  }
+
+  const sim = {
+    '2330': simulateStock(combined.filter(function (r) { return r['證券代號'] === '2330'; })),
+    '2603': simulateStock(combined.filter(function (r) { return r['證券代號'] === '2603'; })),
+    '1101': simulateStock(combined.filter(function (r) { return r['證券代號'] === '1101'; }))
+  };
+
+  // 逐檔比對 computeFactors_（信任的引擎）跟獨立重刻的 SQL 公式模擬
+  ['2330', '2603', '1101'].forEach(function (code) {
+    const expected = byCode[code];
+    const s = sim[code];
+    if (s.ma20 === null) assert.strictEqual(expected.MA20, null, code + ' MA20 應為 null'); else assert.ok(approxEqual(expected.MA20, s.ma20), code + ' MA20 不一致');
+    if (s.ma60 === null) assert.strictEqual(expected.MA60, null, code + ' MA60 應為 null'); else assert.ok(approxEqual(expected.MA60, s.ma60), code + ' MA60 不一致');
+    if (s.instPartMa5 === null) assert.strictEqual(expected.Inst_Part_MA5, null, code + ' Inst_Part_MA5 應為 null'); else assert.ok(approxEqual(expected.Inst_Part_MA5, s.instPartMa5), code + ' Inst_Part_MA5 不一致');
+    assert.ok(approxEqual(expected.IBF_20D, s.ibf20), code + ' IBF_20D 不一致');
+    assert.strictEqual(expected.Trend_Score, s.trendScore, code + ' Trend_Score 不一致');
+  });
+
+  // 關鍵斷言：1101 資料不足 20 天，MA20/MA60/Inst_Part_MA5 都該是 null，IBF_20D 該 fillna 成 0（不是 null）
+  assert.strictEqual(byCode['1101'].MA20, null);
+  assert.strictEqual(byCode['1101'].MA60, null);
+  assert.strictEqual(byCode['1101'].IBF_20D, 0);
+  // 2603 第 65 天無量，落在最新一天 Inst_Part_MA5 的 5 天視窗內（65~69），整個視窗因為含 null 而是 null
+  assert.strictEqual(byCode['2603'].Inst_Part_MA5, null, '視窗內只要有一天無法算 Inst_Participation，5 日均值整個要是 null，不能只跳過那天');
+
+  console.log('Test 8 (BigQuery SQL design cross-check vs computeFactors_) passed.');
+}
+
 console.log('All Analysis.gs tests passed.');

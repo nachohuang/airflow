@@ -192,6 +192,218 @@ function mapBqRowToHistoryRow_(bqRow) {
   return row;
 }
 
+/**
+ * 「今日戰報」／「篩選漏斗明細」專用：把 Analysis.gs computeFactors_ 的 rolling 因子 +
+ * 橫斷面排名 + Armor_Score 邏輯整套搬進 BigQuery window function 算，只回傳「最新一個交易日」
+ * 每檔股票已經算好的一列。取代原本把 ANALYSIS_LOOKBACK_DAYS 天的原始資料整包搬進 Apps Script
+ * 再用 computeFactors_ 算一次的做法——150 天 x 全市場股票動輒十幾萬列，超出 Apps Script V8
+ * 執行環境的記憶體上限（實測會直接噴「記憶體不足」）。BigQuery 本來就是為了這種規模的
+ * 運算設計的，只要最後只回傳「今天」這一天算好的結果，Apps Script 端的資料量就從
+ * 「天數 x 股票數」降到「股票數」。
+ *
+ * 每一步都刻意逐條對照 Utils.gs 的語意翻譯，不是「差不多」版本：
+ *   - rollingApply（MA20/MA60/Vol_MA20/Inst_Part_MA5/dropCount20/buyOnDrop20）要求「整個視窗
+ *     都有值」才給結果，視窗不足或視窗內有任何一格是 null 都是 null——用 COUNT(*) OVER (同一個
+ *     frame) 是否等於視窗大小來判斷「視窗夠不夠長」，用 COUNT(欄位) OVER (同一個 frame) 是否
+ *     跟 COUNT(*) 相等來判斷「視窗內有沒有 null」，兩者都成立才用 AVG()/SUM() 的結果，
+ *     不能只依賴 BigQuery 內建 AVG()/SUM() 自動略過 null、自動接受不滿的視窗這兩種預設行為
+ *     （那樣會跟 pandas rolling(min_periods=window) 的語意不一致）。
+ *   - percentRank（Inst_Part_Rank/IBF_20D_Rank/Vol_Ratio_Rank）是 pandas rank(pct=True,
+ *     method='average') 的語意（同分取名次平均、null 不計入分母），不是 BigQuery 內建
+ *     PERCENT_RANK() 視窗函式的公式（那是 (rank-1)/(count-1)，完全是另一回事）。這裡改用
+ *     RANK() 搭配「同分列數」手算「平均名次 / 非 null 筆數」，數學上等於 percentRank() 的作法。
+ *   - Adjusted_Peak 這裡算的是「回看視窗內」的一般 expanding max（非持股的情況跟原本邏輯一致），
+ *     持股的「從買進日起算」版本無法在這裡知道（買進日是使用者的持股資料，不是歷史資料的一部分），
+ *     由 fetchAdjustedPeaksForHoldings_() 另外用小範圍查詢（只查有持股的幾檔股票）覆蓋。
+ *
+ * cutoffStr：只查這天（含）以後的原始資料，要跟 ANALYSIS_LOOKBACK_DAYS 對齊——
+ * 不限制範圍的話，expanding max 等於算成「全部歷史以來的最高價」，跟原本「只看回看視窗內」
+ * 的語意不一致。
+ */
+function buildLatestDayFactorsSql_(sourceRef, cutoffStr) {
+  var byStockOrderDt = 'PARTITION BY stock_id ORDER BY dt';
+  var w5 = 'ROWS BETWEEN 4 PRECEDING AND CURRENT ROW';
+  var w20 = 'ROWS BETWEEN 19 PRECEDING AND CURRENT ROW';
+  var w60 = 'ROWS BETWEEN 59 PRECEDING AND CURRENT ROW';
+  return [
+    'WITH base AS (',
+    '  SELECT',
+    '    stock_id, stock_name, date_str, SAFE_CAST(date_str AS DATE) AS dt,',
+    '    IFNULL(SAFE_CAST(foreign_net AS FLOAT64), 0) AS foreign_v,',
+    '    IFNULL(SAFE_CAST(trust_net AS FLOAT64), 0) AS trust_v,',
+    '    IFNULL(SAFE_CAST(dealer_net AS FLOAT64), 0) AS dealer_v,',
+    '    IFNULL(SAFE_CAST(inst_net_shares AS FLOAT64), 0) AS inst_net_shares_v,',
+    '    IFNULL(SAFE_CAST(volume_shares AS FLOAT64), 0) AS vol,',
+    '    IFNULL(SAFE_CAST(trade_count AS FLOAT64), 0) AS trade_count_v,',
+    '    IFNULL(SAFE_CAST(turnover AS FLOAT64), 0) AS turnover_v,',
+    '    IFNULL(SAFE_CAST(open_price AS FLOAT64), 0) AS open_v,',
+    '    IFNULL(SAFE_CAST(high_price AS FLOAT64), 0) AS high_v,',
+    '    IFNULL(SAFE_CAST(low_price AS FLOAT64), 0) AS low_v,',
+    '    IFNULL(SAFE_CAST(close_price AS FLOAT64), 0) AS close,',
+    '    change_sign,',
+    '    IFNULL(SAFE_CAST(change_amount AS FLOAT64), 0) AS change_amount_v,',
+    '    IFNULL(SAFE_CAST(bid_price AS FLOAT64), 0) AS bid_price_v,',
+    '    IFNULL(SAFE_CAST(bid_vol AS FLOAT64), 0) AS bid_vol_v,',
+    '    IFNULL(SAFE_CAST(ask_price AS FLOAT64), 0) AS ask_price_v,',
+    '    IFNULL(SAFE_CAST(ask_vol AS FLOAT64), 0) AS ask_vol_v,',
+    '    IFNULL(SAFE_CAST(dividend_yield AS FLOAT64), 0) AS dividend_yield_v,',
+    '    IFNULL(SAFE_CAST(pe_ratio AS FLOAT64), 0) AS pe_ratio_v,',
+    '    IFNULL(SAFE_CAST(pb_ratio AS FLOAT64), 0) AS pb_ratio_v,',
+    '    fin_report_period',
+    '  FROM `' + sourceRef + '`',
+    "  WHERE LENGTH(stock_id) = 4 AND date_str >= '" + cutoffStr + "'",
+    '),',
+    'win AS (',
+    '  SELECT *,',
+    '    (foreign_v + trust_v + dealer_v) AS inst_net,',
+    '    SAFE_DIVIDE(ABS(foreign_v) + ABS(trust_v) + ABS(dealer_v), vol) AS inst_participation,',
+    '    SAFE_DIVIDE(close, LAG(close) OVER (' + byStockOrderDt + ')) - 1 AS daily_return,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w20 + ') AS cnt20,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w60 + ') AS cnt60,',
+    '    AVG(close) OVER (' + byStockOrderDt + ' ' + w20 + ') AS ma20_raw,',
+    '    AVG(close) OVER (' + byStockOrderDt + ' ' + w60 + ') AS ma60_raw,',
+    '    AVG(vol) OVER (' + byStockOrderDt + ' ' + w20 + ') AS vol_ma20_raw,',
+    '    MAX(close) OVER (' + byStockOrderDt + ' ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS adjusted_peak_generic',
+    '  FROM base',
+    '),',
+    'step1 AS (',
+    '  SELECT *,',
+    '    IF(cnt20 = 20, ma20_raw, NULL) AS ma20,',
+    '    IF(cnt60 = 60, ma60_raw, NULL) AS ma60,',
+    '    IF(cnt20 = 20, vol_ma20_raw, NULL) AS vol_ma20',
+    '  FROM win',
+    '),',
+    'step2 AS (',
+    '  SELECT *,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w5 + ') AS cnt5,',
+    '    COUNT(inst_participation) OVER (' + byStockOrderDt + ' ' + w5 + ') AS cnt5_nonnull,',
+    '    AVG(inst_participation) OVER (' + byStockOrderDt + ' ' + w5 + ') AS inst_part_ma5_raw,',
+    '    CASE WHEN daily_return < 0 THEN 1 ELSE 0 END AS is_drop,',
+    '    CASE WHEN daily_return < 0 AND inst_net > 0 THEN 1 ELSE 0 END AS is_inst_buy_on_drop,',
+    '    SAFE_DIVIDE(vol, vol_ma20) AS vol_ratio,',
+    '    SAFE_DIVIDE(close - ma60, ma60) AS bias60,',
+    '    LAG(ma20, 3) OVER (' + byStockOrderDt + ') AS ma20_3ago',
+    '  FROM step1',
+    '),',
+    'step3 AS (',
+    '  SELECT *,',
+    '    IF(cnt5 = 5 AND cnt5_nonnull = 5, inst_part_ma5_raw, NULL) AS inst_part_ma5,',
+    '    (ma20 - ma20_3ago) AS ma20_slope,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w20 + ') AS cnt20b,',
+    '    SUM(is_drop) OVER (' + byStockOrderDt + ' ' + w20 + ') AS drop_count_20_raw,',
+    '    SUM(is_inst_buy_on_drop) OVER (' + byStockOrderDt + ' ' + w20 + ') AS buy_on_drop_20_raw',
+    '  FROM step2',
+    '),',
+    'step4 AS (',
+    '  SELECT *,',
+    '    IF(cnt20b = 20, drop_count_20_raw, NULL) AS drop_count_20,',
+    '    IF(cnt20b = 20, buy_on_drop_20_raw, NULL) AS buy_on_drop_20',
+    '  FROM step3',
+    '),',
+    'step5 AS (',
+    '  SELECT *,',
+    '    CASE WHEN drop_count_20 IS NULL OR drop_count_20 = 0 THEN 0 ELSE buy_on_drop_20 / drop_count_20 END AS ibf_20d,',
+    '    (CASE WHEN ma20 IS NOT NULL AND close > ma20 THEN 1 ELSE 0 END',
+    '      + CASE WHEN ma20_slope IS NOT NULL AND ma20_slope > 0 THEN 1 ELSE 0 END) AS trend_score',
+    '  FROM step4',
+    '),',
+    'latest AS (',
+    '  SELECT * FROM step5 WHERE dt = (SELECT MAX(dt) FROM step5)',
+    '),',
+    'ranked AS (',
+    '  SELECT *,',
+    '    CASE WHEN inst_part_ma5 IS NULL THEN NULL ELSE',
+    '      (RANK() OVER (ORDER BY inst_part_ma5 ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY inst_part_ma5) - 1) / 2.0) / COUNT(inst_part_ma5) OVER ()',
+    '    END AS inst_part_rank,',
+    '    CASE WHEN ibf_20d IS NULL THEN NULL ELSE',
+    '      (RANK() OVER (ORDER BY ibf_20d ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY ibf_20d) - 1) / 2.0) / COUNT(ibf_20d) OVER ()',
+    '    END AS ibf_20d_rank,',
+    '    CASE WHEN vol_ratio IS NULL THEN NULL ELSE',
+    '      (RANK() OVER (ORDER BY vol_ratio ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY vol_ratio) - 1) / 2.0) / COUNT(vol_ratio) OVER ()',
+    '    END AS vol_ratio_rank',
+    '  FROM latest',
+    ')',
+    'SELECT',
+    '  stock_id, stock_name, date_str,',
+    '  foreign_v AS foreign_net, trust_v AS trust_net, dealer_v AS dealer_net, inst_net_shares_v AS inst_net_shares,',
+    '  vol AS volume_shares, trade_count_v AS trade_count, turnover_v AS turnover,',
+    '  open_v AS open_price, high_v AS high_price, low_v AS low_price, close AS close_price,',
+    '  change_sign, change_amount_v AS change_amount,',
+    '  bid_price_v AS bid_price, bid_vol_v AS bid_vol, ask_price_v AS ask_price, ask_vol_v AS ask_vol,',
+    '  dividend_yield_v AS dividend_yield, pe_ratio_v AS pe_ratio, pb_ratio_v AS pb_ratio, fin_report_period,',
+    '  inst_net, inst_participation, inst_part_ma5, daily_return, is_drop, is_inst_buy_on_drop,',
+    '  ibf_20d, ma20, ma20_slope, trend_score, vol_ma20, vol_ratio, ma60, bias60, adjusted_peak_generic,',
+    '  inst_part_rank, ibf_20d_rank, vol_ratio_rank,',
+    '  CASE WHEN inst_part_rank IS NULL OR ibf_20d_rank IS NULL OR vol_ratio_rank IS NULL THEN NULL',
+    '    ELSE ROUND(inst_part_rank * 45 + ibf_20d_rank * 30 + vol_ratio_rank * 15 + trend_score * 10, 1)',
+    '  END AS armor_score',
+    'FROM ranked'
+  ].join('\n');
+}
+
+/** buildLatestDayFactorsSql_ 查詢結果（ascii 欄名，全部字串／null）轉回跟 computeFactors_
+ *  輸出完全一樣形狀的列物件（中文欄名），讓 diagnoseRow_ / buildFullReportRow_ /
+ *  computePredictedFactorScores_ 完全不用改。Adjusted_Peak 先填「一般 expanding max」，
+ *  有持股的股票會在 Apps Script 端被 fetchAdjustedPeaksForHoldings_() 的結果覆蓋。 */
+function mapBqLatestFactorRowToAnalysisRow_(bqRow) {
+  return {
+    '日期': normalizeDateStr(bqRow.date_str),
+    '證券代號': zfill4(String(bqRow.stock_id || '').trim()),
+    '證券名稱': String(bqRow.stock_name === null || bqRow.stock_name === undefined ? '' : bqRow.stock_name).trim(),
+    '外資': toNumber(bqRow.foreign_net),
+    '投信': toNumber(bqRow.trust_net),
+    '自營商': toNumber(bqRow.dealer_net),
+    '三大法人買賣超股數': toNumber(bqRow.inst_net_shares),
+    '成交股數': toNumber(bqRow.volume_shares),
+    '成交筆數': toNumber(bqRow.trade_count),
+    '成交金額': toNumber(bqRow.turnover),
+    '開盤價': toNumber(bqRow.open_price),
+    '最高價': toNumber(bqRow.high_price),
+    '最低價': toNumber(bqRow.low_price),
+    '收盤價': toNumber(bqRow.close_price),
+    '漲跌(+/-)': String(bqRow.change_sign === null || bqRow.change_sign === undefined ? '' : bqRow.change_sign).trim(),
+    '漲跌價差': toNumber(bqRow.change_amount),
+    '最後揭示買價': toNumber(bqRow.bid_price),
+    '最後揭示買量': toNumber(bqRow.bid_vol),
+    '最後揭示賣價': toNumber(bqRow.ask_price),
+    '最後揭示賣量': toNumber(bqRow.ask_vol),
+    '殖利率(%)': toNumber(bqRow.dividend_yield),
+    '本益比': toNumber(bqRow.pe_ratio),
+    '股價淨值比': toNumber(bqRow.pb_ratio),
+    '財報年/季': String(bqRow.fin_report_period === null || bqRow.fin_report_period === undefined ? '' : bqRow.fin_report_period).trim(),
+
+    Inst_Net: toNumber(bqRow.inst_net),
+    Inst_Participation: toNumberOrNull(bqRow.inst_participation),
+    Inst_Part_MA5: toNumberOrNull(bqRow.inst_part_ma5),
+    Inst_Part_Rank: toNumberOrNull(bqRow.inst_part_rank),
+    Daily_Return: toNumberOrNull(bqRow.daily_return),
+    Is_Drop: toNumber(bqRow.is_drop),
+    Is_Inst_Buy_On_Drop: toNumber(bqRow.is_inst_buy_on_drop),
+    IBF_20D: toNumberOrNull(bqRow.ibf_20d),
+    IBF_20D_Rank: toNumberOrNull(bqRow.ibf_20d_rank),
+    MA20: toNumberOrNull(bqRow.ma20),
+    MA20_Slope: toNumberOrNull(bqRow.ma20_slope),
+    Trend_Score: toNumber(bqRow.trend_score),
+    Vol_MA20: toNumberOrNull(bqRow.vol_ma20),
+    Vol_Ratio: toNumberOrNull(bqRow.vol_ratio),
+    Vol_Ratio_Rank: toNumberOrNull(bqRow.vol_ratio_rank),
+    MA60: toNumberOrNull(bqRow.ma60),
+    BIAS_60: toNumberOrNull(bqRow.bias60),
+    Armor_Score: toNumberOrNull(bqRow.armor_score),
+    Adjusted_Peak: toNumberOrNull(bqRow.adjusted_peak_generic)
+  };
+}
+
+/** 只查「指定幾檔股票」的原始歷史列（給持股的「從買進日起算最高價」用，資料量小，
+ *  跟今日戰報的全市場查詢完全無關，不會有記憶體問題）。 */
+function buildHistoryRowsForStocksSql_(sourceRef, stockIds, startStr) {
+  var cols = bqColumnNames_().join(', ');
+  var idList = stockIds.map(function (id) { return "'" + String(id).replace(/'/g, '') + "'"; }).join(', ');
+  var sql = 'SELECT ' + cols + ' FROM `' + sourceRef + '` WHERE stock_id IN (' + idList + ')';
+  if (startStr) sql += " AND date_str >= '" + startStr + "'";
+  return sql;
+}
+
 // ---- Apps Script 專屬（需要 BigQuery 進階服務 + DriveApp，無法在 Node.js 測試）----
 
 function getBigQuerySettings() {
@@ -635,17 +847,78 @@ function sourceRefForBigQueryRead_(settings) {
 }
 
 /**
- * BigQuery 模式（external／materialized）下，核心功能（今日戰報／個股分析／回測研究／因子相關性掃描）
- * 取得歷史資料列的入口，取代原本直接讀 Drive 月份檔案的 readRecentHistoryFromFiles_ /
- * readHistoryRangeFromFiles_（見 SheetUtils.gs 的 readRecentHistory_ / readHistoryRange_，
- * 依目前的資料來源模式決定要呼叫哪一個）。回傳格式（中文欄名、數值已轉型）
- * 跟原本讀 Drive CSV 完全一樣，下游計算邏輯不用改。
+ * BigQuery 模式（external／materialized）下，個股分析／回測研究／因子相關性掃描
+ * 取得「一段日期區間」原始歷史資料列的入口，取代原本直接讀 Drive 月份檔案的
+ * readRecentHistoryFromFiles_ / readHistoryRangeFromFiles_（見 SheetUtils.gs 的
+ * readRecentHistory_ / readHistoryRange_，依目前的資料來源模式決定要呼叫哪一個）。
+ * 回傳格式（中文欄名、數值已轉型）跟原本讀 Drive CSV 完全一樣，下游計算邏輯不用改。
+ * 「今日戰報」／篩選漏斗明細改用 queryLatestDayFactorsFromBigQuery_()（見下方），
+ * 不再整段搬進 Apps Script 算，避免全市場 x 回看天數的資料量塞爆 Apps Script 記憶體。
  */
 function queryHistoryRowsFromBigQuery_(startStr, endStr) {
   var settings = requireBigQueryProjectId_();
   refreshDataSourceForMode_(settings);
   var rows = runBqQuery_(buildHistoryRangeQuerySql_(sourceRefForBigQueryRead_(settings), startStr, endStr), 'history_range');
   return rows.map(mapBqRowToHistoryRow_);
+}
+
+/**
+ * 「今日戰報」／篩選漏斗明細的 BigQuery 模式入口：整段 rolling 因子 + 排名 + Armor_Score
+ * 都在 BigQuery 裡算完（buildLatestDayFactorsSql_），Apps Script 只拿回「最新一個交易日」
+ * 每檔股票已經算好的一列（約兩千列），不是 ANALYSIS_LOOKBACK_DAYS 天 x 全市場的原始資料
+ * （十幾萬列，會撞 Apps Script V8 記憶體上限）。
+ * portfolioMap 只用來知道「有哪些持股」，讓 fetchAdjustedPeaksForHoldings_() 用小範圍查詢
+ * 覆蓋這幾檔股票「從買進日起算」的最高價（一般股票的 Adjusted_Peak 已經在主查詢裡算好）。
+ */
+function queryLatestDayFactorsFromBigQuery_(portfolioMap) {
+  var settings = requireBigQueryProjectId_();
+  refreshDataSourceForMode_(settings);
+
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - CONFIG.ANALYSIS_LOOKBACK_DAYS);
+  var sql = buildLatestDayFactorsSql_(sourceRefForBigQueryRead_(settings), normalizeDateStr(cutoff));
+  var rows = runBqQuery_(sql, 'latest_day_factors').map(mapBqLatestFactorRowToAnalysisRow_);
+
+  var peaks = fetchAdjustedPeaksForHoldings_(portfolioMap, settings);
+  rows.forEach(function (r) {
+    if (peaks.hasOwnProperty(r['證券代號'])) r.Adjusted_Peak = peaks[r['證券代號']];
+  });
+  return rows;
+}
+
+/**
+ * 對有持股的每一檔股票，只查「這幾檔股票、從最早買進日起算」的原始歷史列
+ * （資料量是「持股數 x 天數」，跟全市場查詢完全不同量級，不會有記憶體問題），
+ * 完整重用（不是重寫）已經驗證過的 computeFactors_ + expandingMaxFromIndex 邏輯算出
+ * 「從買進日起算的最高價」，回傳 {證券代號: peak} 給 queryLatestDayFactorsFromBigQuery_()
+ * 覆蓋主查詢算出來的「一般 expanding max」版本。
+ */
+function fetchAdjustedPeaksForHoldings_(portfolioMap, settings) {
+  var stockIds = Object.keys(portfolioMap || {});
+  if (stockIds.length === 0) return {};
+
+  var earliestBuy = null;
+  stockIds.forEach(function (id) {
+    var bd = portfolioMap[id] && portfolioMap[id].buyDate;
+    if (bd && (!earliestBuy || bd < earliestBuy)) earliestBuy = bd;
+  });
+
+  var sql = buildHistoryRowsForStocksSql_(sourceRefForBigQueryRead_(settings), stockIds, earliestBuy);
+  var rawRows = runBqQuery_(sql, 'holdings_peak').map(mapBqRowToHistoryRow_);
+  if (rawRows.length === 0) return {};
+
+  var computed = computeFactors_(rawRows, portfolioMap);
+  var latestByStock = {};
+  computed.forEach(function (r) {
+    var code = r['證券代號'];
+    var d = normalizeDateStr(r['日期']);
+    if (!latestByStock[code] || d > latestByStock[code].date) {
+      latestByStock[code] = { date: d, peak: r.Adjusted_Peak };
+    }
+  });
+  var out = {};
+  Object.keys(latestByStock).forEach(function (code) { out[code] = latestByStock[code].peak; });
+  return out;
 }
 
 /** BigQuery 模式下的資料範圍摘要（開機資訊 + 「資料總覽」頁籤用），取代讀 Drive 月份檔案算出來的版本。 */

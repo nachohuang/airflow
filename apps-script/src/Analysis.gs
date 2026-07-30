@@ -152,23 +152,38 @@ function computeFactors_(rows, portfolioMap) {
 }
 
 /**
- * 執行完整分析：讀最近 N 天 History -> 算因子 -> 對「最新一天」做診斷 -> 回傳戰報（未寫入任何地方）。
+ * 取得「最新一個交易日」每檔股票已經算好因子的列（scanRows）。
+ * BigQuery 模式（external／materialized）下改呼叫 queryLatestDayFactorsFromBigQuery_()——
+ * rolling 因子/橫斷面排名/Armor_Score 都在 BigQuery 裡算完，Apps Script 只拿回「今天」
+ * 這一天的結果（約兩千列），不是 ANALYSIS_LOOKBACK_DAYS 天 x 全市場的原始資料（十幾萬列，
+ * 會撞 Apps Script V8 記憶體上限）。native 模式（沒設定 BigQuery）維持原本讀 Drive 月份檔案
+ * + 在 Apps Script 用 computeFactors_ 算的做法，資料量本來就小很多，不受影響。
  */
-function runAnalysis() {
-  var rawRows = readRecentHistory_(CONFIG.ANALYSIS_LOOKBACK_DAYS);
-  if (rawRows.length === 0) return { latestDate: null, report: [], fullReport: [] };
-
-  var portfolioMap = getPortfolioMap_();
+function computeLatestDayRows_(portfolioMap) {
+  if (shouldUseBigQueryForReads_()) {
+    return queryLatestDayFactorsFromBigQuery_(portfolioMap);
+  }
+  var rawRows = readRecentHistoryFromFiles_(CONFIG.ANALYSIS_LOOKBACK_DAYS);
+  if (rawRows.length === 0) return [];
   var rows = computeFactors_(rawRows, portfolioMap);
-
   var latestDateStr = null;
   rows.forEach(function (r) {
     var d = normalizeDateStr(r['日期']);
     if (!latestDateStr || d > latestDateStr) latestDateStr = d;
   });
-  if (!latestDateStr) return { latestDate: null, report: [], fullReport: [] };
+  if (!latestDateStr) return [];
+  return rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+}
 
-  var scanRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+/**
+ * 執行完整分析：取得「最新一天」已算好因子的列 -> 對每一列做診斷 -> 回傳戰報（未寫入任何地方）。
+ */
+function runAnalysis() {
+  var portfolioMap = getPortfolioMap_();
+  var scanRows = computeLatestDayRows_(portfolioMap);
+  if (scanRows.length === 0) return { latestDate: null, report: [], fullReport: [] };
+
+  var latestDateStr = scanRows[0]['日期'];
   var appliedFactorModels = getAppliedFactorModels(); // 讀 FactorModelHistory 分頁，跟 BigQuery 無關，很快
   var report = [];
   var fullReport = [];
@@ -342,20 +357,11 @@ function getScreeningDiagnostics() {
   var cached = readCachedScreeningDiagnostics_(todayStr);
   if (cached) return cached;
 
-  var rawRows = readRecentHistory_(CONFIG.ANALYSIS_LOOKBACK_DAYS);
-  if (rawRows.length === 0) return { latestDate: null, totalStocks: 0 };
-
   var portfolioMap = getPortfolioMap_();
-  var rows = computeFactors_(rawRows, portfolioMap);
+  var scanRows = computeLatestDayRows_(portfolioMap);
+  if (scanRows.length === 0) return { latestDate: null, totalStocks: 0 };
 
-  var latestDateStr = null;
-  rows.forEach(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    if (!latestDateStr || d > latestDateStr) latestDateStr = d;
-  });
-  if (!latestDateStr) return { latestDate: null, totalStocks: 0 };
-
-  var scanRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+  var latestDateStr = scanRows[0]['日期'];
   var stats = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
   cacheScreeningDiagnostics_(stats);
   return stats;

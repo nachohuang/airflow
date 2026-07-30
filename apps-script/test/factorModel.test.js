@@ -270,4 +270,94 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test computePredictedFactorScores_ (no applied models) passed.');
 }
 
+// --- buildLatestDayFactorsSql_：今日戰報 BigQuery 模式的核心 SQL，逐項核對關鍵語意有沒有漏掉 ---
+{
+  const sql = context.buildLatestDayFactorsSql_('proj.ds.history_materialized', '2026-03-01');
+  assert.ok(sql.indexOf("FROM `proj.ds.history_materialized`") !== -1);
+  assert.ok(sql.indexOf("date_str >= '2026-03-01'") !== -1, '要用 cutoff 限制範圍，不然 expanding max 會變成全部歷史以來');
+  assert.ok(sql.indexOf('LENGTH(stock_id) = 4') !== -1);
+
+  // rolling window 大小要對：MA20/Vol_MA20/IBF20 用 19 PRECEDING，MA60 用 59 PRECEDING，Inst_Part_MA5 用 4 PRECEDING
+  assert.ok(sql.indexOf('ROWS BETWEEN 19 PRECEDING AND CURRENT ROW') !== -1);
+  assert.ok(sql.indexOf('ROWS BETWEEN 59 PRECEDING AND CURRENT ROW') !== -1);
+  assert.ok(sql.indexOf('ROWS BETWEEN 4 PRECEDING AND CURRENT ROW') !== -1);
+
+  // 每個 rolling 平均/加總都要有「視窗滿不滿」的 IF 保護，不能直接依賴 BigQuery AVG()/SUM() 的預設行為
+  // （那樣視窗不足時會用部分資料算出非 null 結果，跟 Utils.gs rollingApply 的語意不符）
+  assert.ok(sql.indexOf('IF(cnt20 = 20, ma20_raw, NULL)') !== -1);
+  assert.ok(sql.indexOf('IF(cnt60 = 60, ma60_raw, NULL)') !== -1);
+  assert.ok(sql.indexOf('IF(cnt20 = 20, vol_ma20_raw, NULL)') !== -1);
+  assert.ok(sql.indexOf('IF(cnt5 = 5 AND cnt5_nonnull = 5, inst_part_ma5_raw, NULL)') !== -1);
+  assert.ok(sql.indexOf('IF(cnt20b = 20, drop_count_20_raw, NULL)') !== -1);
+  assert.ok(sql.indexOf('IF(cnt20b = 20, buy_on_drop_20_raw, NULL)') !== -1);
+
+  // IBF_20D 沒有足夠視窗時要 fillna(0)，不是留 null
+  assert.ok(sql.indexOf('WHEN drop_count_20 IS NULL OR drop_count_20 = 0 THEN 0') !== -1);
+
+  // 只取最新一天，不是整段回看範圍都回傳
+  assert.ok(sql.indexOf('WHERE dt = (SELECT MAX(dt) FROM step5)') !== -1);
+
+  // percentRank 是「平均名次 / 非 null 筆數」，不是 BigQuery 內建 PERCENT_RANK()
+  assert.ok(sql.indexOf('PERCENT_RANK()') === -1, '不能用 BigQuery 內建 PERCENT_RANK()，公式跟 pandas rank(pct=True) 不一樣');
+  assert.ok(sql.indexOf('RANK() OVER (ORDER BY inst_part_ma5 ASC NULLS LAST)') !== -1);
+  assert.ok(sql.indexOf('RANK() OVER (ORDER BY ibf_20d ASC NULLS LAST)') !== -1);
+  assert.ok(sql.indexOf('RANK() OVER (ORDER BY vol_ratio ASC NULLS LAST)') !== -1);
+
+  // Armor_Score 權重要對：法人參與度 45 + IBF 30 + 量能 15 + Trend_Score*10，任何一項 null 就整體 null
+  assert.ok(sql.indexOf('inst_part_rank * 45 + ibf_20d_rank * 30 + vol_ratio_rank * 15 + trend_score * 10') !== -1);
+  assert.ok(sql.indexOf('WHEN inst_part_rank IS NULL OR ibf_20d_rank IS NULL OR vol_ratio_rank IS NULL THEN NULL') !== -1);
+
+  // 原始欄位（IFNULL 預設 0，對應 toNumber 的行為，不能讓 SAFE_CAST 的 null 到處亂傳）都要出現
+  context.CONFIG.BQ_COLUMN_MAP.forEach(function (m) {
+    if (m.bq === 'date_str' || m.bq === 'stock_id' || m.bq === 'stock_name') return;
+    assert.ok(sql.indexOf(m.bq) !== -1, 'missing raw column: ' + m.bq);
+  });
+  console.log('Test buildLatestDayFactorsSql_ passed.');
+}
+
+// --- mapBqLatestFactorRowToAnalysisRow_：ascii 結果列轉回中文欄名，null 要原樣保留、數字要轉型 ---
+{
+  const bqRow = {
+    date_str: '2026-07-21', stock_id: '2330', stock_name: ' 台積電 ',
+    foreign_net: '1000', trust_net: '-500', dealer_net: '0', inst_net_shares: '500',
+    volume_shares: '20000000', trade_count: '9000', turnover: '3000000000',
+    open_price: '600', high_price: '610', low_price: '595', close_price: '605',
+    change_sign: '+', change_amount: '5', bid_price: '604', bid_vol: '10', ask_price: '605.5', ask_vol: '8',
+    dividend_yield: '1.8', pe_ratio: '22.3', pb_ratio: '6.1', fin_report_period: '115/1',
+    inst_net: '500', inst_participation: '0.025', inst_part_ma5: null, daily_return: '0.01',
+    is_drop: '0', is_inst_buy_on_drop: '0', ibf_20d: '0', ma20: null, ma20_slope: null,
+    trend_score: '1', vol_ma20: null, vol_ratio: null, ma60: null, bias60: null,
+    adjusted_peak_generic: '620', inst_part_rank: null, ibf_20d_rank: '0.4', vol_ratio_rank: null,
+    armor_score: null
+  };
+  const row = context.mapBqLatestFactorRowToAnalysisRow_(bqRow);
+
+  assert.strictEqual(row['日期'], '2026-07-21');
+  assert.strictEqual(row['證券代號'], '2330');
+  assert.strictEqual(row['證券名稱'], '台積電');
+  assert.strictEqual(row['成交金額'], 3000000000);
+  assert.strictEqual(row['收盤價'], 605);
+  assert.strictEqual(row.Inst_Net, 500);
+  assert.ok(Math.abs(row.Inst_Participation - 0.025) < 1e-9);
+  assert.strictEqual(row.Inst_Part_MA5, null, '視窗不足應該維持 null，不要被轉型成 0');
+  assert.strictEqual(row.Inst_Part_Rank, null);
+  assert.ok(Math.abs(row.IBF_20D_Rank - 0.4) < 1e-9);
+  assert.strictEqual(row.Trend_Score, 1);
+  assert.strictEqual(row.Armor_Score, null);
+  assert.strictEqual(row.Adjusted_Peak, 620);
+  console.log('Test mapBqLatestFactorRowToAnalysisRow_ passed.');
+}
+
+// --- buildHistoryRowsForStocksSql_：持股「從買進日起算最高價」用的小範圍查詢 ---
+{
+  const sql = context.buildHistoryRowsForStocksSql_('proj.ds.history_deduped', ['2330', '2603'], '2026-01-15');
+  assert.ok(sql.indexOf("FROM `proj.ds.history_deduped`") !== -1);
+  assert.ok(sql.indexOf("stock_id IN ('2330', '2603')") !== -1);
+  assert.ok(sql.indexOf("date_str >= '2026-01-15'") !== -1);
+
+  const sqlNoStart = context.buildHistoryRowsForStocksSql_('proj.ds.history_deduped', ['2330'], null);
+  assert.ok(sqlNoStart.indexOf('date_str >=') === -1, '沒有 startStr 就不該加這個條件');
+  console.log('Test buildHistoryRowsForStocksSql_ passed.');
+}
+
 console.log('All FactorRegression/BigQuerySync pure-function tests passed.');
