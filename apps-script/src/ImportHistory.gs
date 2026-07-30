@@ -61,6 +61,10 @@ function uploadHistoryFileChunk(fileId, chunkText, fileName) {
 }
 
 var IMPORT_CHUNK_SIZE = 20000; // 每次呼叫最多處理的資料列數，避免單次執行時間/儲存格數超過上限
+// Apps Script 從 Drive 直接讀整個檔案內容（getBlob().getDataAsString()）在檔案太大時會直接丟
+// 「檔案大小超過上限」的例外，且沒辦法分批讀（不像本機上傳可以用瀏覽器 FileReader 切段）。
+// 這裡抓保守值提前擋下來，給明確的替代方案，而不是讓使用者收到一句看不懂的 Apps Script 錯誤訊息。
+var IMPORT_MAX_DIRECT_READ_BYTES = 15 * 1024 * 1024; // 15MB
 
 /**
  * 匯入既有彙整表，支援 CSV 檔案或 Google 試算表；不支援 .xlsx（Apps Script 沒有原生解析器）。
@@ -74,6 +78,15 @@ function importHistoryFromDriveFile(fileIdOrUrl, startRow) {
   var fileId = extractDriveFileId_(fileIdOrUrl);
   var file = DriveApp.getFileById(fileId);
   var mime = file.getMimeType();
+
+  if (mime !== MimeType.GOOGLE_SHEETS && file.getSize() > IMPORT_MAX_DIRECT_READ_BYTES) {
+    throw new Error(
+      '「' + file.getName() + '」大小 ' + formatBytes_(file.getSize()) + '，超過從 Drive 直接讀取的安全上限（' +
+      formatBytes_(IMPORT_MAX_DIRECT_READ_BYTES) + '，這是 Apps Script 平台限制，不是這個 App 設的）。' +
+      '請改用「直接上傳 CSV 並匯入」：先把這個檔案下載到手機/電腦本機，再用那個按鈕選檔上傳' +
+      '（瀏覽器上傳是分段讀取，不會撞到這個限制）。'
+    );
+  }
 
   if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || mime === MimeType.MICROSOFT_EXCEL) {
     throw new Error(
@@ -154,7 +167,10 @@ function listHistoryFolderCandidates(folderId) {
       name: f.getName(),
       detectedDate: nameDate || normalizeDateStr(f.getLastUpdated()),
       detectedBy: nameDate ? '檔名' : '最後修改時間',
-      lastUpdated: normalizeDateStr(f.getLastUpdated())
+      lastUpdated: normalizeDateStr(f.getLastUpdated()),
+      size: f.getSize(),
+      sizeLabel: formatBytes_(f.getSize()),
+      tooLargeForDirectImport: f.getSize() > IMPORT_MAX_DIRECT_READ_BYTES
     });
   }
   files.sort(function (a, b) { return a.detectedDate < b.detectedDate ? 1 : -1; });

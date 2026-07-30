@@ -178,15 +178,27 @@ function loadMonthIntoBigQuery_(settings, monthKey) {
 }
 
 /**
- * 同步全部（或部分）月份到 BigQuery。每個月份各自讀檔/刪除/載入，避免一次處理過大資料量。
- * 有時間預算保護（4.5 分鐘），資料月份太多一次跑不完的話，會回傳 remainingMonths，
- * 前端可以再按一次繼續（已經同步過的月份不會重複處理，因為每次都是整月 DELETE+APPEND）。
+ * 同步「一個」月份到 BigQuery（讀檔/刪除/載入）。前端一次只呼叫一個月份、逐一顯示進度，
+ * 比一次處理全部月份更看得到現在同步到哪個檔案，資料量大時也不會卡在單一次執行裡看不到狀態。
  */
-function syncHistoryToBigQuery(monthKeys) {
+function syncOneMonthToBigQuery(monthKey) {
   var settings = requireBigQueryProjectId_();
   ensureBigQueryDataset_(settings);
   ensureRawTable_(settings);
+  var startTime = Date.now();
+  var result = loadMonthIntoBigQuery_(settings, monthKey);
+  logRun_('BigQuery 同步', result.skipped ? '略過' : '成功',
+    (result.skipped ? '找不到月份檔案：' : '已同步：') + monthlyFileName_(monthKey),
+    Math.round((Date.now() - startTime) / 1000));
+  return result;
+}
 
+/**
+ * 同步全部（或部分）月份到 BigQuery——保留給不需要逐月進度顯示的呼叫方式用（例如排程自動同步）。
+ * 前端「同步歷史資料到 BigQuery」按鈕改用 listSyncableMonths() + syncOneMonthToBigQuery() 逐月呼叫，
+ * 才能顯示「現在同步到哪個檔案」的進度。
+ */
+function syncHistoryToBigQuery(monthKeys) {
   var months = monthKeys && monthKeys.length ? monthKeys : listAvailableMonths_();
   var done = [];
   var startTime = Date.now();
@@ -198,11 +210,10 @@ function syncHistoryToBigQuery(monthKeys) {
       logRun_('BigQuery 同步', '部分完成', '已同步 ' + done.join(',') + '，剩餘 ' + remaining.join(','), Math.round((Date.now() - startTime) / 1000));
       return { doneMonths: done, remainingMonths: remaining };
     }
-    loadMonthIntoBigQuery_(settings, months[i]);
+    syncOneMonthToBigQuery(months[i]);
     done.push(months[i]);
   }
 
-  logRun_('BigQuery 同步', '成功', '已同步月份：' + done.join(','), Math.round((Date.now() - startTime) / 1000));
   return { doneMonths: done, remainingMonths: [] };
 }
 

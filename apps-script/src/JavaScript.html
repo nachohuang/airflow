@@ -598,15 +598,33 @@
 
   document.getElementById('bqSyncBtn').addEventListener('click', function () {
     var resultEl = document.getElementById('bqActionResult');
-    resultEl.innerHTML = '<div class="meta-bar">同步中，資料量大時可能要一兩分鐘...</div>';
-    withSpin(callServer('syncHistoryToBigQuery', null)).then(function (res) {
-      var msg = '✅ 已同步月份：' + res.doneMonths.join(', ');
-      if (res.remainingMonths.length) {
-        msg += '<br>還有 ' + res.remainingMonths.length + ' 個月份沒同步完（' + res.remainingMonths.join(', ') + '），再按一次「同步」繼續。';
+    resultEl.innerHTML = '<div class="loading">讀取可同步的月份清單中...</div>';
+    withSpin(callServer('listSyncableMonths')).then(function (months) {
+      if (!months.length) {
+        resultEl.innerHTML = '<div class="meta-bar">⚠️ 目前歷史資料夾裡沒有 <code>YYYY-MM_ALL_COMBINED.csv</code> 格式的月份檔案可以同步。' +
+          '如果資料夾裡是舊格式的彙整表（例如「起始日_結束日_ALL_COMBINED.csv」），要先用上面「匯入既有彙整表」' +
+          '把它匯入成月份檔案，才會有東西可以同步到 BigQuery。</div>';
+        return;
       }
-      resultEl.innerHTML = '<div class="meta-bar">' + msg + '</div>';
+      runBqSyncLoop_(months, 0, [], resultEl);
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
+
+  function runBqSyncLoop_(months, index, done, resultEl) {
+    if (index >= months.length) {
+      resultEl.innerHTML = '<div class="meta-bar">✅ 已同步 ' + done.length + ' 個月份：' + done.join(', ') + '</div>';
+      return;
+    }
+    var month = months[index];
+    resultEl.innerHTML = '<div class="loading">同步中（' + (index + 1) + ' / ' + months.length + '）：' + month + '_ALL_COMBINED.csv ...</div>';
+    withSpin(callServer('syncOneMonthToBigQuery', month)).then(function () {
+      done.push(month);
+      runBqSyncLoop_(months, index + 1, done, resultEl);
+    }).catch(function (err) {
+      resultEl.innerHTML = '<div class="meta-bar">已同步：' + done.join(', ') + '</div>' +
+        errorBox('同步「' + month + '」失敗：' + (err.message || err));
+    });
+  }
 
   document.getElementById('bqRegressionBtn').addEventListener('click', function () {
     var resultEl = document.getElementById('bqActionResult');
@@ -814,12 +832,15 @@
     withSpin(callServer('listHistoryFolderCandidates', null)).then(function (files) {
       if (!files.length) { el.innerHTML = '<div class="empty-hint">這個資料夾裡沒有檔案</div>'; return; }
       var rows = files.map(function (f, i) {
+        var btn = f.tooLargeForDirectImport
+          ? '<button disabled title="檔案太大，改用上面「直接上傳 CSV 並匯入」">太大，改用上傳</button>'
+          : '<button data-file-id="' + escapeHtml(f.fileId) + '">' + (i === 0 ? '匯入（最新）' : '匯入這個') + '</button>';
         return '<tr' + (i === 0 ? ' style="font-weight:600;"' : '') + '><td>' + escapeHtml(f.name) + '</td>' +
           '<td>' + escapeHtml(f.detectedDate) + '（' + escapeHtml(f.detectedBy) + '）</td>' +
-          '<td><button data-file-id="' + escapeHtml(f.fileId) + '">' + (i === 0 ? '匯入（最新）' : '匯入這個') + '</button></td></tr>';
+          '<td>' + escapeHtml(f.sizeLabel) + '</td><td>' + btn + '</td></tr>';
       }).join('');
       el.innerHTML = '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
-        '<th>檔名</th><th>判斷出的日期</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+        '<th>檔名</th><th>判斷出的日期</th><th>大小</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
       el.querySelectorAll('button[data-file-id]').forEach(function (btn) {
         btn.addEventListener('click', function () {
           var resultEl = document.getElementById('importHistoryResult');
