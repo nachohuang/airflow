@@ -82,7 +82,7 @@ function buildFeatureViewSql_(rawTableRef, viewRef) {
     '),',
     'labeled AS (',
     '  SELECT *,',
-    '    (LEAD(close, 20) OVER (PARTITION BY stock_id ORDER BY dt) / close - 1) AS label_return_1m,',
+    '    (SAFE_DIVIDE(LEAD(close, 20) OVER (PARTITION BY stock_id ORDER BY dt), close) - 1) AS label_return_1m,',
     '    AVG(CASE WHEN mkt_return < 0 THEN daily_return - mkt_return END)',
     '      OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING) AS label_downside_resistance',
     '  FROM joined',
@@ -175,17 +175,17 @@ function ensureFeatureView_(settings) {
   if (settings.sourceMode === 'external') {
     refreshExternalHistoryTable(); // metadata-only，重新指向資料夾裡目前所有 CSV 檔案並重建去重 view
   }
-  runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqFeatureViewRef_(settings)));
+  runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqFeatureViewRef_(settings)), 'feature_view');
 }
 
 function trainFactorModel_(settings, labelDef, l1Reg) {
   var modelRef = settings.projectId + '.' + settings.dataset + '.' + factorModelName_(labelDef.key);
   var viewRef = bqFeatureViewRef_(settings);
 
-  runBqQuery_(buildTrainModelSql_(modelRef, viewRef, labelDef.column, CONFIG.FACTOR_CANDIDATE_COLUMNS, l1Reg));
+  runBqQuery_(buildTrainModelSql_(modelRef, viewRef, labelDef.column, CONFIG.FACTOR_CANDIDATE_COLUMNS, l1Reg), 'train_model');
 
-  var evalRows = runBqQuery_(buildEvaluateSql_(modelRef));
-  var weightRows = runBqQuery_(buildWeightsSql_(modelRef));
+  var evalRows = runBqQuery_(buildEvaluateSql_(modelRef), 'evaluate');
+  var weightRows = runBqQuery_(buildWeightsSql_(modelRef), 'weights');
   var weights = summarizeWeights_(weightRows);
   var r2 = evalRows.length > 0 ? parseFloat(evalRows[0].r2_score) : null;
 

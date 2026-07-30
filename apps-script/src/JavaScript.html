@@ -910,8 +910,45 @@
 
   // ---------- 資料總覽 ----------
   function loadDataTab_() {
-    return loadHistoryOverview_();
+    return Promise.all([loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_()]);
   }
+
+  function loadBqUsage_() {
+    return callServer('getBigQueryUsageSummary', 30).then(function (s) {
+      document.getElementById('bqUsageSummary').textContent =
+        '今天預估費用：$' + fmtNum(s.todayCost, 4) + '　近 ' + s.days + ' 天共 ' + s.totalCalls +
+        ' 次查詢，掃描 ' + formatBytesJs_(s.totalBytes) + '，預估總費用 $' + fmtNum(s.totalCost, 4);
+      var tableEl = document.getElementById('bqUsageTable');
+      if (!s.daily.length) { tableEl.innerHTML = ''; return; }
+      var rows = s.daily.map(function (d) {
+        return '<tr><td>' + escapeHtml(d.date) + '</td><td>' + d.calls + '</td>' +
+          '<td>' + formatBytesJs_(d.bytes) + '</td><td>$' + fmtNum(d.cost, 4) + '</td></tr>';
+      }).join('');
+      tableEl.innerHTML = '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
+        '<th>日期</th><th>次數</th><th>掃描量</th><th>預估費用</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    }).catch(function (err) { document.getElementById('bqUsageSummary').innerHTML = errorBox(err); });
+  }
+
+  function formatBytesJs_(bytes) {
+    if (!bytes) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var v = bytes, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return v.toFixed(1) + ' ' + units[i];
+  }
+
+  function loadBqPricing_() {
+    return callServer('getBigQueryPricing').then(function (p) {
+      document.getElementById('bqPricePerTb').value = p.pricePerTb;
+    });
+  }
+
+  document.getElementById('bqPricingForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    withSpin(callServer('setBigQueryPricing', document.getElementById('bqPricePerTb').value)).then(function () {
+      alert('✅ 已儲存單價設定');
+    }).catch(function (err) { alert(err.message || err); });
+  });
 
   function loadHistoryOverview_() {
     var el = document.getElementById('historyOverviewResult');

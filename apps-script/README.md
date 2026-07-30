@@ -28,7 +28,8 @@ Google Apps Script Web App。歷史資料以「每月一份 CSV」的形式存�
 5. **資料總覽**：目前資料來源模式下的歷史資料範圍摘要（external 模式下含股票數/總列數這些描述性統計，
    需要按「重新整理統計」才會真的查 BigQuery），以及「手動抓取 / 重新彙整區間」——選定日期區間重新向
    證交所抓取並覆蓋該區間資料（補救某幾天抓取失敗用，或手動補一段區間不用等排程），跟每日排程共用
-   同一份「六日不執行 / 臨時停跑日」設定，該跳過的日期一樣會跳過。
+   同一份「六日不執行 / 臨時停跑日」設定，該跳過的日期一樣會跳過。也有「BigQuery 用量與預估費用」，
+   記錄每次呼叫 BigQuery 掃描的位元組數跟估算費用（見下方「因子回歸模型」章節的用量追蹤說明）。
 6. **後台管理**：
    - 每日自動抓資料的**排程時間**可調（預設 20:30，證交所收盤資料公告時間如果變動可以自己改）
    - 可設定**六日不執行**、可新增**臨時停跑日**（颱風假之類）
@@ -462,6 +463,18 @@ AVG(CASE WHEN mkt_return < 0 THEN daily_return - mkt_return END)
 （`Config.gs`／`FactorRegression.gs` 目前只用 `linear_reg`，不會踩到這個坑）。建議設一個
 [BigQuery 預算警示](https://cloud.google.com/billing/docs/how-to/budgets)（例如 $1 就通知你），
 純粹當保險，不是預期真的會花到錢。
+
+### 用量追蹤：實際掃描了多少、估算費用多少
+
+「資料總覽」頁籤有個「BigQuery 用量與預估費用」區塊：每次 `runBqQuery_()` 執行完一段 SQL，
+都會從 BigQuery 回應裡讀 `totalBytesProcessed`（這次查詢實際掃描的位元組數），乘上「參考單價」
+（USD / TB，預設 $6.25，可以在同一個區塊改）算成本，記一筆到新的 `BigQueryUsage` 分頁，
+依「類型」分類（`feature_view`／`train_model`／`evaluate`／`weights`／`history_range`／
+`dedup_view`／`delete_month`／`date_bounds`），方便看哪個操作掃得比較多。
+
+**這個估算沒有扣掉每月前 1TB 的免費額度**，所以正常使用量下，這裡顯示的「預估費用」通常會比
+你實際的 Google Cloud 帳單（$0）高，純粹用來看「掃描量的趨勢/量級」，不是準確的帳單金額，
+正確費用一律以 Google Cloud 帳單為準。
 
 ## 測試
 

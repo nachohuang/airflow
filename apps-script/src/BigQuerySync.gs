@@ -58,6 +58,13 @@ function buildDriveFileUri_(fileId) {
   return 'https://drive.google.com/open?id=' + fileId;
 }
 
+/** 依參考單價（USD / TB）估算一次查詢的費用；bytesProcessed 可能是字串（API 回傳的 int64）。 */
+function calcBqCost_(bytesProcessed, pricePerTb) {
+  var bytes = parseInt(bytesProcessed, 10) || 0;
+  var tb = bytes / (1024 * 1024 * 1024 * 1024);
+  return tb * (pricePerTb || CONFIG.BIGQUERY_PRICE_PER_TB_DEFAULT);
+}
+
 /**
  * 去重 view 的 SQL：external 資料表可能同時包含「一次性大彙整檔」跟「每日排程持續累加的月份檔案」，
  * 日期範圍可能重疊，這裡依 (股票代號, 日期) 只留一筆，避免同一天的資料被算兩次。
@@ -130,6 +137,69 @@ function setBigQuerySettings(projectId, dataset) {
   return getBigQuerySettings();
 }
 
+function getBigQueryPricing() {
+  var props = PropertiesService.getScriptProperties();
+  var stored = props.getProperty(CONFIG.PROP_KEYS.BIGQUERY_PRICE_PER_TB);
+  return { pricePerTb: stored ? parseFloat(stored) : CONFIG.BIGQUERY_PRICE_PER_TB_DEFAULT };
+}
+
+function setBigQueryPricing(pricePerTb) {
+  var v = parseFloat(pricePerTb);
+  if (!isNaN(v) && v >= 0) {
+    PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BIGQUERY_PRICE_PER_TB, String(v));
+  }
+  return getBigQueryPricing();
+}
+
+function getBigQueryUsageSheet_() {
+  return ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.BIGQUERY_USAGE, CONFIG.BIGQUERY_USAGE_COLUMNS);
+}
+
+/** 每次 runBqQuery_ 跑完一段 SQL 就記一筆用量，供「資料總覽」頁籤顯示累積掃描量/預估費用。 */
+function logBqUsage_(label, bytesProcessed) {
+  var pricing = getBigQueryPricing();
+  var cost = calcBqCost_(bytesProcessed, pricing.pricePerTb);
+  var now = new Date();
+  appendSheetObjects_(getBigQueryUsageSheet_(), CONFIG.BIGQUERY_USAGE_COLUMNS, [{
+    '日期': Utilities.formatDate(now, 'Asia/Taipei', 'yyyy-MM-dd'),
+    '時間戳記': Utilities.formatDate(now, 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss'),
+    '類型': label,
+    '掃描位元組數': parseInt(bytesProcessed, 10) || 0,
+    '預估費用(USD)': Math.round(cost * 1e6) / 1e6
+  }]);
+}
+
+/** 前端「資料總覽」頁籤：BigQuery 用量摘要（近 N 天，依日期加總）。 */
+function getBigQueryUsageSummary(days) {
+  var rows = readSheetObjects_(getBigQueryUsageSheet_());
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - (days || 30));
+  var cutoffStr = normalizeDateStr(cutoff);
+
+  var byDate = {};
+  var totalCost = 0, totalBytes = 0, totalCalls = 0;
+  var todayStr = normalizeDateStr(new Date());
+  var todayCost = 0;
+
+  rows.forEach(function (r) {
+    var d = String(r['日期']);
+    if (d < cutoffStr) return;
+    var bytes = parseInt(r['掃描位元組數'], 10) || 0;
+    var cost = parseFloat(r['預估費用(USD)']) || 0;
+    if (!byDate[d]) byDate[d] = { date: d, calls: 0, bytes: 0, cost: 0 };
+    byDate[d].calls += 1;
+    byDate[d].bytes += bytes;
+    byDate[d].cost += cost;
+    totalCost += cost;
+    totalBytes += bytes;
+    totalCalls += 1;
+    if (d === todayStr) todayCost += cost;
+  });
+
+  var daily = Object.keys(byDate).map(function (d) { return byDate[d]; }).sort(function (a, b) { return b.date < a.date ? -1 : 1; });
+  return { daily: daily, totalCost: totalCost, totalBytes: totalBytes, totalCalls: totalCalls, todayCost: todayCost, days: days || 30 };
+}
+
 function requireBigQueryProjectId_() {
   var settings = getBigQuerySettings();
   if (!settings.projectId) {
@@ -186,8 +256,9 @@ function ensureRawTable_(settings) {
   }
 }
 
-/** 執行一段 SQL（DML 或 query），等到 job 跑完，回傳 rows（查詢類）或 null（DML 類）。 */
-function runBqQuery_(sql) {
+/** 執行一段 SQL（DML 或 query），等到 job 跑完，回傳 rows（查詢類）或 null（DML 類）。
+ *  label 只是給用量紀錄分類用（例如 'train_model'／'history_range'），不影響查詢本身。 */
+function runBqQuery_(sql, label) {
   var settings = requireBigQueryProjectId_();
   var job = BigQuery.Jobs.query({
     query: sql,
@@ -197,6 +268,7 @@ function runBqQuery_(sql) {
   }, settings.projectId);
 
   job = waitForBqJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
+  logBqUsage_(label || 'query', job.totalBytesProcessed);
 
   if (!job.schema || !job.rows) return [];
   var fields = job.schema.fields.map(function (f) { return f.name; });
@@ -232,7 +304,7 @@ function loadMonthIntoBigQuery_(settings, monthKey) {
   var remapped = remapCsvHeaderToBigQuery_(text);
   var blob = Utilities.newBlob(remapped, 'text/csv', monthKey + '.csv');
 
-  runBqQuery_(buildDeleteMonthSql_(bqRawTableRef_(settings), monthKey));
+  runBqQuery_(buildDeleteMonthSql_(bqRawTableRef_(settings), monthKey), 'delete_month');
 
   var job = BigQuery.Jobs.insert({
     configuration: {
@@ -339,7 +411,7 @@ function ensureExternalHistoryTable_(settings, fileIds) {
 }
 
 function ensureDedupedView_(settings) {
-  runBqQuery_(buildDedupedViewSql_(bqExternalTableRef_(settings), bqDedupedViewRef_(settings)));
+  runBqQuery_(buildDedupedViewSql_(bqExternalTableRef_(settings), bqDedupedViewRef_(settings)), 'dedup_view');
 }
 
 /**
@@ -366,7 +438,7 @@ function refreshExternalHistoryTable() {
 function queryHistoryRowsFromBigQuery_(startStr, endStr) {
   var settings = requireBigQueryProjectId_();
   refreshExternalHistoryTable();
-  var rows = runBqQuery_(buildHistoryRangeQuerySql_(bqDedupedViewRef_(settings), startStr, endStr));
+  var rows = runBqQuery_(buildHistoryRangeQuerySql_(bqDedupedViewRef_(settings), startStr, endStr), 'history_range');
   return rows.map(mapBqRowToHistoryRow_);
 }
 
@@ -374,7 +446,7 @@ function queryHistoryRowsFromBigQuery_(startStr, endStr) {
 function getHistoryDateBoundsFromBigQuery_() {
   var settings = requireBigQueryProjectId_();
   refreshExternalHistoryTable();
-  var rows = runBqQuery_(buildDateBoundsSql_(bqDedupedViewRef_(settings)));
+  var rows = runBqQuery_(buildDateBoundsSql_(bqDedupedViewRef_(settings)), 'date_bounds');
   if (!rows.length || !rows[0].min_date) return { min: null, max: null, tradingDays: 0, stockCount: 0, rowCount: 0 };
   return {
     min: rows[0].min_date,

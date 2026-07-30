@@ -27,7 +27,8 @@ var CONFIG = {
     GEMINI_PRICE_OUTPUT: 'GEMINI_PRICE_OUTPUT',
     BIGQUERY_PROJECT_ID: 'BIGQUERY_PROJECT_ID',
     BIGQUERY_DATASET: 'BIGQUERY_DATASET',
-    BIGQUERY_SOURCE_MODE: 'BIGQUERY_SOURCE_MODE' // 'native' | 'external'
+    BIGQUERY_SOURCE_MODE: 'BIGQUERY_SOURCE_MODE', // 'native' | 'external'
+    BIGQUERY_PRICE_PER_TB: 'BIGQUERY_PRICE_PER_TB'
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
@@ -51,8 +52,17 @@ var CONFIG = {
     FACTOR_SCAN: 'FactorScanResults',
     AI_DIAGNOSIS: 'AiDiagnosis',
     AI_USAGE: 'AiUsage',
-    FACTOR_MODEL_HISTORY: 'FactorModelHistory'
+    FACTOR_MODEL_HISTORY: 'FactorModelHistory',
+    BIGQUERY_USAGE: 'BigQueryUsage'
   },
+
+  BIGQUERY_USAGE_COLUMNS: ['日期', '時間戳記', '類型', '掃描位元組數', '預估費用(USD)'],
+
+  // BigQuery on-demand 查詢定價的參考單價（USD / TB 掃描量），這是概略預設值，不是即時公告的官方價格，
+  // 一定會跟你實際帳單有落差，請自行到 https://cloud.google.com/bigquery/pricing 核對後在
+  // 「資料總覽」頁籤修改。每月前 1TB 掃描量本身是免費的，這裡的估算沒有扣掉那個免費額度，
+  // 所以正常使用量下，這裡算出來的「預估費用」通常會比實際帳單（$0）高，僅供參考掃描量趨勢用。
+  BIGQUERY_PRICE_PER_TB_DEFAULT: 6.25,
 
   AI_DIAGNOSIS_COLUMNS: ['日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '最終建議', '診斷內容', '時間戳記'],
 
@@ -348,6 +358,7 @@ function initializeProject() {
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.AI_DIAGNOSIS, CONFIG.AI_DIAGNOSIS_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.AI_USAGE, CONFIG.AI_USAGE_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.FACTOR_MODEL_HISTORY, CONFIG.FACTOR_MODEL_COLUMNS);
+  ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.BIGQUERY_USAGE, CONFIG.BIGQUERY_USAGE_COLUMNS);
 
   // 預設分頁 'Sheet1' 若還存在且是空的，就把它砍掉，保持整潔
   var def = ss.getSheetByName('工作表1') || ss.getSheetByName('Sheet1');

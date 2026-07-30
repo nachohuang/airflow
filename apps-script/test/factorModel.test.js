@@ -52,6 +52,18 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test buildDriveFileUri_ passed.');
 }
 
+// --- calcBqCost_ ---
+{
+  const oneTb = 1024 * 1024 * 1024 * 1024;
+  assert.ok(Math.abs(context.calcBqCost_(oneTb, 6.25) - 6.25) < 1e-9);
+  assert.ok(Math.abs(context.calcBqCost_(oneTb / 2, 6.25) - 3.125) < 1e-9);
+  assert.strictEqual(context.calcBqCost_(0, 6.25), 0);
+  assert.strictEqual(context.calcBqCost_('12345', 6.25), context.calcBqCost_(12345, 6.25)); // API 回傳的是字串
+  // 沒指定單價時用預設值
+  assert.ok(Math.abs(context.calcBqCost_(oneTb) - context.CONFIG.BIGQUERY_PRICE_PER_TB_DEFAULT) < 1e-9);
+  console.log('Test calcBqCost_ passed.');
+}
+
 // --- buildDeleteMonthSql_ ---
 {
   const sql = context.buildDeleteMonthSql_('proj.ds.history_raw', '2026-07');
@@ -69,6 +81,8 @@ loadIntoContext('FactorRegression.gs');
   // 兩個 label 都要在
   assert.ok(sql.indexOf('label_return_1m') !== -1);
   assert.ok(sql.indexOf('label_downside_resistance') !== -1);
+  // label_return_1m 一定要用 SAFE_DIVIDE，避免收盤價是 0（缺值/停牌）時撞到 division by zero
+  assert.ok(sql.indexOf('SAFE_DIVIDE(LEAD(close, 20)') !== -1);
   // 抗跌力只看大盤下跌的天數（相對大盤，不是絕對回檔）
   assert.ok(sql.indexOf('WHEN mkt_return < 0 THEN daily_return - mkt_return') !== -1);
   assert.ok(sql.indexOf('ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING') !== -1);
