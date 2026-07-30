@@ -157,4 +157,24 @@ function buildSyntheticHistory(days) {
   console.log('Test 6 (buildFullReportRow_ matches FULL_REPORT_COLUMNS) passed.');
 }
 
+// --- 7. computeScreeningStats_：null 排名要算進 nullXxx 計數，不要誤判成「排名很低」---
+{
+  const scanRows = [
+    { '證券代號': '1101', '成交金額': 200000000, Trend_Score: 2, Inst_Part_Rank: null, Vol_Ratio_Rank: 0.9, IBF_20D_Rank: 0.8 },
+    { '證券代號': '1102', '成交金額': 200000000, Trend_Score: 2, Inst_Part_Rank: 0.9, Vol_Ratio_Rank: null, IBF_20D_Rank: 0.8 },
+    { '證券代號': '1103', '成交金額': 200000000, Trend_Score: 0, Inst_Part_Rank: 0.9, Vol_Ratio_Rank: 0.9, IBF_20D_Rank: null }
+  ];
+  const portfolioMap = { '1103': { cost: 10 } }; // 持股不算在漏斗內
+  const stats = context.computeScreeningStats_(scanRows, portfolioMap, '2026-07-30');
+
+  assert.strictEqual(stats.totalStocks, 3);
+  assert.strictEqual(stats.holdingCount, 1);
+  assert.strictEqual(stats.nullInstPartRank, 1, '1101 的 Inst_Part_Rank 是 null，應該算進 nullInstPartRank');
+  assert.strictEqual(stats.nullVolRatioRank, 1, '1102 的 Vol_Ratio_Rank 是 null，應該算進 nullVolRatioRank');
+  assert.strictEqual(stats.highInstParticipation, 1, '只有 1102 的 Inst_Part_Rank>=0.8 且非 null');
+  assert.strictEqual(stats.volumeSpark, 1, '只有 1101 的 Vol_Ratio_Rank>=0.85 且非 null');
+  assert.strictEqual(stats.breakoutMatches, 0, '1101/1102 都因為某一項是 null 而湊不齊三條件');
+  console.log('Test 7 (computeScreeningStats_ null-vs-low-rank) passed.');
+}
+
 console.log('All Analysis.gs tests passed.');

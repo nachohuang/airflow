@@ -199,7 +199,11 @@ function runAnalysis() {
   report.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
   fullReport.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
 
-  return { latestDate: latestDateStr, report: report, fullReport: fullReport };
+  var result = { latestDate: latestDateStr, report: report, fullReport: fullReport };
+  if (report.length === 0) {
+    result.diagnostics = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
+  }
+  return result;
 }
 
 /** 組出跟原本 Colab v17.0 to_excel() 一致的完整欄位列（見 CONFIG.FULL_REPORT_COLUMNS）。 */
@@ -230,12 +234,37 @@ function runAnalysisAndSave() {
   var sheet = getReportsSheet_();
   upsertRowsByDate_(sheet, CONFIG.REPORT_COLUMNS, result.report);
 
+  if (result.diagnostics) {
+    cacheScreeningDiagnostics_(result.diagnostics);
+  }
+
   try {
     exportReportToDrive_(result.fullReport, result.latestDate);
   } catch (e) {
     logRun_('戰報匯出', '失敗', String(e.message || e), 0);
   }
   return result;
+}
+
+/** 把「篩選漏斗明細」存進 Script Properties，key 內含日期，隔天會自動被新的一筆覆蓋。
+ *  避免前端在同一天內每次遇到 0 檔訊號都要重新讀一次歷史資料（materialized/external 模式下最貴的一步）。 */
+function cacheScreeningDiagnostics_(stats) {
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROP_KEYS.SCREENING_DIAGNOSTICS_CACHE,
+    JSON.stringify({ date: stats.latestDate, stats: stats })
+  );
+}
+
+/** 讀取今天的篩選漏斗明細快取；不存在或不是今天的就回傳 null。 */
+function readCachedScreeningDiagnostics_(todayStr) {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.SCREENING_DIAGNOSTICS_CACHE);
+  if (!raw) return null;
+  try {
+    var parsed = JSON.parse(raw);
+    return parsed && parsed.date === todayStr ? parsed.stats : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 /**
@@ -258,27 +287,13 @@ function getDashboardReport() {
 }
 
 /**
- * 診斷用：今天篩選出「0 檔訊號」時，這個函式告訴你篩選漏斗每一關卡掉多少檔股票，
+ * 純函式：對「已經算完因子、篩到最新一天」的 scanRows 統計篩選漏斗每一關卡掉多少檔股票，
  * 方便判斷到底是「今天市場真的沒有符合條件的股票」（v16.10 策略本來就選得很嚴，
  * 這是正常情況），還是「資料有問題」（例如 external 模式欄位順序對錯，導致排名/因子值全部異常）。
- * 前端「今日戰報」在 report.length === 0 時會自動呼叫這個函式並顯示結果。
+ * 由 runAnalysis()（0 檔訊號時）與 getScreeningDiagnostics()（快取沒命中時）共用，
+ * 避免同一天內為了看漏斗明細，把昂貴的 readRecentHistory_ + computeFactors_ 重跑第二次。
  */
-function getScreeningDiagnostics() {
-  var rawRows = readRecentHistory_(CONFIG.ANALYSIS_LOOKBACK_DAYS);
-  if (rawRows.length === 0) return { latestDate: null, totalStocks: 0 };
-
-  var portfolioMap = getPortfolioMap_();
-  var rows = computeFactors_(rawRows, portfolioMap);
-
-  var latestDateStr = null;
-  rows.forEach(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    if (!latestDateStr || d > latestDateStr) latestDateStr = d;
-  });
-  if (!latestDateStr) return { latestDate: null, totalStocks: 0 };
-
-  var scanRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
-
+function computeScreeningStats_(scanRows, portfolioMap, latestDateStr) {
   var stats = {
     latestDate: latestDateStr,
     totalStocks: scanRows.length,
@@ -314,6 +329,35 @@ function getScreeningDiagnostics() {
     if (r['成交金額'] >= CONFIG.STRATEGY.LIQUIDITY_MIN && isUpward && isParticipationHigh && isVolSpark) stats.breakoutMatches++;
   });
 
+  return stats;
+}
+
+/**
+ * 前端「今日戰報」在 report.length === 0 時會自動呼叫這個函式並顯示結果。
+ * 優先回傳今天稍早（不管是排程或這次呼叫本身）算過、快取在 Script Properties 裡的漏斗明細；
+ * 沒有快取才真的重新讀一次歷史資料計算（例如今天第一次呼叫、還沒有任何快取的情況）。
+ */
+function getScreeningDiagnostics() {
+  var todayStr = normalizeDateStr(new Date());
+  var cached = readCachedScreeningDiagnostics_(todayStr);
+  if (cached) return cached;
+
+  var rawRows = readRecentHistory_(CONFIG.ANALYSIS_LOOKBACK_DAYS);
+  if (rawRows.length === 0) return { latestDate: null, totalStocks: 0 };
+
+  var portfolioMap = getPortfolioMap_();
+  var rows = computeFactors_(rawRows, portfolioMap);
+
+  var latestDateStr = null;
+  rows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!latestDateStr || d > latestDateStr) latestDateStr = d;
+  });
+  if (!latestDateStr) return { latestDate: null, totalStocks: 0 };
+
+  var scanRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+  var stats = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
+  cacheScreeningDiagnostics_(stats);
   return stats;
 }
 

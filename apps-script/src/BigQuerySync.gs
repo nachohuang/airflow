@@ -343,7 +343,9 @@ function ensureRawTable_(settings) {
 }
 
 /** 執行一段 SQL（DML 或 query），等到 job 跑完，回傳 rows（查詢類）或 null（DML 類）。
- *  label 只是給用量紀錄分類用（例如 'train_model'／'history_range'），不影響查詢本身。 */
+ *  label 只是給用量紀錄分類用（例如 'train_model'／'history_range'），不影響查詢本身。
+ *  結果會依 pageToken 撈完全部分頁——歷史查詢動輒十幾萬列，遠超過 getQueryResults 單頁上限，
+ *  只讀第一頁會在沒有 ORDER BY 的情況下隨機漏掉大量列，導致 rolling 因子出現大量 null。 */
 function runBqQuery_(sql, label) {
   var settings = requireBigQueryProjectId_();
   var job = BigQuery.Jobs.query({
@@ -353,12 +355,23 @@ function runBqQuery_(sql, label) {
     timeoutMs: 30000
   }, settings.projectId);
 
-  job = waitForBqJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
-  logBqUsage_(label || 'query', job.totalBytesProcessed);
+  var jobId = job.jobReference.jobId;
+  var location = job.jobReference.location || CONFIG.BIGQUERY_LOCATION;
+  var result = waitForBqJob_(settings.projectId, jobId, location);
+  logBqUsage_(label || 'query', result.totalBytesProcessed);
 
-  if (!job.schema || !job.rows) return [];
-  var fields = job.schema.fields.map(function (f) { return f.name; });
-  return job.rows.map(function (row) {
+  if (!result.schema) return [];
+  var fields = result.schema.fields.map(function (f) { return f.name; });
+  var rawRows = (result.rows || []).slice();
+
+  var pageToken = result.pageToken;
+  while (pageToken) {
+    var page = BigQuery.Jobs.getQueryResults(settings.projectId, jobId, { location: location, pageToken: pageToken });
+    if (page.rows) rawRows = rawRows.concat(page.rows);
+    pageToken = page.pageToken;
+  }
+
+  return rawRows.map(function (row) {
     var obj = {};
     row.f.forEach(function (cell, i) { obj[fields[i]] = cell.v; });
     return obj;
