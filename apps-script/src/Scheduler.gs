@@ -115,18 +115,23 @@ function shouldSkipDate_(date, settings) {
 }
 
 /**
- * 手動「立即更新」：抓今天資料 + 重跑分析，繞過六日/停跑日檢查（測試/補跑用）。
- * 供 後台管理 的「立即測試執行」按鈕與 今日戰報 頁面的手動刷新共用。
+ * 手動「立即更新」：嘗試抓今天資料 + 重跑分析，繞過六日/停跑日檢查（測試/補跑用）。
+ * 供 後台管理 的「立即測試執行」按鈕與 最新戰報 頁面的手動刷新共用。
+ *
+ * 抓「今天」很容易失敗（例如證交所 T86 三大法人資料要收盤後一段時間才公布，太早按重新整理
+ * 就會抓到「資料過少」），但這不代表沒有戰報可以看——不管今天抓不抓得到，都照樣重新跑一次
+ * 分析，分析本來就會自動使用歷史資料裡目前最新的一天（見 computeLatestDayRows_），今天抓到了
+ * 就是用今天，抓不到就自動退回目前最新的既有資料，不會因為今天還沒抓到就完全沒有結果可看。
+ * fetch 欄位還是會誠實回報「今天」這次抓取本身成不成功，前端可以據此顯示提醒，但不會擋住
+ * 顯示 analysis 的結果。
  */
 function runManualFullUpdate() {
   var fetchResult = runManualFetchToday();
   var analysis = null;
-  if (fetchResult.ok) {
-    try {
-      analysis = runAnalysisAndSave();
-    } catch (e) {
-      logRun_('手動更新-分析', '失敗', String(e.message || e), 0);
-    }
+  try {
+    analysis = runAnalysisAndSave();
+  } catch (e) {
+    logRun_('手動更新-分析', '失敗', String(e.message || e), 0);
   }
   return { fetch: fetchResult, analysis: analysis };
 }

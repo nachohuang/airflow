@@ -7,7 +7,7 @@
 <body>
   <div id="app">
     <header class="topbar">
-      <div class="topbar-title" id="topbarTitle">今日戰報</div>
+      <div class="topbar-title" id="topbarTitle">最新戰報</div>
       <button class="icon-btn" id="refreshBtn" title="重新整理">⟳</button>
     </header>
 
@@ -101,7 +101,7 @@
             「相對大盤抗跌力」的因子組合（多因子 LASSO 迴歸，比左邊的單因子相關性更深入），
             結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。這是選用的進階功能，
             需要你自己有一個 GCP 專案（見 README「因子回歸模型」章節的設定步驟），
-            這裡的沙盒環境不能代為設定。套用某一版之後，今日戰報會多顯示一組「因子模型預測分數」
+            這裡的沙盒環境不能代為設定。套用某一版之後，最新戰報會多顯示一組「因子模型預測分數」
             供對照，但不會改變 Armor_Score 本身的選股邏輯。
           </div>
 
@@ -121,7 +121,7 @@
             </select>
           </label>
           <div class="meta-bar">
-            三個模式選一個之後，今日戰報／個股分析／回測研究／因子相關性掃描都會跟著改變資料來源
+            三個模式選一個之後，最新戰報／個股分析／回測研究／因子相關性掃描都會跟著改變資料來源
             （native 模式維持讀 Drive 月份檔案，另外兩個都會改成查 BigQuery）：
           </div>
           <div class="meta-bar">
@@ -365,7 +365,7 @@
     </main>
 
     <nav class="bottom-nav">
-      <button class="nav-btn active" data-tab="dashboard"><span class="nav-icon">📊</span><span>今日戰報</span></button>
+      <button class="nav-btn active" data-tab="dashboard"><span class="nav-icon">📊</span><span>最新戰報</span></button>
       <button class="nav-btn" data-tab="portfolio"><span class="nav-icon">💼</span><span>持股管理</span></button>
       <button class="nav-btn" data-tab="stock"><span class="nav-icon">🔍</span><span>個股分析</span></button>
       <button class="nav-btn" data-tab="research"><span class="nav-icon">🧪</span><span>研究</span></button>

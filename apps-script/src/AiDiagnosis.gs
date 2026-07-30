@@ -493,3 +493,124 @@ function runDailyAiDiagnosisForTopPicks() {
   if (topCodes.length === 0) return { skipped: true, reason: '今天沒有非 Neutral 的訊號' };
   return { skipped: false, results: runAiDiagnosis(topCodes) };
 }
+
+// ---------------- AI 掃描全部候選、推薦前三檔 ----------------
+
+/**
+ * 跟 AI_DIAGNOSIS_SYSTEM_PROMPT（單檔深度診斷）是不同量級的任務：這裡不對每一檔候選都
+ * 額外抓 Goodinfo/查 5 年財報（候選一多，逐檔深度診斷的成本跟時間會直接爆掉），只用戰報本身
+ * 已經算好的量化欄位，讓模型在整份候選名單裡做「橫向比較」，選出最值得優先投入的前三檔並
+ * 說明取捨——這是初篩層級的比較，選出來之後還是要對這幾檔分別執行「AI 深度診斷」做完整的
+ * 財報/籌碼查核，系統會在輸出裡明確提醒這件事。
+ */
+var AI_TOP_PICKS_SYSTEM_PROMPT = `# Role & Expertise
+你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師，同時精通【價值護城河大師】、
+【籌碼追蹤專家】、【技術型態首席】三個流派。
+
+# 本次任務
+我會給你「台股量化選股策略 (v17.0) 趨勢共鳴戰報」這次篩選出來的**全部候選股票清單**
+（每檔都附上 Armor_Score 與各項量化因子排名，沒有個別的財報/Goodinfo 原始資料）。
+請你橫向比較這整份清單，挑出你認為現在最值得優先投入的前三檔，並清楚說明取捨理由。
+
+# 決策原則
+1. 不是單純照 Armor_Score 高低取前三——分數只是量化因子的加權結果，你要在候選之間做
+   橫向比較，找出「因子純度最高、訊號最一致、風險最小」的組合。
+2. 如果分數最高的幾檔彼此高度相關（同產業/同族群齊漲），要提醒集中度風險，
+   並考慮是否該用產業分散的角度調整入選名單。
+3. 明確指出「為什麼不選」：至少對 1-2 檔看起來分數很高、但你認為不該優先選入的候選，
+   說明原因。
+4. 這是初篩層級的橫向比較，沒有個股財報與即時籌碼細節佐證，絕對不要假裝有查證過財報，
+   只能根據提供的量化欄位做判斷。
+5. 語氣口吻：使用繁體中文，語氣需如同寫給機構法人的投資報告，字字精煉，直擊重點。
+
+# Output Format (請嚴格使用以下結構，避免冗長文字牆)
+
+---
+## 🏆 戰報候選橫向比較：Top 3 推薦
+> **候選檔數：** [N] 檔　**比較基準時間：** [填入提供的時間戳記]
+
+### 🥇 [代號 名稱]（Armor_Score: xx）
+- **入選理由：**
+- **相對其他候選的優勢：**
+
+### 🥈 [代號 名稱]（Armor_Score: xx）
+- **入選理由：**
+- **相對其他候選的優勢：**
+
+### 🥉 [代號 名稱]（Armor_Score: xx）
+- **入選理由：**
+- **相對其他候選的優勢：**
+
+### 👀 分數亮眼但暫不推薦
+（挑 1-2 檔分數不低、但你認為暫時不該優先選入的候選，簡短說明為什麼）
+
+### ⚠️ 重要提醒
+這份排名只根據戰報裡已經算好的量化因子做橫向比較，**沒有查核這幾檔的個別財報與即時籌碼細節**。
+請對這三檔分別執行「AI 深度診斷」完成完整查核後，再決定是否進場。
+---`;
+
+function buildTopPicksPrompt_(candidates, timestampLabel) {
+  var lines = [];
+  lines.push('比較基準時間戳記：' + timestampLabel);
+  lines.push('');
+  lines.push('【本次戰報全部候選清單，共 ' + candidates.length + ' 檔，依 Armor_Score 高到低排序】');
+  candidates.forEach(function (r, i) {
+    lines.push(
+      (i + 1) + '. ' + r['證券代號'] + ' ' + r['證券名稱'] +
+      '｜Armor_Score=' + r['Armor_Score'] +
+      '｜操作策略=' + r['操作策略'] +
+      '｜Trend_Score=' + r['Trend_Score'] +
+      '｜法人參與密度排名=' + r['Inst_Part_Rank'] +
+      '｜下跌接手率排名=' + r['IBF_20D_Rank'] +
+      '｜實相解讀=' + r['實相解讀']
+    );
+  });
+  lines.push('');
+  lines.push('請依照系統設定的規則與輸出格式，從這份清單挑出最值得優先投入的前三檔。');
+  return lines.join('\n');
+}
+
+/** 前端「AI 掃描全部，推薦前三檔」按鈕：對最新一次戰報的全部候選做一次橫向比較。 */
+function runAiTopPicks() {
+  var settings = getAiSettings();
+  var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
+  if (!hasKey) throw new Error('尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰，請先到後台管理輸入。');
+
+  var reportRows = readSheetObjects_(getReportsSheet_());
+  if (reportRows.length === 0) throw new Error('目前沒有任何戰報資料，請先產生一次戰報。');
+  var latestDate = null;
+  reportRows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!latestDate || d > latestDate) latestDate = d;
+  });
+  var candidates = reportRows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDate; });
+  if (candidates.length === 0) throw new Error('最新一次戰報沒有任何候選股票可以比較。');
+  candidates.sort(function (a, b) { return toNumber(b['Armor_Score']) - toNumber(a['Armor_Score']); });
+
+  var timestampLabel = '台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm');
+  var startTime = Date.now();
+  try {
+    var userPrompt = buildTopPicksPrompt_(candidates, timestampLabel);
+    var llmResult = callLlm_(AI_TOP_PICKS_SYSTEM_PROMPT, userPrompt);
+    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+
+    logAiUsage_({
+      '日期': normalizeDateStr(new Date()),
+      '時間戳記': timestampLabel,
+      '供應商': llmResult.provider,
+      '模型': llmResult.model,
+      '證券代號': 'TOP3_SCAN',
+      '輸入Tokens': llmResult.inputTokens,
+      '輸出Tokens': llmResult.outputTokens,
+      '預估費用(USD)': round_(cost, 6)
+    });
+
+    var dur = Math.round((Date.now() - startTime) / 1000);
+    logRun_('AI Top3 推薦', '成功', '掃描 ' + candidates.length + ' 檔候選（' + latestDate + '），約 $' + round_(cost, 4), dur);
+    return { ok: true, date: latestDate, candidateCount: candidates.length, text: llmResult.text, cost: round_(cost, 4) };
+  } catch (e) {
+    var dur2 = Math.round((Date.now() - startTime) / 1000);
+    logRun_('AI Top3 推薦', '失敗', String(e.message || e), dur2);
+    throw e;
+  }
+}

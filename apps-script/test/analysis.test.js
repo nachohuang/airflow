@@ -292,4 +292,15 @@ function buildSyntheticHistory(days) {
   console.log('Test 8 (BigQuery SQL design cross-check vs computeFactors_) passed.');
 }
 
+// --- 9. computeLookbackStartStr_：以戰報日期為基準往前推 ANALYSIS_LOOKBACK_DAYS 天，
+//    不是用「今天」當基準（顯示已經是舊資料的戰報時，範圍要跟著戰報日期走，不是今天）---
+{
+  const start = context.computeLookbackStartStr_('2026-07-31');
+  const expected = new Date(2026, 6, 31);
+  expected.setDate(expected.getDate() - context.CONFIG.ANALYSIS_LOOKBACK_DAYS);
+  const expectedStr = expected.getFullYear() + '-' + String(expected.getMonth() + 1).padStart(2, '0') + '-' + String(expected.getDate()).padStart(2, '0');
+  assert.strictEqual(start, expectedStr);
+  console.log('Test 9 (computeLookbackStartStr_) passed:', start, '~ 2026-07-31');
+}
+
 console.log('All Analysis.gs tests passed.');
