@@ -351,14 +351,19 @@ function buildLatestDayFactorsSql_(sourceRef, cutoffStr) {
     '),',
     'ranked AS (',
     '  SELECT *,',
+    // BigQuery 不允許用 FLOAT64 表達式當 PARTITION BY 的分組鍵（"Partitioning by expressions
+    // of type FLOAT64 is not allowed"），所以同分筆數不能用 COUNT(*) OVER (PARTITION BY x) 算，
+    // 改用 RANGE BETWEEN CURRENT ROW AND CURRENT ROW——這是 BigQuery 對「數值型別」window frame
+    // 的標準同分（peer group）寫法，算出來的「這個值總共有幾筆」跟原本 PARTITION BY 版本數學上
+    // 完全等價，只是換一種 BigQuery 允許的語法。
     '    CASE WHEN inst_part_ma5 IS NULL THEN NULL ELSE',
-    '      (RANK() OVER (ORDER BY inst_part_ma5 ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY inst_part_ma5) - 1) / 2.0) / COUNT(inst_part_ma5) OVER ()',
+    '      (RANK() OVER (ORDER BY inst_part_ma5 ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY inst_part_ma5 ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(inst_part_ma5) OVER ()',
     '    END AS inst_part_rank,',
     '    CASE WHEN ibf_20d IS NULL THEN NULL ELSE',
-    '      (RANK() OVER (ORDER BY ibf_20d ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY ibf_20d) - 1) / 2.0) / COUNT(ibf_20d) OVER ()',
+    '      (RANK() OVER (ORDER BY ibf_20d ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY ibf_20d ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(ibf_20d) OVER ()',
     '    END AS ibf_20d_rank,',
     '    CASE WHEN vol_ratio IS NULL THEN NULL ELSE',
-    '      (RANK() OVER (ORDER BY vol_ratio ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY vol_ratio) - 1) / 2.0) / COUNT(vol_ratio) OVER ()',
+    '      (RANK() OVER (ORDER BY vol_ratio ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY vol_ratio ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(vol_ratio) OVER ()',
     '    END AS vol_ratio_rank',
     '  FROM latest',
     ')',

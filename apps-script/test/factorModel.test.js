@@ -303,6 +303,14 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('RANK() OVER (ORDER BY ibf_20d ASC NULLS LAST)') !== -1);
   assert.ok(sql.indexOf('RANK() OVER (ORDER BY vol_ratio ASC NULLS LAST)') !== -1);
 
+  // 同分筆數不能用 PARTITION BY 一個 FLOAT64 欄位算——BigQuery 實測會直接報錯
+  // "Partitioning by expressions of type FLOAT64 is not allowed"，只能用 RANGE BETWEEN
+  // CURRENT ROW AND CURRENT ROW 這個 BigQuery 允許的同分（peer group）寫法。
+  assert.ok(sql.indexOf('PARTITION BY inst_part_ma5') === -1, 'FLOAT64 欄位不能當 PARTITION BY 鍵，BigQuery 會報錯');
+  assert.ok(sql.indexOf('PARTITION BY ibf_20d') === -1);
+  assert.ok(sql.indexOf('PARTITION BY vol_ratio') === -1);
+  assert.ok(sql.indexOf('RANGE BETWEEN CURRENT ROW AND CURRENT ROW') !== -1);
+
   // Armor_Score 權重要對：法人參與度 45 + IBF 30 + 量能 15 + Trend_Score*10，任何一項 null 就整體 null
   assert.ok(sql.indexOf('inst_part_rank * 45 + ibf_20d_rank * 30 + vol_ratio_rank * 15 + trend_score * 10') !== -1);
   assert.ok(sql.indexOf('WHEN inst_part_rank IS NULL OR ibf_20d_rank IS NULL OR vol_ratio_rank IS NULL THEN NULL') !== -1);
