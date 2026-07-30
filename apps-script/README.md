@@ -333,43 +333,45 @@ token 數，並用「後台管理 → AI 使用量與預估費用」裡設定的
 `Analysis.gs` 每天算 `Armor_Score` 用的權重（45/30/15/10 那組固定係數）。要把這裡找到的最佳權重
 接回每日選股邏輯，是之後可以再做的一步，先確定迴歸結果穩定、可信賴之後再接會比較安全。
 
-### 兩種資料來源模式：native（同步進 BigQuery）vs external（直接讀 Drive 檔案，全站統一）
+### 三種資料來源模式：native / external / materialized（推薦）
 
 「研究 → 因子回歸模型」子分頁裡有個「資料來源模式」下拉選單，**這個設定影響的不只是因子回歸**，
-選了 external 之後，今日戰報／個股分析／回測研究／因子相關性掃描全部都會改用 BigQuery：
+選了 external 或 materialized 之後，今日戰報／個股分析／回測研究／因子相關性掃描全部都會改用 BigQuery：
 
 - **native（預設）**：先用「同步歷史資料到 BigQuery」把歷史資料夾裡「每月一份」的
   `YYYY-MM_ALL_COMBINED.csv` 逐月載入 BigQuery 原生資料表 `history_raw`，這個模式**只影響因子
   回歸模型**，其他功能（今日戰報／個股分析／回測研究）維持原本直接讀 Drive 月份檔案的做法，
   不需要 GCP 也能正常運作。前提是資料要先變成月份檔案（daily 排程抓的資料本來就是；外部匯入的
   舊資料要先透過「匯入既有彙整表」轉成月份檔案）。
-- **external（不想匯入的話用這個，資料只存在 Drive 大檔案裡也適用）**：完全不匯入。BigQuery 建一個
-  指向 Google Drive 檔案的**外部資料表**（`history_external`），一次涵蓋歷史資料夾裡**所有**
-  CSV 檔案——不管是「一次性大彙整檔」（例如 `20260102_20260721_ALL_COMBINED.csv` 這種涵蓋一段
-  區間的檔案）還是「每日排程持續累加的月份檔案」，全部一起讀，用 `history_deduped` view
-  依 (股票代號, 日期) 去重（同一天的資料如果在多個檔案裡都出現，只會算一次，不會重複計算）。
-  查詢時 BigQuery 自己去讀 Drive 上的檔案內容，Apps Script 完全不會經手檔案，所以再大／再多的
-  檔案都不會撞到 Apps Script 讀取 Drive 大檔案的上限。**切成這個模式後**：
-  - `SheetUtils.gs` 的 `readRecentHistory_` / `readHistoryRange_`（今日戰報、個股分析、
-    回測研究、因子相關性掃描全部靠這兩個函式拿歷史資料）會自動改成查 BigQuery，
-    下游計算邏輯完全不用改，拿到的資料格式跟原本讀 Drive CSV 一模一樣。
-  - 執行任何一項查詢前都會自動呼叫 `refreshExternalHistoryTable()`（重新指向資料夾裡目前所有
-    CSV 檔案 + 重建去重 view，純 metadata 操作，秒級），不用手動同步。也可以在「因子回歸模型」
-    子分頁按「重新整理外部資料表」手動觸發一次。
-  - 開機畫面（`bootstrap()`）刻意**不會**在這個模式下自動問 BigQuery 資料範圍（避免每次開 App
-    都多一次查詢），想看目前實際的資料涵蓋範圍、列數、股票數，去「資料總覽」頁籤按「重新整理統計」。
+- **external（不想匯入、可以接受查詢慢一點）**：完全不匯入。BigQuery 建一個指向 Google Drive
+  檔案的**外部資料表**（`history_external`），一次涵蓋歷史資料夾裡**所有** CSV 檔案（一次性大
+  彙整檔＋每日排程持續累加的月份檔案），用 `history_deduped` view 依 (股票代號, 日期) 去重。
+  查詢時 BigQuery 直接讀 Drive 檔案內容（不會存副本），Apps Script 完全不會經手檔案，
+  所以再大／再多的檔案都不會撞到 Apps Script 讀取 Drive 大檔案的上限，**但每次查詢都要重新讀一次
+  Drive 檔案**，比較慢，而且 schema 是**位置對應**（照 `Config.gs` 的 `HISTORY_COLUMNS` 順序逐欄位
+  對應，不是比對 CSV 標題列文字）——如果來源檔案實際欄位順序不一樣，資料會整個對錯欄位卻不會報錯。
+- **materialized（推薦，一般情況應該選這個）**：一樣完全不匯入，但解決了 external 模式的兩個缺點：
+  1. **用「欄位名稱」對應，不是位置**：先建一個 `autodetect: true` 的外部資料表
+     （`history_external_autodetect`），讓 BigQuery 直接拿 CSV 標題列文字當欄名，
+     再用一段 SQL（`FactorRegression` 用的同一套 `BQ_COLUMN_MAP`）依「欄名」把資料複製進一份
+     BigQuery 原生表 `history_materialized`（`buildMaterializeSql_`）。不管來源檔案欄位順序
+     跟系統預期的一不一樣，都能正確對應；如果標題列文字對不上（打字不同、缺欄位），
+     複製這一步會直接報錯，而不是像 external 模式那樣靜默把資料塞錯欄位。
+  2. **查詢快**：`history_materialized` 是真正的 BigQuery 原生表（有優化過的儲存），不是每次都
+     重新讀 Drive。查詢前只有「超過 `CONFIG.BIGQUERY_MATERIALIZED_MAX_AGE_MINUTES`（預設 360 分鐘）
+     沒重新整理過」才會真的重新整理一次；其餘時候直接沿用既有的原生表，速度接近 native 模式。
+     `scheduledDailyFetch()` 每天排程跑完抓資料之後，也會自動強制重新整理一次
+     （`materializeHistoryTableIfStale_(0)`），確保戰報看到的一定包含當天最新資料，正常情況下
+     完全不用手動按任何按鈕；也可以在「研究 → 因子回歸模型」按「立即重新整理」隨時手動觸發。
 
-  **external 模式的取捨：**
-  - 每次查詢都是即時讀 Drive 檔案，比 native 模式或純 Apps Script 讀月份檔案慢，
-    今日戰報／個股分析每次載入都要多等幾秒。
-  - **欄位順序敏感**：`history_external` 的 schema 是照固定順序（日期、證券代號、證券名稱、
-    外資...，跟 `Config.gs` 的 `HISTORY_COLUMNS` 同順序）逐欄位對應，**不是**照 CSV 標題列的
-    欄名去比對——如果 Drive 上那個檔案的欄位順序跟這個不一樣，資料會整個對錯欄位而不會報錯，
-    要特別注意（這是 BigQuery CSV 外部資料表本身的行為，不是這個 App 的限制）。
-
-  切換到 external 模式後，`FactorRegression.gs` 的 `buildFeatureViewSql_` 不用改，它是照參數吃
-  來源表名稱，`ensureFeatureView_` 會自動依目前的資料來源模式決定要讀 `history_raw` 還是
-  `history_deduped`。
+**共通行為（external 跟 materialized 都適用）：**
+- `SheetUtils.gs` 的 `readRecentHistory_` / `readHistoryRange_`（今日戰報、個股分析、回測研究、
+  因子相關性掃描全部靠這兩個函式拿歷史資料）會自動改成查 BigQuery，下游計算邏輯完全不用改，
+  拿到的資料格式跟原本讀 Drive CSV 一模一樣。
+- 開機畫面（`bootstrap()`）刻意**不會**自動問 BigQuery 資料範圍（避免每次開 App 都多一次查詢），
+  想看目前實際的資料涵蓋範圍、列數、股票數，去「資料總覽」頁籤按「重新整理統計」。
+- 切換模式後，`FactorRegression.gs` 的 `buildFeatureViewSql_` 不用改，它是照參數吃來源表名稱，
+  `ensureFeatureView_` 會自動依目前的資料來源模式決定要讀哪一個。
 
 ### 套用因子模型後，今日戰報會多顯示什麼
 
@@ -455,6 +457,7 @@ AVG(CASE WHEN mkt_return < 0 THEN daily_return - mkt_return END)
 | **BigQuery ML 訓練（`CREATE MODEL ... model_type='linear_reg'`）** | 計費方式等同一般查詢（依訓練查詢掃描的資料量計費，用的還是上面查詢的免費額度/費率），**不是** AutoML/DNN/Boosted Tree 那種另計費的模型類型 | 同查詢的 1 TB 免費額度 | 訓練資料是 factor_features 篩過 NOT NULL 之後的列，量級跟查詢差不多 | 幾乎必落在免費額度內，$0 |
 | **Load Job（把 CSV 灌進 BigQuery，native 模式）** | 免費 | 不適用（本身就不計費） | 每次同步兩個 job：一個 DELETE query（算查詢）+ 一個 load job（免費） | Load job 本身 $0，DELETE query 併入上面查詢額度 |
 | **外部資料表查詢（external 模式，讀 Drive 檔案）** | 計費方式等同一般查詢（依掃描量計費，用同一個查詢免費額度） | 同查詢的 1 TB 免費額度 | 每次查詢都要即時讀 Drive 檔案內容，通常比讀原生儲存慢，但計費一樣算「掃描量」，量級跟 native 模式差不多 | 幾乎必落在免費額度內，$0（但速度會慢，不是免費模式比較貴，只是比較慢） |
+| **重新整理原生表（materialized 模式，`CREATE TABLE ... AS SELECT`）** | 計費方式等同一般查詢（依掃描量計費） | 同查詢的 1 TB 免費額度 | 只有超過設定的重新整理間隔（預設 6 小時）才會真的重新整理一次，不是每次查詢都做，量級也跟 native 模式差不多 | 幾乎必落在免費額度內，$0 |
 | **Streaming Insert** | 約 $0.01 / 200 MB | 無免費額度 | 這個 App **沒有用**streaming insert（用的是 load job，故意避開這個計費項目） | 不適用，$0 |
 
 **白話結論**：以你目前（幾個月、每天新增一批）的資料規模，正常使用（每週跑一次迴歸、每天同步一次）

@@ -126,6 +126,23 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test summarizeWeights_ passed.');
 }
 
+// --- buildMaterializeSql_ ---
+{
+  const sql = context.buildMaterializeSql_('proj.ds.history_external_autodetect', 'proj.ds.history_materialized');
+  assert.ok(sql.indexOf('CREATE OR REPLACE TABLE `proj.ds.history_materialized`') === 0);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_external_autodetect`') !== -1);
+  // 用「欄名」對應，不是位置：來源欄位要用中文標題列文字（反引號括起來）
+  assert.ok(sql.indexOf('SAFE_CAST(`日期` AS STRING) AS date_str') !== -1);
+  assert.ok(sql.indexOf('SAFE_CAST(`證券代號` AS STRING) AS stock_id') !== -1);
+  assert.ok(sql.indexOf('SAFE_CAST(`漲跌(+/-)` AS STRING) AS change_sign') !== -1);
+  // 去重邏輯
+  assert.ok(sql.indexOf('PARTITION BY stock_id, date_str') !== -1);
+  assert.ok(sql.indexOf('WHERE rn = 1') !== -1);
+  // 沒有語法上的多餘逗號（SELECT 最後一欄後面接 FROM 前不該有逗號）
+  assert.ok(sql.indexOf(',\n  FROM') === -1);
+  console.log('Test buildMaterializeSql_ passed.');
+}
+
 // --- buildDedupedViewSql_ ---
 {
   const sql = context.buildDedupedViewSql_('proj.ds.history_external', 'proj.ds.history_deduped');

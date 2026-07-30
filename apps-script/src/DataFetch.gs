@@ -316,6 +316,16 @@ function scheduledDailyFetch() {
     var rows = fetchAndMergeOneDay_(ymd, slash);
     upsertHistoryRows_(rows);
     try {
+      // materialized 模式下，today 剛寫進 Drive 的新資料要先重新整理進 BigQuery 原生表，
+      // 不然 runAnalysisAndSave() 可能讀到「重新整理間隔還沒到」的舊版本，漏掉今天這筆。
+      var bqSettings = getBigQuerySettings();
+      if (bqSettings.projectId && bqSettings.sourceMode === 'materialized') {
+        materializeHistoryTableIfStale_(0);
+      }
+    } catch (materializeErr) {
+      logRun_('每日排程-BigQuery整理', '失敗', String(materializeErr.message || materializeErr), 0);
+    }
+    try {
       runAnalysisAndSave();
     } catch (analysisErr) {
       logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);

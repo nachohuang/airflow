@@ -116,21 +116,33 @@
             資料來源模式
             <select id="bqSourceModeSelect">
               <option value="native">同步進 BigQuery（native，查詢快，需要先匯入成月份檔案）</option>
-              <option value="external">直接讀 Drive 檔案（external，免匯入，查詢較慢，今日戰報/個股分析/回測也會改讀這裡）</option>
+              <option value="external">直接讀 Drive 檔案（external，免匯入，查詢較慢，欄位順序要跟系統一致）</option>
+              <option value="materialized">自動整理進 BigQuery（materialized，推薦：免匯入＋查詢快＋用欄名比對）</option>
             </select>
           </label>
           <div class="meta-bar">
-            「直接讀 Drive 檔案」模式：不用先匯入，執行任何一項查詢前都會自動把 BigQuery 外部資料表
-            重新指向歷史資料夾裡「目前所有」CSV 檔案（含一次性大彙整檔＋每日排程的月份檔案，
-            自動去重），Apps Script 完全不會讀取檔案內容，多大的檔案都不會撞到上限；缺點是查詢
-            會比較慢，且切成這個模式後，今日戰報／個股分析／回測研究都會改成查 BigQuery。
-            <b>注意</b>：這個模式要求 Drive 上的 CSV 欄位順序跟系統原本的欄位順序一致
-            （日期、證券代號、證券名稱...），因為是用欄位順序對應、不是欄名比對。
+            三個模式選一個之後，今日戰報／個股分析／回測研究／因子相關性掃描都會跟著改變資料來源
+            （native 模式維持讀 Drive 月份檔案，另外兩個都會改成查 BigQuery）：
           </div>
+          <div class="meta-bar">
+            <b>external（即時讀取）</b>：不用先匯入，執行任何一項查詢前都會自動把 BigQuery 外部資料表
+            重新指向歷史資料夾裡「目前所有」CSV 檔案，Apps Script 完全不會讀取檔案內容。
+            <b>缺點：</b>每次查詢都要即時讀 Drive，比較慢；且用「欄位順序」對應 schema，
+            如果 Drive 上 CSV 的實際欄位順序跟系統不一樣，資料會整個對錯欄卻不會報錯。
+          </div>
+          <div class="meta-bar">
+            <b>materialized（推薦）</b>：一樣不用匯入，但改用「欄位名稱」對應（BigQuery 自動辨識 CSV
+            標題列文字當欄名，不管來源檔案欄位順序如何都不影響，對不上名字會直接報錯，不會靜默算錯）。
+            執行查詢前只有「超過設定的重新整理間隔（預設 6 小時）沒整理過」才會真的重新整理一次
+            （複製資料進 BigQuery 原生表），其餘時候直接沿用，速度接近 native 模式；每天排程抓完
+            當天資料後也會自動強制重新整理一次，正常情況下完全不用手動按任何按鈕。
+          </div>
+          <div id="bqMaterializedStatus" class="meta-bar"></div>
 
           <div class="form-actions" style="margin-top:10px;">
             <button type="button" id="bqSyncBtn" class="btn-secondary">同步歷史資料到 BigQuery（native 模式用）</button>
             <button type="button" id="bqRepointBtn" class="btn-secondary">重新整理外部資料表（external 模式用）</button>
+            <button type="button" id="bqMaterializeBtn" class="btn-secondary">立即重新整理（materialized 模式用）</button>
             <button type="button" id="bqRegressionBtn" class="btn-primary">執行因子迴歸</button>
           </div>
           <div id="bqActionResult"></div>

@@ -172,8 +172,8 @@ function computePredictedFactorScores_(row, appliedModels) {
 // ---- Apps Script 專屬：實際呼叫 BigQuery + 寫入 FactorModelHistory 分頁 ----
 
 function ensureFeatureView_(settings) {
-  if (settings.sourceMode === 'external') {
-    refreshExternalHistoryTable(); // metadata-only，重新指向資料夾裡目前所有 CSV 檔案並重建去重 view
+  if (settings.sourceMode === 'external' || settings.sourceMode === 'materialized') {
+    refreshDataSourceForMode_(settings);
   }
   runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqFeatureViewRef_(settings)), 'feature_view');
 }

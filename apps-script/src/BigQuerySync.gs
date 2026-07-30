@@ -80,6 +80,32 @@ function buildDedupedViewSql_(externalTableRef, viewRef) {
   ].join('\n');
 }
 
+/**
+ * materialized 模式的核心 SQL：從一個「用 autodetect 建的外部資料表」（欄名就是 CSV 標題列文字，
+ * 不是位置）依「欄位名稱」把資料複製進一份 BigQuery 原生表，欄位順序不管跟系統預期的一不一樣都沒差，
+ * 因為是照名字找欄位，不是照位置——這是跟 external 模式（history_external，位置對應）最大的差異。
+ * 用兩層 CTE（先命名對應、再依 (stock_id, date_str) 去重）避免同一層 SELECT 裡
+ * window function 參照到同層剛定義的別名（BigQuery 雖然大多情況支援，但用 CTE 分層更保險、好懂）。
+ */
+function buildMaterializeSql_(autodetectExternalTableRef, materializedTableRef) {
+  var mappedCols = CONFIG.BQ_COLUMN_MAP.map(function (m) {
+    return '    SAFE_CAST(`' + m.cn + '` AS STRING) AS ' + m.bq;
+  }).join(',\n');
+  return [
+    'CREATE OR REPLACE TABLE `' + materializedTableRef + '` AS',
+    'WITH mapped AS (',
+    '  SELECT',
+    mappedCols,
+    '  FROM `' + autodetectExternalTableRef + '`',
+    ')',
+    'SELECT * EXCEPT(rn) FROM (',
+    '  SELECT *, ROW_NUMBER() OVER (PARTITION BY stock_id, date_str ORDER BY date_str) AS rn',
+    '  FROM mapped',
+    ')',
+    'WHERE rn = 1'
+  ].join('\n');
+}
+
 /** 去重 view 目前涵蓋的日期範圍，給「資料總覽」跟開機摘要用。 */
 function buildDateBoundsSql_(dedupedViewRef) {
   return 'SELECT MIN(date_str) AS min_date, MAX(date_str) AS max_date, ' +
@@ -125,7 +151,7 @@ function getBigQuerySettings() {
 }
 
 function setBigQuerySourceMode(mode) {
-  var m = (mode === 'external') ? 'external' : 'native';
+  var m = (mode === 'external' || mode === 'materialized') ? mode : 'native';
   PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BIGQUERY_SOURCE_MODE, m);
   return getBigQuerySettings();
 }
@@ -224,13 +250,24 @@ function bqDedupedViewRef_(settings) {
   return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_DEDUPED_VIEW;
 }
 
+function bqAutodetectExternalTableRef_(settings) {
+  return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_AUTODETECT_EXTERNAL_TABLE;
+}
+
+function bqMaterializedTableRef_(settings) {
+  return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_MATERIALIZED_TABLE;
+}
+
 /**
  * 因子回歸 / 歷史資料查詢實際要讀的來源表：
- *   native   -> history_raw（我們自己同步進去的資料，本身就不會重複，不需要去重）
- *   external -> history_deduped（外部資料表去重後的 view，涵蓋 Drive 資料夾裡所有 CSV 檔案）
+ *   native       -> history_raw（我們自己同步進去的資料，本身就不會重複，不需要去重）
+ *   external     -> history_deduped（外部資料表去重後的 view，即時讀 Drive，位置對應 schema）
+ *   materialized -> history_materialized（自動整理進去的原生表，欄名對應 schema，查詢快）
  */
 function bqActiveSourceTableRef_(settings) {
-  return settings.sourceMode === 'external' ? bqDedupedViewRef_(settings) : bqRawTableRef_(settings);
+  if (settings.sourceMode === 'external') return bqDedupedViewRef_(settings);
+  if (settings.sourceMode === 'materialized') return bqMaterializedTableRef_(settings);
+  return bqRawTableRef_(settings);
 }
 
 function ensureBigQueryDataset_(settings) {
@@ -417,7 +454,6 @@ function ensureDedupedView_(settings) {
 /**
  * 把 external 資料表重新指向歷史資料夾裡「目前所有」CSV 檔案，並重建去重 view。
  * 這是純 metadata + 一次 view 定義操作（不會讀檔案內容），所以再大/再多的檔案也不會卡住。
- * 執行因子迴歸、或任何一次核心功能的歷史查詢（external 模式）前都會自動呼叫這個函式，不用手動同步。
  */
 function refreshExternalHistoryTable() {
   var settings = requireBigQueryProjectId_();
@@ -430,23 +466,95 @@ function refreshExternalHistoryTable() {
 }
 
 /**
- * External 模式下，核心功能（今日戰報／個股分析／回測研究／因子相關性掃描）取得歷史資料列的入口，
- * 取代原本直接讀 Drive 月份檔案的 readRecentHistoryFromFiles_ / readHistoryRangeFromFiles_
- * （見 SheetUtils.gs 的 readRecentHistory_ / readHistoryRange_，依目前的資料來源模式決定要呼叫哪一個）。
- * 回傳格式（中文欄名、數值已轉型）跟原本讀 Drive CSV 完全一樣，下游計算邏輯不用改。
+ * Materialized 模式：建立（或重建）一個 autodetect 的外部資料表，欄名直接用 CSV 標題列文字
+ * （不是位置），所以來源檔案欄位順序不管跟系統預期的一不一樣都沒差——BigQuery 用「欄名」去對應。
+ */
+function ensureAutodetectExternalTable_(settings, fileIds) {
+  var tableId = CONFIG.BIGQUERY_AUTODETECT_EXTERNAL_TABLE;
+  try {
+    BigQuery.Tables.remove(settings.projectId, settings.dataset, tableId);
+  } catch (e) {
+    // 表不存在就算了，繼續往下建立新的
+  }
+  BigQuery.Tables.insert({
+    tableReference: { projectId: settings.projectId, datasetId: settings.dataset, tableId: tableId },
+    type: 'EXTERNAL',
+    externalDataConfiguration: {
+      sourceFormat: 'CSV',
+      sourceUris: fileIds.map(buildDriveFileUri_),
+      autodetect: true,
+      csvOptions: { skipLeadingRows: 1, allowJaggedRows: true, allowQuotedNewlines: true }
+    }
+  }, settings.projectId, settings.dataset);
+}
+
+/**
+ * 把資料夾裡所有 CSV 依「欄位名稱」複製進 history_materialized 原生表（見 buildMaterializeSql_）。
+ * 這是真的會讀資料、寫進原生儲存的操作（不是純 metadata），所以不應該每次查詢都做一次——
+ * 交給 materializeHistoryTableIfStale_ 判斷多久沒整理才需要重來。
+ */
+function materializeHistoryTable() {
+  var settings = requireBigQueryProjectId_();
+  ensureBigQueryDataset_(settings);
+  var fileIds = listAllHistoryCsvFileIds_();
+  if (fileIds.length === 0) throw new Error('歷史資料夾裡沒有任何 CSV 檔案，無法整理進 BigQuery。');
+  ensureAutodetectExternalTable_(settings, fileIds);
+  runBqQuery_(buildMaterializeSql_(bqAutodetectExternalTableRef_(settings), bqMaterializedTableRef_(settings)), 'materialize');
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BIGQUERY_MATERIALIZED_LAST_REFRESH, String(Date.now()));
+  logRun_('BigQuery 整理', '成功', 'history_materialized 已重新整理（' + fileIds.length + ' 個來源檔案）', 0);
+  return { fileCount: fileIds.length };
+}
+
+function getMaterializedLastRefreshMs_() {
+  var v = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.BIGQUERY_MATERIALIZED_LAST_REFRESH);
+  return v ? parseInt(v, 10) : 0;
+}
+
+/**
+ * 只有「超過設定的最長間隔沒重新整理過」才真的重新整理，其餘時候直接沿用既有的原生表——
+ * 這是 materialized 模式比 external 模式快的關鍵：不是每次查詢都重新掃一次 Drive。
+ * maxAgeMinutesOverride 傳 0 代表強制重新整理（手動按鈕、每日排程用）。
+ */
+function materializeHistoryTableIfStale_(maxAgeMinutesOverride) {
+  var maxAgeMinutes = (maxAgeMinutesOverride === 0 || maxAgeMinutesOverride) ? maxAgeMinutesOverride : CONFIG.BIGQUERY_MATERIALIZED_MAX_AGE_MINUTES;
+  var lastMs = getMaterializedLastRefreshMs_();
+  var ageMinutes = lastMs === 0 ? Infinity : (Date.now() - lastMs) / 60000;
+  if (ageMinutes >= maxAgeMinutes) {
+    return materializeHistoryTable();
+  }
+  return { skipped: true, ageMinutes: ageMinutes };
+}
+
+/** 依目前資料來源模式，執行查詢前該做的「準備」動作（external 重新指向檔案；materialized 視新舊決定要不要重新整理）。 */
+function refreshDataSourceForMode_(settings) {
+  if (settings.sourceMode === 'materialized') return materializeHistoryTableIfStale_();
+  return refreshExternalHistoryTable();
+}
+
+/** 依目前資料來源模式，實際要查詢的來源（external 用去重 view；materialized 用原生表）。 */
+function sourceRefForBigQueryRead_(settings) {
+  return settings.sourceMode === 'materialized' ? bqMaterializedTableRef_(settings) : bqDedupedViewRef_(settings);
+}
+
+/**
+ * BigQuery 模式（external／materialized）下，核心功能（今日戰報／個股分析／回測研究／因子相關性掃描）
+ * 取得歷史資料列的入口，取代原本直接讀 Drive 月份檔案的 readRecentHistoryFromFiles_ /
+ * readHistoryRangeFromFiles_（見 SheetUtils.gs 的 readRecentHistory_ / readHistoryRange_，
+ * 依目前的資料來源模式決定要呼叫哪一個）。回傳格式（中文欄名、數值已轉型）
+ * 跟原本讀 Drive CSV 完全一樣，下游計算邏輯不用改。
  */
 function queryHistoryRowsFromBigQuery_(startStr, endStr) {
   var settings = requireBigQueryProjectId_();
-  refreshExternalHistoryTable();
-  var rows = runBqQuery_(buildHistoryRangeQuerySql_(bqDedupedViewRef_(settings), startStr, endStr), 'history_range');
+  refreshDataSourceForMode_(settings);
+  var rows = runBqQuery_(buildHistoryRangeQuerySql_(sourceRefForBigQueryRead_(settings), startStr, endStr), 'history_range');
   return rows.map(mapBqRowToHistoryRow_);
 }
 
-/** External 模式下的資料範圍摘要（開機資訊 + 「資料總覽」頁籤用），取代讀 Drive 月份檔案算出來的版本。 */
+/** BigQuery 模式下的資料範圍摘要（開機資訊 + 「資料總覽」頁籤用），取代讀 Drive 月份檔案算出來的版本。 */
 function getHistoryDateBoundsFromBigQuery_() {
   var settings = requireBigQueryProjectId_();
-  refreshExternalHistoryTable();
-  var rows = runBqQuery_(buildDateBoundsSql_(bqDedupedViewRef_(settings)), 'date_bounds');
+  refreshDataSourceForMode_(settings);
+  var rows = runBqQuery_(buildDateBoundsSql_(sourceRefForBigQueryRead_(settings)), 'date_bounds');
   if (!rows.length || !rows[0].min_date) return { min: null, max: null, tradingDays: 0, stockCount: 0, rowCount: 0 };
   return {
     min: rows[0].min_date,
@@ -460,16 +568,21 @@ function getHistoryDateBoundsFromBigQuery_() {
 /** 前端「資料總覽」頁籤：目前資料來源模式下的描述性統計摘要。 */
 function getHistoryOverview() {
   var settings = getBigQuerySettings();
-  if (settings.projectId && settings.sourceMode === 'external') {
+  if (settings.projectId && (settings.sourceMode === 'external' || settings.sourceMode === 'materialized')) {
     var bounds = getHistoryDateBoundsFromBigQuery_();
-    return {
-      mode: 'external',
+    var result = {
+      mode: settings.sourceMode,
       min: bounds.min,
       max: bounds.max,
       tradingDays: bounds.tradingDays,
       stockCount: bounds.stockCount,
       rowCount: bounds.rowCount
     };
+    if (settings.sourceMode === 'materialized') {
+      var lastMs = getMaterializedLastRefreshMs_();
+      result.lastRefresh = lastMs ? Utilities.formatDate(new Date(lastMs), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss') : null;
+    }
+    return result;
   }
   var fileBounds = getHistoryDateBounds();
   return {
@@ -478,4 +591,9 @@ function getHistoryOverview() {
     max: fileBounds.max,
     monthsAvailable: fileBounds.monthsAvailable
   };
+}
+
+/** 前端「立即重新整理」按鈕（materialized 模式）：強制重新整理，不管多久前才整理過。 */
+function refreshMaterializedHistoryTable() {
+  return materializeHistoryTableIfStale_(0);
 }

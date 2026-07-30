@@ -57,6 +57,7 @@
     if (tab === 'portfolio') loadPortfolio();
     if (tab === 'admin') loadAdmin();
     if (tab === 'data') loadDataTab_();
+    if (tab === 'research') loadResearchTab_();
   }
 
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
@@ -510,8 +511,12 @@
     return Promise.all([
       loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder),
       loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
-      loadBqSettings_(), loadFactorModelHistory_(), loadHistoryFolderStatus_()
+      loadHistoryFolderStatus_()
     ]);
+  }
+
+  function loadResearchTab_() {
+    return Promise.all([loadBqSettings_(), loadFactorModelHistory_(), loadBqMaterializedStatus_()]);
   }
 
   // ---------- AI 深度診斷設定 ----------
@@ -618,12 +623,28 @@
 
   document.getElementById('bqRepointBtn').addEventListener('click', function () {
     var resultEl = document.getElementById('bqActionResult');
-    resultEl.innerHTML = '<div class="loading">重新指向最新檔案中...</div>';
-    withSpin(callServer('syncExternalTableToLatestDriveFile')).then(function (res) {
-      resultEl.innerHTML = '<div class="meta-bar">✅ 外部資料表已指向：' + escapeHtml(res.fileName) +
-        '（判斷日期：' + escapeHtml(res.detectedDate) + '）</div>';
+    resultEl.innerHTML = '<div class="loading">重新整理外部資料表中...</div>';
+    withSpin(callServer('refreshExternalHistoryTable')).then(function (res) {
+      resultEl.innerHTML = '<div class="meta-bar">✅ 外部資料表已重新整理，涵蓋 ' + res.fileCount + ' 個檔案</div>';
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
+
+  document.getElementById('bqMaterializeBtn').addEventListener('click', function () {
+    var resultEl = document.getElementById('bqActionResult');
+    resultEl.innerHTML = '<div class="loading">重新整理中，資料量大時可能要一兩分鐘...</div>';
+    withSpin(callServer('refreshMaterializedHistoryTable')).then(function (res) {
+      resultEl.innerHTML = '<div class="meta-bar">✅ 已重新整理，涵蓋 ' + res.fileCount + ' 個來源檔案</div>';
+      loadBqMaterializedStatus_();
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
+
+  function loadBqMaterializedStatus_() {
+    return callServer('getHistoryOverview').then(function (o) {
+      var el = document.getElementById('bqMaterializedStatus');
+      if (o.mode !== 'materialized') { el.textContent = ''; return; }
+      el.textContent = o.lastRefresh ? ('上次重新整理：' + o.lastRefresh) : '還沒重新整理過（第一次查詢或按「立即重新整理」時會自動建立）';
+    }).catch(function () { /* 顯示用，失敗就不擋其他載入 */ });
+  }
 
   document.getElementById('bqSettingsForm').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -969,9 +990,11 @@
     var el = document.getElementById('historyOverviewResult');
     el.innerHTML = '<div class="loading">讀取統計中...</div>';
     return withSpin(callServer('getHistoryOverview')).then(function (o) {
-      if (o.mode === 'external') {
+      if (o.mode === 'external' || o.mode === 'materialized') {
         if (!o.min) { el.innerHTML = '<div class="empty-hint">歷史資料夾裡還沒有任何資料</div>'; return; }
-        el.innerHTML = '<div class="meta-bar">資料來源：BigQuery（external，直接讀 Drive 檔案）</div>' +
+        var modeLabel = o.mode === 'materialized' ? 'materialized，自動整理進 BigQuery 原生表' : 'external，直接讀 Drive 檔案';
+        el.innerHTML = '<div class="meta-bar">資料來源：BigQuery（' + modeLabel + '）' +
+          (o.lastRefresh ? '　上次重新整理：' + escapeHtml(o.lastRefresh) : '') + '</div>' +
           '<table class="simple-table"><tbody>' +
           '<tr><td>資料日期範圍</td><td>' + escapeHtml(o.min) + ' ～ ' + escapeHtml(o.max) + '</td></tr>' +
           '<tr><td>交易日數</td><td>' + fmtNum(o.tradingDays, 0) + '</td></tr>' +

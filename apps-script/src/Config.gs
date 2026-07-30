@@ -27,8 +27,9 @@ var CONFIG = {
     GEMINI_PRICE_OUTPUT: 'GEMINI_PRICE_OUTPUT',
     BIGQUERY_PROJECT_ID: 'BIGQUERY_PROJECT_ID',
     BIGQUERY_DATASET: 'BIGQUERY_DATASET',
-    BIGQUERY_SOURCE_MODE: 'BIGQUERY_SOURCE_MODE', // 'native' | 'external'
-    BIGQUERY_PRICE_PER_TB: 'BIGQUERY_PRICE_PER_TB'
+    BIGQUERY_SOURCE_MODE: 'BIGQUERY_SOURCE_MODE', // 'native' | 'external' | 'materialized'
+    BIGQUERY_PRICE_PER_TB: 'BIGQUERY_PRICE_PER_TB',
+    BIGQUERY_MATERIALIZED_LAST_REFRESH: 'BIGQUERY_MATERIALIZED_LAST_REFRESH'
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
@@ -96,17 +97,25 @@ var CONFIG = {
   BIGQUERY_RAW_TABLE: 'history_raw',
   BIGQUERY_EXTERNAL_TABLE: 'history_external',
   BIGQUERY_DEDUPED_VIEW: 'history_deduped',
+  BIGQUERY_AUTODETECT_EXTERNAL_TABLE: 'history_external_autodetect',
+  BIGQUERY_MATERIALIZED_TABLE: 'history_materialized',
+  BIGQUERY_MATERIALIZED_MAX_AGE_MINUTES: 360, // 超過這個時間沒重新整理過，讀取時會自動重新整理一次
   BIGQUERY_FEATURE_VIEW: 'factor_features',
   BIGQUERY_LOCATION: 'US', // BigQuery Dataset 所在地區，跟後面所有 query 的 location 要一致
   // 資料來源模式：
-  //   'native'   -> 用「同步歷史資料到 BigQuery」把我們自己的月份 CSV 逐月載入 history_raw（管理型資料表，查詢快），
-  //                 只服務「因子回歸模型」，核心功能（今日戰報/個股分析/回測研究）維持讀 Drive 月份檔案。
-  //   'external' -> 完全不匯入。BigQuery 建一個指向 Drive 資料夾「所有」CSV 檔案的外部資料表
-  //                （history_external，涵蓋一次性大彙整檔 + 每日排程持續累加的月份檔案），
-  //                 用 history_deduped view 依 (股票代號, 日期) 去重。這個模式下，
-  //                 今日戰報／個股分析／回測研究／因子相關性掃描／因子回歸模型全部改成讀這裡，
-  //                 Apps Script 完全不會直接讀取歷史 CSV 檔案內容，也就不會有檔案太大的問題；
-  //                 代價是每次查詢都要即時讀 Drive + 跑 BigQuery，比 native 模式或純 Apps Script 慢。
+  //   'native'       -> 用「同步歷史資料到 BigQuery」把我們自己的月份 CSV 逐月載入 history_raw
+  //                     （管理型資料表，查詢快），只服務「因子回歸模型」，核心功能（今日戰報/個股分析/
+  //                     回測研究）維持讀 Drive 月份檔案。
+  //   'external'     -> 完全不匯入。BigQuery 建一個指向 Drive 資料夾「所有」CSV 檔案的外部資料表
+  //                     （history_external，位置對應 schema，欄位順序要跟系統一致），查詢時即時讀
+  //                     Drive 檔案，沒有存副本，每次都要重新掃描，速度較慢。
+  //   'materialized' -> 推薦：不用匯入、查詢快、且用「欄名」對應不怕欄位順序不同。做法是先建一個
+  //                     autodetect 的外部資料表（欄名直接用 CSV 標題列文字，不是位置），
+  //                     再用 SQL 依欄名把資料複製進一份 BigQuery 原生表（history_materialized），
+  //                     Apps Script 全程不碰檔案內容（複製動作是 BigQuery 自己做的）。
+  //                     這份原生表會依 BIGQUERY_MATERIALIZED_MAX_AGE_MINUTES 自動判斷要不要重新整理
+  //                     （太舊才重新整理，不是每次查詢都重來，所以比 external 模式快很多），
+  //                     每日排程跑完也會自動觸發一次重新整理，正常情況下完全不用手動按任何按鈕。
   BIGQUERY_SOURCE_MODE_DEFAULT: 'native',
 
   // 歷史資料 CSV 欄名（中文）-> BigQuery 欄名（ascii，BigQuery 對特殊符號欄名支援有限，
