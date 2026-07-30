@@ -30,7 +30,8 @@ var CONFIG = {
     BIGQUERY_SOURCE_MODE: 'BIGQUERY_SOURCE_MODE', // 'native' | 'external' | 'materialized'
     BIGQUERY_PRICE_PER_TB: 'BIGQUERY_PRICE_PER_TB',
     BIGQUERY_MATERIALIZED_LAST_REFRESH: 'BIGQUERY_MATERIALIZED_LAST_REFRESH',
-    SCREENING_DIAGNOSTICS_CACHE: 'SCREENING_DIAGNOSTICS_CACHE' // {date, stats} JSON，避免 0 檔訊號時前端再重跑一次昂貴的歷史查詢
+    SCREENING_DIAGNOSTICS_CACHE: 'SCREENING_DIAGNOSTICS_CACHE', // {date, stats} JSON，避免 0 檔訊號時前端再重跑一次昂貴的歷史查詢
+    BACKFILL_JOB_STATE: 'BACKFILL_JOB_STATE' // 「補抓/重新彙整區間」背景 job 的目前狀態（見 DataFetch.gs）
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
@@ -101,6 +102,11 @@ var CONFIG = {
   BIGQUERY_AUTODETECT_EXTERNAL_TABLE: 'history_external_autodetect',
   BIGQUERY_MATERIALIZED_TABLE: 'history_materialized',
   BIGQUERY_MATERIALIZED_MAX_AGE_MINUTES: 360, // 超過這個時間沒重新整理過，讀取時會自動重新整理一次
+  // 每天/補抓寫入的資料現在直接 append 進 history_raw（不再寫 Drive 月份檔案），
+  // history_materialized 變成「一次性從舊的 Drive 大檔案整理進來的歷史基準」，很少再變動。
+  // history_unified 把兩份表 UNION 起來（同一天同一檔股票撞到的話 history_raw 優先，
+  // 因為它是比較新鮮的直接寫入），materialized 模式讀的是這個 view，不是單一份表。
+  BIGQUERY_UNIFIED_VIEW: 'history_unified',
   BIGQUERY_FEATURE_VIEW: 'factor_features',
   BIGQUERY_LOCATION: 'US', // BigQuery Dataset 所在地區，跟後面所有 query 的 location 要一致
   // 資料來源模式：

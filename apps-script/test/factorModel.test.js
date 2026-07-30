@@ -73,6 +73,32 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test buildDeleteMonthSql_ passed.');
 }
 
+// --- buildDeleteDatesSql_ ---
+{
+  const sql = context.buildDeleteDatesSql_('proj.ds.history_raw', ['2026-07-21', '2026-07-22']);
+  assert.ok(sql.indexOf('DELETE FROM `proj.ds.history_raw`') === 0);
+  assert.ok(sql.indexOf("date_str IN ('2026-07-21', '2026-07-22')") !== -1);
+  console.log('Test buildDeleteDatesSql_ passed.');
+}
+
+// --- buildUnifiedViewSql_：history_raw（每天直接寫入）UNION history_materialized（舊資料基準），
+//     同一天同一檔股票兩邊都有的話 history_raw 要贏（比較新鮮）---
+{
+  const sql = context.buildUnifiedViewSql_('proj.ds.history_raw', 'proj.ds.history_materialized', 'proj.ds.history_unified');
+  assert.ok(sql.indexOf('CREATE OR REPLACE VIEW `proj.ds.history_unified`') === 0);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_raw`') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_materialized`') !== -1);
+  assert.ok(sql.indexOf('0 AS src_priority FROM `proj.ds.history_raw`') !== -1, 'history_raw 要標更低的 src_priority 才會在同分時贏');
+  assert.ok(sql.indexOf('1 AS src_priority FROM `proj.ds.history_materialized`') !== -1);
+  assert.ok(sql.indexOf('PARTITION BY stock_id, date_str ORDER BY src_priority ASC') !== -1);
+  assert.ok(sql.indexOf('WHERE rn = 1') !== -1);
+  // 每個候選欄位都要出現在最終 SELECT 清單裡（不能漏欄位）
+  context.CONFIG.BQ_COLUMN_MAP.forEach(function (m) {
+    assert.ok(sql.indexOf(m.bq) !== -1, 'missing column in unified view: ' + m.bq);
+  });
+  console.log('Test buildUnifiedViewSql_ passed.');
+}
+
 // --- buildFeatureViewSql_ ---
 {
   const sql = context.buildFeatureViewSql_('proj.ds.history_raw', 'proj.ds.factor_features');

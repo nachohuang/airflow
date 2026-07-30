@@ -81,10 +81,17 @@ function upsertRowsByDate_(sheet, columns, newRows) {
 }
 
 /**
- * 寫入永遠是 Drive 上按月分開的 CSV 檔（HistoryFiles.gs），不管資料來源模式是什麼——
- * 每日排程抓到的當天資料一律先落地成月份檔案，這條路徑從來不會有大檔案問題。
+ * 每日排程/補抓/匯入抓到的新資料要寫去哪裡：
+ *   有設定 BigQuery 專案 -> 直接 WRITE_APPEND 進 history_raw（BigQuerySync.gs
+ *     upsertHistoryRowsToBigQuery_），不再另外寫 Drive 月份 CSV 檔案——避免歷史檔案
+ *     越滾越大，某一天 Apps Script 讀不動整個檔案。
+ *   沒有設定 BigQuery -> 維持原本寫 Drive 月份 CSV 檔案的行為（HistoryFiles.gs），
+ *     這樣沒有接 BigQuery 的使用者一樣能正常使用 App。
  */
 function upsertHistoryRows_(newRows) {
+  if (shouldWriteToBigQuery_()) {
+    return upsertHistoryRowsToBigQuery_(newRows);
+  }
   return upsertHistoryRowsToMonthlyFiles_(newRows);
 }
 

@@ -81,11 +81,35 @@
     '🔥 趨勢領航': 'var(--amber)'
   };
 
+  /** 篩選漏斗明細：不管是自動叫出來還是使用者按按鈕叫出來，畫面都一樣。 */
+  function loadScreeningDiagnostics_(listEl) {
+    callServer('getScreeningDiagnostics').then(function (d) {
+      if (!d.latestDate) { listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>'; return; }
+      listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>' +
+        '<div class="meta-bar" style="margin-top:10px;">篩選漏斗明細（' + escapeHtml(d.latestDate) + '，共 ' + d.totalStocks + ' 檔股票，其中 ' + d.holdingCount + ' 檔是持股不算在漏斗內）：</div>' +
+        '<table class="simple-table"><tbody>' +
+        '<tr><td>成交金額達門檻</td><td>' + d.liquidityPass + '</td></tr>' +
+        '<tr><td>多頭排列（Trend_Score=2）</td><td>' + d.upwardTrend + '</td></tr>' +
+        '<tr><td>法人參與度前20%</td><td>' + d.highInstParticipation + '（' + d.nullInstPartRank + ' 檔無法計算）</td></tr>' +
+        '<tr><td>量能前15%</td><td>' + d.volumeSpark + '（' + d.nullVolRatioRank + ' 檔無法計算）</td></tr>' +
+        '<tr><td>同時符合「趨勢啟動」三條件</td><td>' + d.breakoutMatches + '</td></tr>' +
+        '<tr><td>多頭+法人逢低承接前30%（「趨勢領航」）</td><td>' + d.ibfHighWithUpward + '（' + d.nullIbfRank + ' 檔無法計算）</td></tr>' +
+        '</tbody></table>' +
+        '<div class="meta-bar" style="margin-top:8px;">如果「無法計算」的數字接近總股票數，通常代表資料有問題（常見於 BigQuery external 模式欄位順序對錯）；' +
+        '如果數字都正常但某一關就是掉到 0，代表今天確實沒有股票同時符合這麼嚴格的條件，是策略設計上會發生的正常情況。</div>';
+    }).catch(function (err) { listEl.innerHTML = errorBox(err); });
+  }
+
+  /**
+   * forceRefresh 為 false（頁面打開、切回這頁）：只讀 Reports 分頁上「最近一次」存的戰報，
+   * 純讀取、絕對不會觸發任何計算，就算 BigQuery 那邊有問題也不會在單純打開頁面時爆出來。
+   * forceRefresh 為 true（按右上角重新整理）：才會真的重新抓資料、重新跑一次完整分析。
+   */
   function loadDashboard(forceRefresh) {
     var listEl = document.getElementById('dashboardList');
     var metaEl = document.getElementById('dashboardMeta');
-    listEl.innerHTML = '<div class="loading">分析中，第一次執行可能要等資料抓取…</div>';
-    var fn = forceRefresh ? 'runManualFullUpdate' : 'getDashboardReport';
+    listEl.innerHTML = '<div class="loading">' + (forceRefresh ? '分析中，可能需要一點時間…' : '載入中...') + '</div>';
+    var fn = forceRefresh ? 'runManualFullUpdate' : 'getCachedDashboardReport';
     return withSpin(callServer(fn)).then(function (res) {
       if (forceRefresh && res.fetch && !res.fetch.ok) {
         metaEl.textContent = '';
@@ -94,28 +118,25 @@
       }
       var result = forceRefresh ? res.analysis : res;
       if (!result || !result.latestDate) {
-        metaEl.textContent = '目前還沒有資料，請先到「後台管理」執行一次資料抓取。';
+        metaEl.textContent = '目前還沒有任何戰報，按右上角🔄重新整理產生一次。';
         listEl.innerHTML = '';
         return;
       }
-      metaEl.textContent = '資料日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號' + (result.cached ? '（快取，未重新查詢）' : '');
+      var isToday = forceRefresh || !!result.isToday;
+      metaEl.textContent = '資料日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號' +
+        (isToday ? '' : '（不是今天，按右上角🔄重新整理產生今天的戰報）');
       if (result.report.length === 0) {
-        listEl.innerHTML = '<div class="loading">篩選出 0 檔，讀取篩選漏斗明細中...</div>';
-        callServer('getScreeningDiagnostics').then(function (d) {
-          if (!d.latestDate) { listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>'; return; }
-          listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>' +
-            '<div class="meta-bar" style="margin-top:10px;">篩選漏斗明細（' + escapeHtml(d.latestDate) + '，共 ' + d.totalStocks + ' 檔股票，其中 ' + d.holdingCount + ' 檔是持股不算在漏斗內）：</div>' +
-            '<table class="simple-table"><tbody>' +
-            '<tr><td>成交金額達門檻</td><td>' + d.liquidityPass + '</td></tr>' +
-            '<tr><td>多頭排列（Trend_Score=2）</td><td>' + d.upwardTrend + '</td></tr>' +
-            '<tr><td>法人參與度前20%</td><td>' + d.highInstParticipation + '（' + d.nullInstPartRank + ' 檔無法計算）</td></tr>' +
-            '<tr><td>量能前15%</td><td>' + d.volumeSpark + '（' + d.nullVolRatioRank + ' 檔無法計算）</td></tr>' +
-            '<tr><td>同時符合「趨勢啟動」三條件</td><td>' + d.breakoutMatches + '</td></tr>' +
-            '<tr><td>多頭+法人逢低承接前30%（「趨勢領航」）</td><td>' + d.ibfHighWithUpward + '（' + d.nullIbfRank + ' 檔無法計算）</td></tr>' +
-            '</tbody></table>' +
-            '<div class="meta-bar" style="margin-top:8px;">如果「無法計算」的數字接近總股票數，通常代表資料有問題（常見於 BigQuery external 模式欄位順序對錯）；' +
-            '如果數字都正常但某一關就是掉到 0，代表今天確實沒有股票同時符合這麼嚴格的條件，是策略設計上會發生的正常情況。</div>';
-        }).catch(function (err) { listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>' + errorBox(err); });
+        if (forceRefresh) {
+          listEl.innerHTML = '<div class="loading">篩選出 0 檔，讀取篩選漏斗明細中...</div>';
+          loadScreeningDiagnostics_(listEl);
+        } else {
+          listEl.innerHTML = '<div class="empty-hint">這天沒有符合條件的訊號</div>' +
+            '<div class="form-actions"><button type="button" class="btn-secondary" id="viewDiagBtn">查看篩選漏斗明細</button></div>';
+          document.getElementById('viewDiagBtn').addEventListener('click', function () {
+            listEl.innerHTML = '<div class="loading">讀取篩選漏斗明細中...</div>';
+            loadScreeningDiagnostics_(listEl);
+          });
+        }
         return;
       }
       listEl.innerHTML = result.report.map(function (r) {
@@ -914,65 +935,88 @@
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   });
 
-  // ---------- 資料範圍重新彙整 ----------
+  // ---------- 資料範圍重新彙整（背景 job，見 DataFetch.gs processBackfillJobTick_） ----------
   document.getElementById('remergeForm').addEventListener('submit', function (e) {
     e.preventDefault();
     var start = document.getElementById('remergeStart').value;
     var end = document.getElementById('remergeEnd').value;
     if (!start || !end) return;
-    runRemergeLoop(start, end, document.getElementById('remergeResult'), { succeeded: [], failed: [], skipped: [] }, 0);
+    document.getElementById('remergeResult').innerHTML = '<div class="loading">啟動背景工作中...</div>';
+    withSpin(callServer('startBackfillJob', start, end)).then(function () {
+      pollBackfillStatus_();
+    }).catch(function (err) { document.getElementById('remergeResult').innerHTML = errorBox(err); });
   });
 
-  /** 依目前累積結果 + 進行中狀態組出畫面（statusLine 為 null 代表整段區間已跑完）。 */
-  function renderRemergeProgress_(acc, statusLine) {
-    var headline = statusLine ?
-      '<div class="loading">⏳ ' + escapeHtml(statusLine) + '</div>' :
-      '<div class="meta-bar">✅ 完成</div>';
-    var summary = '<div class="meta-bar">已處理：成功 ' + acc.succeeded.length + ' 天、略過 ' + acc.skipped.length + ' 天' +
-      (acc.failed.length ? '、失敗 ' + acc.failed.length + ' 天' : '') + '</div>';
-    var failHtml = acc.failed.length ?
-      '<div class="table-scroll"><table class="simple-table"><thead><tr><th>日期</th><th>錯誤</th></tr></thead><tbody>' +
-      acc.failed.map(function (f) { return '<tr><td>' + escapeHtml(f.date) + '</td><td>' + escapeHtml(f.error) + '</td></tr>'; }).join('') +
-      '</tbody></table></div>' : '';
-    return headline + summary + failHtml;
+  var backfillPollTimer_ = null;
+  function stopBackfillPoll_() {
+    if (backfillPollTimer_) { clearInterval(backfillPollTimer_); backfillPollTimer_ = null; }
   }
 
-  /**
-   * 一次只處理「一天」（見 DataFetch.gs backfillHistory 的說明），逐天顯示目前進度，
-   * 也讓單次呼叫很短——手機瀏覽器切到背景中斷連線時，最多只影響「正在處理的這一天」，
-   * 失敗時會停下來給一個「從這天繼續」的按鈕，不用整段重新輸入日期重跑。
-   */
-  function runRemergeLoop(currentDate, end, resultEl, acc, iteration) {
-    if (iteration > 2000) {
-      resultEl.innerHTML = renderRemergeProgress_(acc, null) +
-        errorBox('已經連續跑了 2000 天還沒結束，先停下來看看執行紀錄，需要的話可以縮小區間再試一次。');
+  /** 背景工作是在獨立的時間觸發器裡跑的，這裡只是每隔幾秒讀一次目前狀態顯示出來——
+   *  就算這個分頁被關掉、切到背景、輪詢中斷，工作本身完全不受影響，回來重新打開頁面
+   *  再呼叫一次就能看到最新（甚至已經做完的）結果，不需要靠這個分頁「撐著」。 */
+  function pollBackfillStatus_() {
+    stopBackfillPoll_();
+    var poll = function () {
+      callServer('getBackfillJobStatus').then(renderBackfillStatus_).catch(function () {
+        // 輪詢本身失敗（例如剛好網路不穩）不代表背景工作失敗，畫面維持現狀，下一次輪詢再試
+      });
+    };
+    poll();
+    backfillPollTimer_ = setInterval(poll, 3000);
+  }
+
+  function renderBackfillStatus_(state) {
+    var resultEl = document.getElementById('remergeResult');
+    if (!state || state.status === 'idle') { resultEl.innerHTML = ''; return; }
+
+    var summary = '<div class="meta-bar">已處理：成功 ' + state.succeeded.length + ' 天、略過 ' + state.skipped.length + ' 天' +
+      (state.failed.length ? '、失敗 ' + state.failed.length + ' 天' : '') + '</div>';
+    var failHtml = state.failed.length ?
+      '<div class="table-scroll"><table class="simple-table"><thead><tr><th>日期</th><th>錯誤</th></tr></thead><tbody>' +
+      state.failed.map(function (f) { return '<tr><td>' + escapeHtml(f.date) + '</td><td>' + escapeHtml(f.error) + '</td></tr>'; }).join('') +
+      '</tbody></table></div>' : '';
+
+    if (state.status === 'running') {
+      resultEl.innerHTML = '<div class="loading">⏳ 背景執行中，目前處理到：' + escapeHtml(state.cursor || state.startStr) +
+        '（可以切到別的畫面或關掉螢幕，不會中斷這個工作，回來再打開這頁就會看到最新進度）</div>' + summary + failHtml +
+        '<div class="form-actions"><button type="button" class="btn-danger" id="remergeCancelBtn">取消</button></div>';
+      document.getElementById('remergeCancelBtn').addEventListener('click', function () {
+        callServer('cancelBackfillJob').then(renderBackfillStatus_);
+      });
       return;
     }
-    resultEl.innerHTML = renderRemergeProgress_(acc, '目前處理中：' + currentDate);
-    withSpin(callServer('backfillHistory', currentDate, end)).then(function (res) {
-      if (res.result) {
-        if (res.result.kind === 'succeeded') acc.succeeded.push(res.result.date);
-        else if (res.result.kind === 'skipped') acc.skipped.push({ date: res.result.date, reason: res.result.reason });
-        else if (res.result.kind === 'failed') acc.failed.push({ date: res.result.date, error: res.result.error });
-      }
-      if (res.done) {
-        resultEl.innerHTML = renderRemergeProgress_(acc, null);
-        loadedTabs.dashboard = false;
-      } else {
-        runRemergeLoop(res.nextStart, end, resultEl, acc, iteration + 1);
-      }
-    }).catch(function (err) {
-      resultEl.innerHTML = renderRemergeProgress_(acc, null) + errorBox(err) +
-        '<div class="form-actions"><button type="button" class="btn-secondary" id="remergeRetryBtn">從 ' + escapeHtml(currentDate) + ' 繼續</button></div>';
-      document.getElementById('remergeRetryBtn').addEventListener('click', function () {
-        runRemergeLoop(currentDate, end, resultEl, acc, iteration + 1);
+    stopBackfillPoll_();
+    if (state.status === 'done') {
+      resultEl.innerHTML = '<div class="meta-bar">✅ 完成</div>' + summary + failHtml;
+      loadedTabs.dashboard = false;
+    } else if (state.status === 'cancelled') {
+      resultEl.innerHTML = '<div class="meta-bar">已取消（處理到：' + escapeHtml(state.cursor || '') + '）</div>' + summary + failHtml;
+    } else if (state.status === 'error') {
+      resultEl.innerHTML = summary + failHtml + errorBox('背景工作發生錯誤：' + state.errorMessage) +
+        '<div class="form-actions"><button type="button" class="btn-secondary" id="remergeResumeBtn">從中斷處繼續</button></div>';
+      document.getElementById('remergeResumeBtn').addEventListener('click', function () {
+        withSpin(callServer('startBackfillJob', state.cursor || state.startStr, state.endStr)).then(function () {
+          pollBackfillStatus_();
+        }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
       });
-    });
+    }
+  }
+
+  /** 「資料總覽」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後，完全不知道背景工作
+   *  跑到哪、甚至早就做完了。只有真的有 job（不是 idle）時才顯示/開始輪詢。 */
+  function checkBackfillStatusOnLoad_() {
+    return callServer('getBackfillJobStatus').then(function (state) {
+      if (state && state.status === 'running') { pollBackfillStatus_(); return; }
+      if (state && (state.status === 'done' || state.status === 'cancelled' || state.status === 'error')) {
+        renderBackfillStatus_(state);
+      }
+    }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
   }
 
   // ---------- 資料總覽 ----------
   function loadDataTab_() {
-    return Promise.all([loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_()]);
+    return Promise.all([loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_()]);
   }
 
   function loadBqUsage_() {

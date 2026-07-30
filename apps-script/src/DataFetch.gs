@@ -241,53 +241,137 @@ function fetchAndMergeOneDay_(dateStr, formattedDate) {
   return merged;
 }
 
-/** 'yyyy-MM-dd'（給 backfillHistory 的 startStr/endStr/nextStart 用，跟 formatYmd_ 的
- *  'yyyyMMdd' 是不同格式——之前 nextStart 誤用 formatYmd_，回傳的 'yyyyMMdd' 字串再餵回
+/** 'yyyy-MM-dd'（給補抓 job 的 startStr/endStr/cursor 用，跟 formatYmd_ 的 'yyyyMMdd' 是
+ *  不同格式——早期版本續跑用的日期字串誤用 formatYmd_，回傳的 'yyyyMMdd' 字串再餵回
  *  new Date(startStr + 'T00:00:00') 沒有 '-' 會解析失敗，續跑第二批就會整個壞掉）。 */
 function formatDashedYmd_(date) {
   return Utilities.formatDate(date, 'Asia/Taipei', 'yyyy-MM-dd');
 }
 
-/**
- * 補抓/重新合併一段日期區間，**一次只處理一天**，抓完立刻 upsert 進 History（同日期資料
- * 會被新抓到的取代），回傳這一天的結果 + 還有沒有下一天要繼續（nextStart）。跳過規則跟
- * 每日排程共用一份設定（後台管理的「六日不執行」與「臨時停跑日」）。
- *
- * 之前是內部跑 4.5 分鐘時間預算、一次處理一整批天數，前端只能在「一整批」結束後才更新一次
- * 進度，使用者完全看不到目前處理到哪一天；而且單次呼叫動輒好幾分鐘，手機瀏覽器切到背景時
- * 這一整批很容易被中斷、噴出網路錯誤，而且中斷後不知道實際做到哪一天。改成一次一天之後，
- * 每次 google.script.run 呼叫只有一天的 TWSE 抓取時間（通常幾秒），前端可以逐天顯示「目前在
- * 處理哪一天」，就算中途被中斷，也只損失「正在處理的這一天」，重新呼叫同一天繼續就好，
- * 不用整批重來。
- */
-function backfillHistory(startStr, endStr) {
-  var cur = new Date(startStr + 'T00:00:00');
-  var end = new Date(endStr + 'T00:00:00');
-  if (cur.getTime() > end.getTime()) {
-    return { done: true, result: null, nextStart: null };
-  }
-
-  var settings = getScheduleSettings();
+/** 處理「一天」：跳過規則跟每日排程共用一份設定（後台管理的「六日不執行」與「臨時停跑日」）。 */
+function backfillOneDay_(cur, settings) {
   var ymd = formatYmd_(cur);
-  var result;
   var skip = shouldSkipDate_(cur, settings);
-  if (skip.skip) {
-    result = { kind: 'skipped', date: ymd, reason: skip.reason };
-  } else {
-    var slash = formatSlashDate_(cur);
-    try {
-      var rows = fetchAndMergeOneDay_(ymd, slash);
-      upsertHistoryRows_(rows);
-      result = { kind: 'succeeded', date: ymd };
-    } catch (e) {
-      result = { kind: 'failed', date: ymd, error: String(e.message || e) };
-    }
+  if (skip.skip) return { kind: 'skipped', date: ymd, reason: skip.reason };
+  var slash = formatSlashDate_(cur);
+  try {
+    var rows = fetchAndMergeOneDay_(ymd, slash);
+    upsertHistoryRows_(rows);
+    return { kind: 'succeeded', date: ymd };
+  } catch (e) {
+    return { kind: 'failed', date: ymd, error: String(e.message || e) };
   }
+}
 
-  var next = new Date(cur);
-  next.setDate(next.getDate() + 1);
-  var done = next.getTime() > end.getTime();
-  return { done: done, result: result, nextStart: done ? null : formatDashedYmd_(next) };
+// ============================================================
+// 補抓/重新彙整區間：背景 job
+// 用時間觸發器（跟每日排程共用同一套機制）在背景處理，完全不依賴瀏覽器分頁保持開啟或
+// 保持連線——按下按鈕後這次呼叫立刻回傳，實際抓取工作在另一次獨立觸發的執行裡進行，
+// 切到別的 App、關掉螢幕都不會中斷，前端只需要輪詢 getBackfillJobStatus() 顯示進度。
+// ============================================================
+
+function getBackfillJobState_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.BACKFILL_JOB_STATE);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveBackfillJobState_(state) {
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BACKFILL_JOB_STATE, JSON.stringify(state));
+}
+
+function deleteBackfillJobTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'processBackfillJobTick_') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/** 前端「重新抓取/合併此區間」送出表單時呼叫：存好 job 狀態、排一個幾乎立刻觸發的一次性
+ *  時間觸發器就馬上回傳（不在這次呼叫裡處理任何一天），所以這次 google.script.run 呼叫
+ *  本身非常快，不會因為抓取本身很花時間而被瀏覽器分頁中斷。 */
+function startBackfillJob(startStr, endStr) {
+  deleteBackfillJobTriggers_();
+  saveBackfillJobState_({
+    startStr: startStr, endStr: endStr, cursor: startStr,
+    succeeded: [], failed: [], skipped: [],
+    status: 'running', updatedAt: Date.now()
+  });
+  ScriptApp.newTrigger('processBackfillJobTick_').timeBased().after(1000).create();
+  return { status: 'running' };
+}
+
+/** 前端輪詢用：目前這個背景 job 的狀態。不管是不是自己那個分頁開的，任何時候打開頁面
+ *  呼叫這個都看得到最新進度（或是已經做完的結果），因為狀態存在 Script Properties，
+ *  不是存在瀏覽器分頁的記憶體裡。 */
+function getBackfillJobStatus() {
+  return getBackfillJobState_() || { status: 'idle' };
+}
+
+/** 使用者按「取消」：標記狀態，讓還在排隊中的下一次 tick 執行時看到就直接停下來，
+ *  同時清掉已經排定、還沒觸發的觸發器（如果剛好卡在兩次 tick 之間）。 */
+function cancelBackfillJob() {
+  var state = getBackfillJobState_();
+  if (state && state.status === 'running') {
+    state.status = 'cancelled';
+    state.updatedAt = Date.now();
+    saveBackfillJobState_(state);
+  }
+  deleteBackfillJobTriggers_();
+  return getBackfillJobStatus();
+}
+
+/**
+ * 真正做事的地方，由時間觸發器呼叫（不是 google.script.run），完全不受瀏覽器分頁影響。
+ * 有 4.5 分鐘內部時間預算，時間到了就存好目前進度、排下一次 tick 繼續，直到整段
+ * 區間跑完、被取消，或遇到未預期的例外（會被接住寫進 job 狀態變成 status:'error'，
+ * 不會讓整條鏈就這樣默默停在 'running' 卻再也不會有進度）。
+ */
+function processBackfillJobTick_() {
+  deleteBackfillJobTriggers_();
+  var state = getBackfillJobState_();
+  if (!state || state.status !== 'running') return;
+
+  var scriptStart = Date.now();
+  var TIME_BUDGET_MS = 4.5 * 60 * 1000;
+
+  try {
+    var settings = getScheduleSettings();
+    var cur = new Date(state.cursor + 'T00:00:00');
+    var end = new Date(state.endStr + 'T00:00:00');
+
+    while (cur.getTime() <= end.getTime()) {
+      // 每處理完一天都重新讀一次狀態，讓使用者按下「取消」能盡快生效，不用等整批時間預算跑完。
+      var latest = getBackfillJobState_();
+      if (!latest || latest.status !== 'running') return;
+
+      if (Date.now() - scriptStart > TIME_BUDGET_MS) {
+        state.cursor = formatDashedYmd_(cur);
+        state.updatedAt = Date.now();
+        saveBackfillJobState_(state);
+        ScriptApp.newTrigger('processBackfillJobTick_').timeBased().after(1000).create();
+        return;
+      }
+
+      var result = backfillOneDay_(cur, settings);
+      if (result.kind === 'succeeded') state.succeeded.push(result.date);
+      else if (result.kind === 'skipped') state.skipped.push({ date: result.date, reason: result.reason });
+      else if (result.kind === 'failed') state.failed.push({ date: result.date, error: result.error });
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    state.status = 'done';
+    state.cursor = null;
+    state.updatedAt = Date.now();
+    saveBackfillJobState_(state);
+    logRun_('資料範圍重新彙整', '成功',
+      '成功 ' + state.succeeded.length + ' 天、略過 ' + state.skipped.length + ' 天、失敗 ' + state.failed.length + ' 天',
+      Math.round((Date.now() - scriptStart) / 1000));
+  } catch (e) {
+    state.status = 'error';
+    state.errorMessage = String(e.message || e);
+    state.updatedAt = Date.now();
+    saveBackfillJobState_(state);
+    logRun_('資料範圍重新彙整', '失敗', String(e.message || e), Math.round((Date.now() - scriptStart) / 1000));
+  }
 }
 
 /** 手動「立即更新今日資料」按鈕用。 */

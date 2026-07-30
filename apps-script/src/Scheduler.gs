@@ -99,7 +99,7 @@ function shouldSkipToday_(date) {
 
 /**
  * 跟 shouldSkipToday_ 邏輯相同，但設定值由呼叫端先讀好傳進來，
- * 讓 backfillHistory() 補一段日期區間時不用每天都重讀一次 Script Properties / SkipDates 分頁。
+ * 讓 backfillOneDay_() 補一段日期區間時不用每天都重讀一次 Script Properties / SkipDates 分頁。
  */
 function shouldSkipDate_(date, settings) {
   var dow = date.getDay();

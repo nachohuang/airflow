@@ -302,6 +302,26 @@ function getDashboardReport() {
 }
 
 /**
+ * 純讀取版：只讀 Reports 分頁目前存的「最近一次」戰報，不管是不是今天，絕對不會觸發
+ * 任何計算（不讀歷史、不查 BigQuery）。前端「今日戰報」頁面打開時改呼叫這個，避免單純
+ * 打開頁面就意外觸發一次昂貴、可能失敗的即時計算；真的要重新產生，靠右上角重新整理
+ * （呼叫 runManualFullUpdate）另外手動觸發。
+ */
+function getCachedDashboardReport() {
+  var rows = readSheetObjects_(getReportsSheet_());
+  if (rows.length === 0) return { latestDate: null, report: [], cached: true };
+
+  var latestDateStr = null;
+  rows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!latestDateStr || d > latestDateStr) latestDateStr = d;
+  });
+  var latestRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+  latestRows.sort(function (a, b) { return (toNumberOrNull(b['Armor_Score']) || 0) - (toNumberOrNull(a['Armor_Score']) || 0); });
+  return { latestDate: latestDateStr, report: latestRows, cached: true, isToday: latestDateStr === normalizeDateStr(new Date()) };
+}
+
+/**
  * 純函式：對「已經算完因子、篩到最新一天」的 scanRows 統計篩選漏斗每一關卡掉多少檔股票，
  * 方便判斷到底是「今天市場真的沒有符合條件的股票」（v16.10 策略本來就選得很嚴，
  * 這是正常情況），還是「資料有問題」（例如 external 模式欄位順序對錯，導致排名/因子值全部異常）。

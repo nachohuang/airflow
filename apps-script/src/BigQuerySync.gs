@@ -53,6 +53,13 @@ function buildDeleteMonthSql_(fullTableRef, monthKey) {
   return 'DELETE FROM `' + fullTableRef + '` WHERE date_str >= \'' + range.start + '\' AND date_str <= \'' + range.end + '\'';
 }
 
+/** 刪除「指定幾個日期」既有資料的 SQL——每天寫入 history_raw 前先清掉當天既有的資料，
+ *  避免 WRITE_APPEND 造成重複列，也讓「補抓/重新彙整區間」可以放心對同一天重複呼叫。 */
+function buildDeleteDatesSql_(fullTableRef, dateStrs) {
+  var list = dateStrs.map(function (d) { return "'" + d + "'"; }).join(', ');
+  return 'DELETE FROM `' + fullTableRef + '` WHERE date_str IN (' + list + ')';
+}
+
 /** BigQuery 外部資料表（讀 Google Drive 檔案）要求的 URI 格式。 */
 function buildDriveFileUri_(fileId) {
   return 'https://drive.google.com/open?id=' + fileId;
@@ -154,6 +161,30 @@ function buildMaterializeSql_(groupTableRefs, materializedTableRef) {
     'SELECT * EXCEPT(rn) FROM (',
     '  SELECT *, ROW_NUMBER() OVER (PARTITION BY stock_id, date_str ORDER BY date_str) AS rn',
     '  FROM combined',
+    ')',
+    'WHERE rn = 1'
+  ].join('\n');
+}
+
+/**
+ * 「統一讀取 view」：把 history_raw（每天/補抓直接寫入，持續成長）跟 history_materialized
+ * （從舊的 Drive 大檔案一次性整理進來的歷史基準，之後很少再變動）UNION 起來，同一天同一檔
+ * 股票兩邊都有的話 history_raw 優先（它是比較新鮮的直接寫入結果，例如重新抓某一天覆蓋掉
+ * 舊資料的情況）。materialized 模式讀的是這個 view，不是單一份表——這樣「今天」的資料一寫進
+ * history_raw 馬上查得到，不用等 history_materialized 重新整理，也完全不會再需要 Apps Script
+ * 重新掃一次 Drive 檔案。
+ */
+function buildUnifiedViewSql_(rawRef, materializedRef, viewRef) {
+  var cols = bqColumnNames_().join(', ');
+  return [
+    'CREATE OR REPLACE VIEW `' + viewRef + '` AS',
+    'SELECT ' + cols + ' FROM (',
+    '  SELECT *, ROW_NUMBER() OVER (PARTITION BY stock_id, date_str ORDER BY src_priority ASC) AS rn',
+    '  FROM (',
+    '    SELECT ' + cols + ', 0 AS src_priority FROM `' + rawRef + '`',
+    '    UNION ALL',
+    '    SELECT ' + cols + ', 1 AS src_priority FROM `' + materializedRef + '`',
+    '  )',
     ')',
     'WHERE rn = 1'
   ].join('\n');
@@ -574,15 +605,20 @@ function bqMaterializedTableRef_(settings) {
   return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_MATERIALIZED_TABLE;
 }
 
+function bqUnifiedViewRef_(settings) {
+  return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_UNIFIED_VIEW;
+}
+
 /**
  * 因子回歸 / 歷史資料查詢實際要讀的來源表：
  *   native       -> history_raw（我們自己同步進去的資料，本身就不會重複，不需要去重）
  *   external     -> history_deduped（外部資料表去重後的 view，即時讀 Drive，位置對應 schema）
- *   materialized -> history_materialized（自動整理進去的原生表，欄名對應 schema，查詢快）
+ *   materialized -> history_unified（history_raw 每天直接寫入的新資料 UNION history_materialized
+ *                   那份從舊 Drive 大檔案整理進來的歷史基準，見 buildUnifiedViewSql_）
  */
 function bqActiveSourceTableRef_(settings) {
   if (settings.sourceMode === 'external') return bqDedupedViewRef_(settings);
-  if (settings.sourceMode === 'materialized') return bqMaterializedTableRef_(settings);
+  if (settings.sourceMode === 'materialized') return bqUnifiedViewRef_(settings);
   return bqRawTableRef_(settings);
 }
 
@@ -607,6 +643,58 @@ function ensureRawTable_(settings) {
       schema: schema
     }, settings.projectId, settings.dataset);
   }
+}
+
+/** 有沒有設定 BigQuery 專案——一旦設定了，每天/補抓寫入一律直接進 BigQuery（見
+ *  upsertHistoryRowsToBigQuery_），不再另外寫 Drive 月份 CSV 檔案；沒有設定 BigQuery
+ *  的使用者維持原本寫 Drive 月份檔案的行為，不受影響。 */
+function shouldWriteToBigQuery_() {
+  return !!getBigQuerySettings().projectId;
+}
+
+/**
+ * 把新抓到的資料（正常一次只有一天，但寫成通用版本也能一次處理多天，例如舊版 CSV 匯入）
+ * 直接 WRITE_APPEND 進 history_raw，取代寫進 Drive 月份 CSV 檔案——避免使用者手上的歷史大檔案
+ * 越滾越大，某一天 Apps Script 讀不動整個檔案（跟這次修好的 BigQuery 查詢記憶體問題是同一種
+ * 風險，只是換成檔案讀寫）。一天的資料量很小（通常不到兩千列），轉成 CSV blob 上傳給
+ * BigQuery load job 完全不會有大小問題，做法跟既有的 loadMonthIntoBigQuery_（月份同步）一致：
+ * 先刪掉這些日期既有的資料再 append，維持可重複執行、不會重複。
+ */
+function upsertHistoryRowsToBigQuery_(newRows) {
+  if (!newRows || newRows.length === 0) return { dates: [], totalRows: 0 };
+  var settings = requireBigQueryProjectId_();
+  ensureBigQueryDataset_(settings);
+  ensureRawTable_(settings);
+
+  var dates = [];
+  var seen = {};
+  newRows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!seen[d]) { seen[d] = true; dates.push(d); }
+  });
+
+  runBqQuery_(buildDeleteDatesSql_(bqRawTableRef_(settings), dates), 'delete_dates');
+
+  var csv = remapCsvHeaderToBigQuery_(rowsToCsv_(CONFIG.HISTORY_COLUMNS, newRows));
+  var blob = Utilities.newBlob(csv, 'text/csv', 'daily.csv');
+  var job = BigQuery.Jobs.insert({
+    configuration: {
+      load: {
+        destinationTable: {
+          projectId: settings.projectId,
+          datasetId: settings.dataset,
+          tableId: CONFIG.BIGQUERY_RAW_TABLE
+        },
+        sourceFormat: 'CSV',
+        skipLeadingRows: 1,
+        writeDisposition: 'WRITE_APPEND',
+        schema: { fields: bqColumnNames_().map(function (name) { return { name: name, type: 'STRING' }; }) }
+      }
+    }
+  }, settings.projectId, blob);
+
+  waitForBqJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
+  return { dates: dates, totalRows: newRows.length };
 }
 
 /** 執行一段 SQL（DML 或 query），等到 job 跑完，回傳 rows（查詢類）或 null（DML 類）。
@@ -865,9 +953,19 @@ function materializeHistoryTable() {
   if (fileIds.length === 0) throw new Error('歷史資料夾裡沒有任何 CSV 檔案，無法整理進 BigQuery。');
   var groupTableRefs = ensureExternalTablesForHeaderGroups_(settings, fileIds);
   runBqQuery_(buildMaterializeSql_(groupTableRefs, bqMaterializedTableRef_(settings)), 'materialize');
+  ensureUnifiedView_(settings);
   PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BIGQUERY_MATERIALIZED_LAST_REFRESH, String(Date.now()));
   logRun_('BigQuery 整理', '成功', 'history_materialized 已重新整理（' + fileIds.length + ' 個來源檔案，' + groupTableRefs.length + ' 種欄位順序）', 0);
   return { fileCount: fileIds.length, groupCount: groupTableRefs.length };
+}
+
+/** 建立/更新「統一讀取 view」（見 buildUnifiedViewSql_ 的說明）。history_raw 表如果還不存在
+ *  （全新安裝、還沒寫過任何一天資料）就先建立一個空的。CREATE OR REPLACE VIEW 只是存 SQL 定義，
+ *  幾乎不花時間也不算查詢用量；view 本身每次被查詢時都會即時反映 history_raw 當下最新的內容，
+ *  不需要每次寫入新資料都重建 view。 */
+function ensureUnifiedView_(settings) {
+  ensureRawTable_(settings);
+  runBqQuery_(buildUnifiedViewSql_(bqRawTableRef_(settings), bqMaterializedTableRef_(settings), bqUnifiedViewRef_(settings)), 'ensure_unified_view');
 }
 
 function getMaterializedLastRefreshMs_() {
@@ -896,9 +994,10 @@ function refreshDataSourceForMode_(settings) {
   return refreshExternalHistoryTable();
 }
 
-/** 依目前資料來源模式，實際要查詢的來源（external 用去重 view；materialized 用原生表）。 */
+/** 依目前資料來源模式，實際要查詢的來源（external 用去重 view；materialized 用「統一讀取 view」，
+ *  UNION 了每天直接寫入的 history_raw 跟舊資料整理進來的 history_materialized，見 buildUnifiedViewSql_）。 */
 function sourceRefForBigQueryRead_(settings) {
-  return settings.sourceMode === 'materialized' ? bqMaterializedTableRef_(settings) : bqDedupedViewRef_(settings);
+  return settings.sourceMode === 'materialized' ? bqUnifiedViewRef_(settings) : bqDedupedViewRef_(settings);
 }
 
 /**
@@ -1026,13 +1125,21 @@ function getHistoryOverview() {
 
 /** history_materialized 原生表目前的儲存大小（Tables.get 是免費的 metadata 呼叫，不算查詢用量）。
  *  external 模式是 view，沒有自己的儲存量可看，不提供。 */
+/** history_materialized（舊資料一次性整理進來的基準）+ history_raw（每天直接寫入、持續成長）
+ *  兩份表加起來的儲存量——資料現在分散在這兩份表裡，只看 materialized 那份會低估總量。 */
 function getMaterializedTableSizeBytes_(settings) {
-  try {
-    var table = BigQuery.Tables.get(settings.projectId, settings.dataset, CONFIG.BIGQUERY_MATERIALIZED_TABLE);
-    return table.numBytes ? parseInt(table.numBytes, 10) : 0;
-  } catch (e) {
-    return null;
-  }
+  var total = 0;
+  var found = false;
+  [CONFIG.BIGQUERY_MATERIALIZED_TABLE, CONFIG.BIGQUERY_RAW_TABLE].forEach(function (tableId) {
+    try {
+      var table = BigQuery.Tables.get(settings.projectId, settings.dataset, tableId);
+      total += table.numBytes ? parseInt(table.numBytes, 10) : 0;
+      found = true;
+    } catch (e) {
+      // 這份表還不存在（例如還沒寫過任何一天的資料），跳過不計入
+    }
+  });
+  return found ? total : null;
 }
 
 /** 前端「資料總覽」：股票代號格式診斷（見 buildStockIdQualitySql_ 的詳細說明）。 */
