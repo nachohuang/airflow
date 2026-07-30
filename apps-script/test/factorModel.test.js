@@ -126,41 +126,69 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test summarizeWeights_ passed.');
 }
 
-// --- resolveActualColumnNames_ ---
+// --- resolveHeaderOrderMapping_ ---
 {
   const columnMap = context.CONFIG.BQ_COLUMN_MAP;
-  // 常見情境：第一欄檔名帶 BOM（'﻿日期'），其餘欄位一字不差
-  const detectedWithBom = columnMap.map(function (m, i) { return i === 0 ? '﻿' + m.cn : m.cn; });
-  const resolved = context.resolveActualColumnNames_(detectedWithBom, columnMap);
-  assert.strictEqual(resolved.length, columnMap.length);
-  assert.strictEqual(resolved[0].actualName, '﻿' + columnMap[0].cn); // 用實際（帶 BOM）的名稱去參照
-  assert.strictEqual(resolved[0].bq, columnMap[0].bq);
-  assert.strictEqual(resolved[1].actualName, columnMap[1].cn); // 其他欄位沒有 BOM，原樣比對
-  console.log('Test resolveActualColumnNames_ (BOM-prefixed first column) passed.');
+  // 正常情況：標題列跟系統預期同樣的欄位「順序」
+  const sameOrderHeader = columnMap.map(function (m) { return m.cn; });
+  const fields1 = context.resolveHeaderOrderMapping_(sameOrderHeader, columnMap);
+  assert.strictEqual(fields1.length, columnMap.length);
+  assert.strictEqual(fields1[0].name, columnMap[0].bq);
+  assert.strictEqual(fields1[0].type, 'STRING');
+  console.log('Test resolveHeaderOrderMapping_ (same order) passed.');
 
-  // 找不到對應欄位時要丟出看得懂的錯誤，而不是讓後面的 SQL 去撞 BigQuery 的 Unrecognized name
-  const detectedMissing = columnMap.slice(1).map(function (m) { return m.cn; }); // 缺第一個欄位「日期」
-  assert.throws(function () { context.resolveActualColumnNames_(detectedMissing, columnMap); }, /日期/);
-  console.log('Test resolveActualColumnNames_ (missing column throws clear error) passed.');
+  // 欄位順序被打亂（例如某個匯出工具欄位順序不同）：股票代號排第一，日期排第二
+  const shuffled = columnMap.slice();
+  const tmp = shuffled[0]; shuffled[0] = shuffled[1]; shuffled[1] = tmp;
+  const shuffledHeader = shuffled.map(function (m) { return m.cn; });
+  const fields2 = context.resolveHeaderOrderMapping_(shuffledHeader, columnMap);
+  assert.strictEqual(fields2[0].name, columnMap[1].bq); // 第一欄現在是「證券代號」
+  assert.strictEqual(fields2[1].name, columnMap[0].bq); // 第二欄現在是「日期」
+  console.log('Test resolveHeaderOrderMapping_ (shuffled order still resolves correctly) passed.');
+
+  // 開頭帶 BOM 的標題列也要能正確比對（忽略 BOM／前後空白再比對）
+  const withBomHeader = columnMap.map(function (m, i) { return i === 0 ? '﻿' + m.cn : m.cn; });
+  const fields3 = context.resolveHeaderOrderMapping_(withBomHeader, columnMap);
+  assert.strictEqual(fields3[0].name, columnMap[0].bq);
+  console.log('Test resolveHeaderOrderMapping_ (BOM-prefixed header) passed.');
+
+  // 缺欄位、或有認不出來的欄位，都要丟出看得懂的錯誤
+  const missingHeader = columnMap.slice(1).map(function (m) { return m.cn; });
+  assert.throws(function () { context.resolveHeaderOrderMapping_(missingHeader, columnMap); }, /日期/);
+  const unrecognizedHeader = columnMap.map(function (m) { return m.cn; });
+  unrecognizedHeader[0] = '不知道是什麼的欄位';
+  assert.throws(function () { context.resolveHeaderOrderMapping_(unrecognizedHeader, columnMap); }, /不知道是什麼的欄位/);
+  console.log('Test resolveHeaderOrderMapping_ (missing/unrecognized column throws clear error) passed.');
+}
+
+// --- groupFileIdsByHeaderRow_ ---
+{
+  const headerA = ['日期', '證券代號'];
+  const headerB = ['證券代號', '日期'];
+  const pairs = [
+    { fileId: 'f1', headerRow: headerA },
+    { fileId: 'f2', headerRow: headerB },
+    { fileId: 'f3', headerRow: headerA }
+  ];
+  const groups = context.groupFileIdsByHeaderRow_(pairs);
+  assert.strictEqual(groups.length, 2);
+  assert.deepStrictEqual(Object.assign([], groups[0].fileIds), ['f1', 'f3']);
+  assert.deepStrictEqual(Object.assign([], groups[1].fileIds), ['f2']);
+  console.log('Test groupFileIdsByHeaderRow_ passed.');
 }
 
 // --- buildMaterializeSql_ ---
 {
-  const columnMap = context.CONFIG.BQ_COLUMN_MAP;
-  const detectedWithBom = columnMap.map(function (m, i) { return i === 0 ? '﻿' + m.cn : m.cn; });
-  const resolvedColumns = context.resolveActualColumnNames_(detectedWithBom, columnMap);
-  const sql = context.buildMaterializeSql_('proj.ds.history_external_autodetect', 'proj.ds.history_materialized', resolvedColumns);
+  const sql = context.buildMaterializeSql_(['proj.ds.history_external_autodetect_g0', 'proj.ds.history_external_autodetect_g1'], 'proj.ds.history_materialized');
   assert.ok(sql.indexOf('CREATE OR REPLACE TABLE `proj.ds.history_materialized`') === 0);
-  assert.ok(sql.indexOf('FROM `proj.ds.history_external_autodetect`') !== -1);
-  // 用「實際偵測到的欄名」對應（包含 BOM 那個），不是我們假設的乾淨字串
-  assert.ok(sql.indexOf('SAFE_CAST(`﻿日期` AS STRING) AS date_str') !== -1);
-  assert.ok(sql.indexOf('SAFE_CAST(`證券代號` AS STRING) AS stock_id') !== -1);
-  assert.ok(sql.indexOf('SAFE_CAST(`漲跌(+/-)` AS STRING) AS change_sign') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_external_autodetect_g0`') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_external_autodetect_g1`') !== -1);
+  assert.ok(sql.indexOf('UNION ALL') !== -1);
+  // 每組都是用我們自己的 ascii 欄名（date_str, stock_id...），不是中文欄名
+  assert.ok(sql.indexOf('SELECT date_str,') !== -1 || sql.indexOf('SELECT date_str, stock_id') !== -1);
   // 去重邏輯
   assert.ok(sql.indexOf('PARTITION BY stock_id, date_str') !== -1);
   assert.ok(sql.indexOf('WHERE rn = 1') !== -1);
-  // 沒有語法上的多餘逗號（SELECT 最後一欄後面接 FROM 前不該有逗號）
-  assert.ok(sql.indexOf(',\n  FROM') === -1);
   console.log('Test buildMaterializeSql_ passed.');
 }
 

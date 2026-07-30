@@ -351,18 +351,22 @@ token 數，並用「後台管理 → AI 使用量與預估費用」裡設定的
   Drive 檔案**，比較慢，而且 schema 是**位置對應**（照 `Config.gs` 的 `HISTORY_COLUMNS` 順序逐欄位
   對應，不是比對 CSV 標題列文字）——如果來源檔案實際欄位順序不一樣，資料會整個對錯欄位卻不會報錯。
 - **materialized（推薦，一般情況應該選這個）**：一樣完全不匯入，但解決了 external 模式的兩個缺點：
-  1. **用「欄位名稱」對應，不是位置**：先建一個 `autodetect: true` 的外部資料表
-     （`history_external_autodetect`），讓 BigQuery 直接拿 CSV 標題列文字當欄名，
-     再用一段 SQL（`FactorRegression` 用的同一套 `BQ_COLUMN_MAP`）依「欄名」把資料複製進一份
-     BigQuery 原生表 `history_materialized`（`buildMaterializeSql_`）。不管來源檔案欄位順序
-     跟系統預期的一不一樣，都能正確對應；如果標題列文字對不上（打字不同、缺欄位），
-     複製這一步會直接報錯，而不是像 external 模式那樣靜默把資料塞錯欄位。
-     BigQuery autodetect 出來的欄名不一定跟預期的中文字串一模一樣——最常見的是第一欄
-     （通常是「日期」）前面黏著檔案本身的 UTF-8 BOM（我們自己存檔、或使用者從別處匯出的
-     CSV 常常都有這個隱藏字元），變成一個外觀一樣但實際不同的字串。`resolveActualColumnNames_`
-     會先問 BigQuery 實際偵測到的欄名清單，比對時忽略開頭的 BOM／前後空白，再拿「實際偵測到的
-     名稱」去組 SQL，而不是硬用我們假設的乾淨字串——不然會撞到
-     `Unrecognized name: \`日期\`` 這種因為欄名多了看不見字元而找不到欄位的錯誤。
+  1. **不靠 BigQuery 認中文欄名，自己讀標題列決定對應方式**：一開始的做法是建一個
+     `autodetect: true` 的外部資料表，讓 BigQuery 直接拿 CSV 標題列文字當欄名——但實測發現這個
+     BigQuery 環境對中文標題列不支援「彈性欄名」，autodetect 會把每個中文字元都消毒成底線
+     （`日期` 變成兩個底線再加流水號區分碰撞），欄名資訊整個消失，完全比對不到，
+     `Unrecognized name` 這種錯誤就是這樣來的。
+     改成：Apps Script 自己對資料夾裡每個 CSV 檔案發一個「只讀最前面 8KB」的 HTTP Range 請求
+     （`fetchFileHeaderRow_`，不是 `DriveApp.getBlob()`，所以再大的檔案也只讀一小段，
+     不會撞到讀取上限），解析出這個檔案「實際的」標題列文字跟順序；依標題列分組
+     （`groupFileIdsByHeaderRow_`——大部分情況下同一批來源欄位順序都一樣只會分成一組，
+     混了不同順序的來源就會分成好幾組），每組各自建一個**位置對應**的外部資料表
+     （schema 欄名是我們自己的乾淨 ascii 名稱，不假手 BigQuery 去讀中文），
+     `resolveHeaderOrderMapping_` 負責把這個檔案的標題列對應到正確的欄位，
+     標題列缺欄位或有認不出來的欄位都會直接丟出看得懂的錯誤。
+     最後把每組的外部資料表 `UNION ALL` 起來（`buildMaterializeSql_`）依 (股票代號, 日期) 去重，
+     複製進 `history_materialized`。這樣即使不同來源檔案欄位順序不一樣，也都能正確對應，
+     不依賴 BigQuery 支援中文欄名。
   2. **查詢快**：`history_materialized` 是真正的 BigQuery 原生表（有優化過的儲存），不是每次都
      重新讀 Drive。查詢前只有「超過 `CONFIG.BIGQUERY_MATERIALIZED_MAX_AGE_MINUTES`（預設 360 分鐘）
      沒重新整理過」才會真的重新整理一次；其餘時候直接沿用既有的原生表，速度接近 native 模式。
