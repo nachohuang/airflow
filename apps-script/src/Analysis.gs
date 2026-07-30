@@ -238,9 +238,83 @@ function runAnalysisAndSave() {
   return result;
 }
 
-/** 前端「今日戰報」頁面呼叫用：跑一次分析並存檔，回傳結果給畫面渲染。 */
+/**
+ * 前端「今日戰報」頁面呼叫用。Reports 分頁如果已經有今天的資料，直接回傳快取結果，
+ * 不重跑一次「讀歷史 -> 算因子」（external 模式下這一步要重新掃一次 BigQuery/Drive 檔案，
+ * 是整個流程裡最慢的部分）；只有還沒有今天的資料時才會真的算一次。
+ * 想強制重算（例如剛改了持股、想馬上看新的續抱/止損判斷），用「立即測試執行」按鈕
+ * （呼叫 runManualFullUpdate，一定會真的重跑，不會被這裡的快取擋下來）。
+ */
 function getDashboardReport() {
+  var todayStr = normalizeDateStr(new Date());
+  var cached = readSheetObjects_(getReportsSheet_()).filter(function (r) {
+    return normalizeDateStr(r['日期']) === todayStr;
+  });
+  if (cached.length > 0) {
+    cached.sort(function (a, b) { return (toNumberOrNull(b['Armor_Score']) || 0) - (toNumberOrNull(a['Armor_Score']) || 0); });
+    return { latestDate: todayStr, report: cached, fullReport: [], cached: true };
+  }
   return runAnalysisAndSave();
+}
+
+/**
+ * 診斷用：今天篩選出「0 檔訊號」時，這個函式告訴你篩選漏斗每一關卡掉多少檔股票，
+ * 方便判斷到底是「今天市場真的沒有符合條件的股票」（v16.10 策略本來就選得很嚴，
+ * 這是正常情況），還是「資料有問題」（例如 external 模式欄位順序對錯，導致排名/因子值全部異常）。
+ * 前端「今日戰報」在 report.length === 0 時會自動呼叫這個函式並顯示結果。
+ */
+function getScreeningDiagnostics() {
+  var rawRows = readRecentHistory_(CONFIG.ANALYSIS_LOOKBACK_DAYS);
+  if (rawRows.length === 0) return { latestDate: null, totalStocks: 0 };
+
+  var portfolioMap = getPortfolioMap_();
+  var rows = computeFactors_(rawRows, portfolioMap);
+
+  var latestDateStr = null;
+  rows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!latestDateStr || d > latestDateStr) latestDateStr = d;
+  });
+  if (!latestDateStr) return { latestDate: null, totalStocks: 0 };
+
+  var scanRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+
+  var stats = {
+    latestDate: latestDateStr,
+    totalStocks: scanRows.length,
+    holdingCount: 0,
+    liquidityPass: 0,
+    upwardTrend: 0,
+    highInstParticipation: 0,
+    volumeSpark: 0,
+    breakoutMatches: 0,
+    ibfHighWithUpward: 0,
+    nullInstPartRank: 0,
+    nullVolRatioRank: 0,
+    nullIbfRank: 0
+  };
+
+  scanRows.forEach(function (r) {
+    if (portfolioMap[r['證券代號']]) { stats.holdingCount++; return; } // 持股一律有訊號（續抱/止損），不算在篩選漏斗裡
+    if (r['成交金額'] >= CONFIG.STRATEGY.LIQUIDITY_MIN) stats.liquidityPass++;
+    var isUpward = r.Trend_Score === 2;
+    if (isUpward) stats.upwardTrend++;
+
+    if (r.Inst_Part_Rank === null || r.Inst_Part_Rank === undefined) stats.nullInstPartRank++;
+    else if (r.Inst_Part_Rank >= 0.8) stats.highInstParticipation++;
+
+    if (r.Vol_Ratio_Rank === null || r.Vol_Ratio_Rank === undefined) stats.nullVolRatioRank++;
+    else if (r.Vol_Ratio_Rank >= 0.85) stats.volumeSpark++;
+
+    if (r.IBF_20D_Rank === null || r.IBF_20D_Rank === undefined) stats.nullIbfRank++;
+    else if (isUpward && r.IBF_20D_Rank >= 0.7) stats.ibfHighWithUpward++;
+
+    var isParticipationHigh = r.Inst_Part_Rank !== null && r.Inst_Part_Rank !== undefined && r.Inst_Part_Rank >= 0.8;
+    var isVolSpark = r.Vol_Ratio_Rank !== null && r.Vol_Ratio_Rank !== undefined && r.Vol_Ratio_Rank >= 0.85;
+    if (r['成交金額'] >= CONFIG.STRATEGY.LIQUIDITY_MIN && isUpward && isParticipationHigh && isVolSpark) stats.breakoutMatches++;
+  });
+
+  return stats;
 }
 
 /**

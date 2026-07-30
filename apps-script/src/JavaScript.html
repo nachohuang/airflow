@@ -97,9 +97,24 @@
         listEl.innerHTML = '';
         return;
       }
-      metaEl.textContent = '資料日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號';
+      metaEl.textContent = '資料日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號' + (result.cached ? '（快取，未重新查詢）' : '');
       if (result.report.length === 0) {
-        listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>';
+        listEl.innerHTML = '<div class="loading">篩選出 0 檔，讀取篩選漏斗明細中...</div>';
+        callServer('getScreeningDiagnostics').then(function (d) {
+          if (!d.latestDate) { listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>'; return; }
+          listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>' +
+            '<div class="meta-bar" style="margin-top:10px;">篩選漏斗明細（' + escapeHtml(d.latestDate) + '，共 ' + d.totalStocks + ' 檔股票，其中 ' + d.holdingCount + ' 檔是持股不算在漏斗內）：</div>' +
+            '<table class="simple-table"><tbody>' +
+            '<tr><td>成交金額達門檻</td><td>' + d.liquidityPass + '</td></tr>' +
+            '<tr><td>多頭排列（Trend_Score=2）</td><td>' + d.upwardTrend + '</td></tr>' +
+            '<tr><td>法人參與度前20%</td><td>' + d.highInstParticipation + '（' + d.nullInstPartRank + ' 檔無法計算）</td></tr>' +
+            '<tr><td>量能前15%</td><td>' + d.volumeSpark + '（' + d.nullVolRatioRank + ' 檔無法計算）</td></tr>' +
+            '<tr><td>同時符合「趨勢啟動」三條件</td><td>' + d.breakoutMatches + '</td></tr>' +
+            '<tr><td>多頭+法人逢低承接前30%（「趨勢領航」）</td><td>' + d.ibfHighWithUpward + '（' + d.nullIbfRank + ' 檔無法計算）</td></tr>' +
+            '</tbody></table>' +
+            '<div class="meta-bar" style="margin-top:8px;">如果「無法計算」的數字接近總股票數，通常代表資料有問題（常見於 BigQuery external 模式欄位順序對錯）；' +
+            '如果數字都正常但某一關就是掉到 0，代表今天確實沒有股票同時符合這麼嚴格的條件，是策略設計上會發生的正常情況。</div>';
+        }).catch(function (err) { listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>' + errorBox(err); });
         return;
       }
       listEl.innerHTML = result.report.map(function (r) {
