@@ -255,6 +255,24 @@ function getFolderById_(propKey, defaultId, label) {
   }
 }
 
+/** 前端「歷史資料夾設定」：把每月歷史 CSV 的存放資料夾換成使用者指定的既有資料夾。 */
+function setHistoryFolderId(folderId) {
+  var id = String(folderId || '').trim();
+  var folder;
+  try {
+    folder = DriveApp.getFolderById(id);
+  } catch (e) {
+    throw new Error('找不到這個資料夾（ID: ' + id + '），請確認資料夾 ID 正確，且這個 Google 帳號有權限存取。');
+  }
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.ARCHIVE_FOLDER_ID, folder.getId());
+  return getHistoryFolderInfo();
+}
+
+function getHistoryFolderInfo() {
+  var folder = getArchiveFolder_();
+  return { folderId: folder.getId(), folderUrl: folder.getUrl(), folderName: folder.getName() };
+}
+
 function getReportsFolder_() {
   return getNamedSubfolder_(CONFIG.PROP_KEYS.REPORTS_FOLDER_ID, CONFIG.REPORTS_FOLDER_NAME);
 }

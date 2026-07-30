@@ -15,6 +15,21 @@ function extractDriveFileId_(input) {
 }
 
 /**
+ * 從檔名裡找日期字串，抓不到就回傳 null（讓呼叫端改用 Drive 的最後修改時間當備案）。
+ * 支援 2026-07-30 / 2026_07_30 / 20260730 / 2026-07（只到月份，補成當月第一天）這幾種常見格式。
+ */
+function extractDateFromFilename_(name) {
+  var full = String(name || '').match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})/);
+  if (full) {
+    var y = full[1], mo = full[2], d = full[3];
+    if (mo >= '01' && mo <= '12' && d >= '01' && d <= '31') return y + '-' + mo + '-' + d;
+  }
+  var monthOnly = String(name || '').match(/(\d{4})[-_](\d{2})(?!\d)/);
+  if (monthOnly && monthOnly[2] >= '01' && monthOnly[2] <= '12') return monthOnly[1] + '-' + monthOnly[2] + '-01';
+  return null;
+}
+
+/**
  * 讓「匯入既有彙整表」也能直接從手機/電腦本機挑檔案上傳，不用先手動傳到 Drive 再貼連結。
  * 前端把選好的檔案讀成文字後，切成幾 MB 一段依序呼叫這個函式（避免單次呼叫塞太大的文字），
  * 第一段不帶 fileId 會建立新檔案（順便存進 Archive 資料夾，等於也留一份原始檔備份），
@@ -109,4 +124,42 @@ function importHistoryFromDriveFile(fileIdOrUrl, startRow) {
     nextStart: done ? null : endRow,
     fileName: file.getName()
   };
+}
+
+/**
+ * 列出指定 Drive 資料夾（不填就用目前設定的歷史資料夾）裡的檔案，附上從檔名判斷出來的日期，
+ * 給前端顯示，讓使用者匯入前先看一眼系統會挑哪一個檔案。抓不到檔名日期的檔案，日期欄位顯示
+ * Drive 記錄的最後修改時間（備案判斷依據），並標明是用哪一種方式判斷的。
+ */
+function listHistoryFolderCandidates(folderId) {
+  var folder = folderId ? DriveApp.getFolderById(folderId) : getArchiveFolder_();
+  var it = folder.getFiles();
+  var files = [];
+  while (it.hasNext()) {
+    var f = it.next();
+    var nameDate = extractDateFromFilename_(f.getName());
+    files.push({
+      fileId: f.getId(),
+      name: f.getName(),
+      detectedDate: nameDate || normalizeDateStr(f.getLastUpdated()),
+      detectedBy: nameDate ? '檔名' : '最後修改時間',
+      lastUpdated: normalizeDateStr(f.getLastUpdated())
+    });
+  }
+  files.sort(function (a, b) { return a.detectedDate < b.detectedDate ? 1 : -1; });
+  return files;
+}
+
+/**
+ * 自動找資料夾裡「日期最新」的檔案（優先看檔名裡的日期，抓不到才退而求其次比對 Drive 最後修改時間），
+ * 用它當基礎跑一次匯入（跟 importHistoryFromDriveFile 走同一套流程，資料量大時一樣要分批呼叫）。
+ */
+function importLatestFileFromHistoryFolder(startRow, folderId) {
+  var candidates = listHistoryFolderCandidates(folderId);
+  if (candidates.length === 0) throw new Error('這個資料夾裡沒有任何檔案可以匯入。');
+  var picked = candidates[0]; // 已經依 detectedDate 由新到舊排序
+  var result = importHistoryFromDriveFile(picked.fileId, startRow);
+  result.pickedFileName = picked.name;
+  result.pickedBy = picked.detectedBy;
+  return result;
 }

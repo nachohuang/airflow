@@ -485,7 +485,7 @@
     return Promise.all([
       loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder),
       loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
-      loadBqSettings_(), loadFactorModelHistory_()
+      loadBqSettings_(), loadFactorModelHistory_(), loadHistoryFolderStatus_()
     ]);
   }
 
@@ -714,6 +714,28 @@
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
 
+  // ---------- 歷史資料夾 ----------
+  function loadHistoryFolderStatus_() {
+    return callServer('getHistoryFolderInfo').then(function (info) {
+      document.getElementById('historyFolderStatus').innerHTML =
+        '目前歷史資料夾：<a href="' + info.folderUrl + '" target="_blank">' + escapeHtml(info.folderName) + '</a>';
+      document.getElementById('historyFolderLink').setAttribute('href', info.folderUrl || '#');
+    });
+  }
+
+  document.getElementById('historyFolderForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var input = document.getElementById('historyFolderIdInput').value.trim();
+    if (!input) return;
+    var folderId = (input.match(/\/folders\/([-\w]{10,})/) || [null, input])[1];
+    withSpin(callServer('setHistoryFolderId', folderId)).then(function () {
+      document.getElementById('historyFolderIdInput').value = '';
+      loadHistoryFolderStatus_();
+      document.getElementById('importLatestCandidates').innerHTML = '';
+      alert('✅ 已切換歷史資料夾，之後每日抓取／匯入／BigQuery 同步都會用這個資料夾。');
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
   // ---------- 匯入既有彙整表 ----------
   document.getElementById('importHistoryForm').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -785,6 +807,27 @@
       }
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   }
+
+  document.getElementById('importLatestBtn').addEventListener('click', function () {
+    var el = document.getElementById('importLatestCandidates');
+    el.innerHTML = '<div class="loading">讀取資料夾檔案清單中...</div>';
+    withSpin(callServer('listHistoryFolderCandidates', null)).then(function (files) {
+      if (!files.length) { el.innerHTML = '<div class="empty-hint">這個資料夾裡沒有檔案</div>'; return; }
+      var rows = files.map(function (f, i) {
+        return '<tr' + (i === 0 ? ' style="font-weight:600;"' : '') + '><td>' + escapeHtml(f.name) + '</td>' +
+          '<td>' + escapeHtml(f.detectedDate) + '（' + escapeHtml(f.detectedBy) + '）</td>' +
+          '<td><button data-file-id="' + escapeHtml(f.fileId) + '">' + (i === 0 ? '匯入（最新）' : '匯入這個') + '</button></td></tr>';
+      }).join('');
+      el.innerHTML = '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
+        '<th>檔名</th><th>判斷出的日期</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      el.querySelectorAll('button[data-file-id]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var resultEl = document.getElementById('importHistoryResult');
+          runImportLoop(btn.getAttribute('data-file-id'), 0, resultEl, 0);
+        });
+      });
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
 
   // ---------- 資料範圍重新彙整 ----------
   document.getElementById('remergeForm').addEventListener('submit', function (e) {

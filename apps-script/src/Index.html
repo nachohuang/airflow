@@ -122,6 +122,19 @@
         </div>
 
         <div class="admin-section">
+          <h3>歷史資料夾</h3>
+          <div class="meta-bar">
+            每天自動抓取、資料範圍重新彙整、下面的匯入功能，都是讀寫這個 Drive 資料夾裡「每月一份」的
+            ALL_COMBINED CSV。換成別的資料夾之後，這裡跟 BigQuery 同步都會改抓新資料夾。
+          </div>
+          <div id="historyFolderStatus" class="meta-bar"></div>
+          <form id="historyFolderForm" class="inline-form">
+            <input type="text" id="historyFolderIdInput" placeholder="貼上 Drive 資料夾連結或 ID">
+            <button type="submit" class="btn-primary">設為歷史資料夾</button>
+          </form>
+        </div>
+
+        <div class="admin-section">
           <h3>匯入既有彙整表</h3>
           <div class="meta-bar">
             如果你已經有先前累積的彙整表（例如原本 Colab 產出的 ALL_COMBINED.csv），
@@ -138,6 +151,15 @@
             <input type="text" id="importFileInput" placeholder="貼上 Drive 連結或檔案 ID">
             <button type="submit" class="btn-secondary">用 Drive 連結匯入</button>
           </form>
+
+          <div class="meta-bar" style="margin-top:10px;">
+            或者，資料夾裡有好幾個候選檔案，讓系統自動挑「日期最新」的那個（優先看檔名裡的日期，
+            抓不到才用 Drive 最後修改時間）匯入：
+          </div>
+          <div class="form-actions">
+            <button type="button" id="importLatestBtn" class="btn-secondary">列出歷史資料夾裡的檔案</button>
+          </div>
+          <div id="importLatestCandidates"></div>
 
           <div id="importHistoryResult"></div>
         </div>
