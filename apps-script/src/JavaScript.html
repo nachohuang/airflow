@@ -998,8 +998,9 @@
           '<table class="simple-table"><tbody>' +
           '<tr><td>資料日期範圍</td><td>' + escapeHtml(o.min) + ' ～ ' + escapeHtml(o.max) + '</td></tr>' +
           '<tr><td>交易日數</td><td>' + fmtNum(o.tradingDays, 0) + '</td></tr>' +
-          '<tr><td>股票數（去重後）</td><td>' + fmtNum(o.stockCount, 0) + '</td></tr>' +
+          '<tr><td>股票數（去重後）</td><td>' + fmtNum(o.stockCount, 0) + (o.stockCount > 3000 ? ' ⚠️ 台股上市櫃合計不到兩千檔，這個數字明顯太高，很可能是 stock_id 格式不一致，按下面「檢查股票代號格式」看細節' : '') + '</td></tr>' +
           '<tr><td>總列數（去重後）</td><td>' + fmtNum(o.rowCount, 0) + '</td></tr>' +
+          (o.sizeLabel ? '<tr><td>資料大小</td><td>' + escapeHtml(o.sizeLabel) + '</td></tr>' : '') +
           '</tbody></table>';
       } else {
         el.innerHTML = '<div class="meta-bar">資料來源：Apps Script 直讀 Drive 月份檔案（native）</div>' +
@@ -1013,6 +1014,30 @@
   }
 
   document.getElementById('overviewRefreshBtn').addEventListener('click', function () { loadHistoryOverview_(); });
+
+  document.getElementById('stockIdQualityBtn').addEventListener('click', function () {
+    var el = document.getElementById('stockIdQualityResult');
+    el.innerHTML = '<div class="loading">檢查中...</div>';
+    withSpin(callServer('getHistoryStockIdQualityCheck')).then(function (q) {
+      var lengthRows = q.byLength.map(function (r) {
+        return '<tr><td>' + fmtNum(r.length, 0) + ' 碼</td><td>' + fmtNum(r.rows, 0) + '</td><td>' + fmtNum(r.distinctIds, 0) + '</td></tr>';
+      }).join('');
+      var topRows = q.topStocks.map(function (r) {
+        return '<tr><td>' + escapeHtml(r.stockId) + '</td><td>' + fmtNum(r.rows, 0) + '</td></tr>';
+      }).join('');
+      var rareRows = q.rareStocks.map(function (r) {
+        return '<tr><td>「' + escapeHtml(r.stockId) + '」</td><td>' + fmtNum(r.rows, 0) + '</td></tr>';
+      }).join('');
+      el.innerHTML =
+        '<div class="meta-bar" style="margin-top:8px;">依「stock_id 字元長度」分組——正常應該幾乎全部是 4 碼（5 碼通常是 ETF），' +
+        '如果出現大量非 4/5 碼、或某個長度底下「相異值」遠多於「列數／129」，代表格式跑掉了：</div>' +
+        '<table class="simple-table"><thead><tr><td>長度</td><td>列數</td><td>相異 stock_id 數</td></tr></thead><tbody>' + lengthRows + '</tbody></table>' +
+        '<div class="meta-bar" style="margin-top:8px;">出現次數最多的 20 個 stock_id（正常股票應該接近交易日數）：</div>' +
+        '<table class="simple-table"><thead><tr><td>stock_id</td><td>列數</td></tr></thead><tbody>' + topRows + '</tbody></table>' +
+        '<div class="meta-bar" style="margin-top:8px;">出現次數最少的 20 個 stock_id（格式跑掉的變體通常只出現個幾次，注意有沒有多餘空白/換行）：</div>' +
+        '<table class="simple-table"><thead><tr><td>stock_id</td><td>列數</td></tr></thead><tbody>' + rareRows + '</tbody></table>';
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
 
   function loadRunLog() {
     return callServer('getRecentRunLogs', 50).then(function (logs) {

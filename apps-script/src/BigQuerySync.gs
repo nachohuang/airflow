@@ -166,6 +166,45 @@ function buildDateBoundsSql_(dedupedViewRef) {
     'FROM `' + dedupedViewRef + '`';
 }
 
+/**
+ * 「資料總覽」的股票代號格式診斷：台股上市櫃全部加起來也就一千多到兩千檔，
+ * 如果「股票數（去重後）」明顯超出這個量級（例如實測看到 5 萬多），幾乎可以確定不是
+ * 「真的有這麼多股票」，而是同一檔股票的 stock_id 在不同來源檔案裡格式不一致
+ * （多空白、少補零、全形半形…），導致 (stock_id, date_str) 去重跟 rolling 因子的
+ * PARTITION BY stock_id 都把同一檔股票誤判成好幾檔不同的股票——不只污染統計數字，
+ * 還會讓每一種「格式變體」各自的交易日不足，rolling 因子大量算不出來，也是「0 檔訊號」
+ * 潛在的另一個成因。這裡一次查三種角度，只查一次省成本：
+ *   'length'：依 stock_id 字元長度分組，正常應該幾乎全部是 4（碰到 5 碼 ETF 才會有 5）；
+ *   'top'：出現次數最多的 20 個 stock_id（正常股票應該接近 129 天，不會少太多）；
+ *   'rare'：出現次數最少的 20 個 stock_id（格式跑掉的變體通常只出現個幾次）。
+ */
+function buildStockIdQualitySql_(sourceRef) {
+  return [
+    "(SELECT 'length' AS kind, CAST(LENGTH(stock_id) AS STRING) AS key, COUNT(*) AS cnt, COUNT(DISTINCT stock_id) AS distinct_ids",
+    '  FROM `' + sourceRef + '` GROUP BY LENGTH(stock_id) ORDER BY cnt DESC)',
+    'UNION ALL',
+    "(SELECT 'top' AS kind, stock_id AS key, COUNT(*) AS cnt, CAST(NULL AS INT64) AS distinct_ids",
+    '  FROM `' + sourceRef + '` GROUP BY stock_id ORDER BY cnt DESC LIMIT 20)',
+    'UNION ALL',
+    "(SELECT 'rare' AS kind, stock_id AS key, COUNT(*) AS cnt, CAST(NULL AS INT64) AS distinct_ids",
+    '  FROM `' + sourceRef + '` GROUP BY stock_id ORDER BY cnt ASC LIMIT 20)'
+  ].join('\n');
+}
+
+/** 把 buildStockIdQualitySql_ 的三段結果（用 kind 欄位區分）拆回結構化物件。 */
+function mapStockIdQualityRows_(rows) {
+  var byLength = [];
+  var topStocks = [];
+  var rareStocks = [];
+  rows.forEach(function (r) {
+    if (r.kind === 'length') byLength.push({ length: parseInt(r.key, 10), rows: parseInt(r.cnt, 10), distinctIds: parseInt(r.distinct_ids, 10) });
+    else if (r.kind === 'top') topStocks.push({ stockId: r.key, rows: parseInt(r.cnt, 10) });
+    else if (r.kind === 'rare') rareStocks.push({ stockId: r.key, rows: parseInt(r.cnt, 10) });
+  });
+  byLength.sort(function (a, b) { return b.rows - a.rows; });
+  return { byLength: byLength, topStocks: topStocks, rareStocks: rareStocks };
+}
+
 /** 從去重 view 撈出指定日期區間（皆可留空）的原始欄位，給 Apps Script 端的分析邏輯用。 */
 function buildHistoryRangeQuerySql_(dedupedViewRef, startStr, endStr) {
   var cols = bqColumnNames_().join(', ');
@@ -952,6 +991,11 @@ function getHistoryOverview() {
     if (settings.sourceMode === 'materialized') {
       var lastMs = getMaterializedLastRefreshMs_();
       result.lastRefresh = lastMs ? Utilities.formatDate(new Date(lastMs), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss') : null;
+      var sizeBytes = getMaterializedTableSizeBytes_(settings);
+      if (sizeBytes !== null) {
+        result.sizeBytes = sizeBytes;
+        result.sizeLabel = formatBytes_(sizeBytes);
+      }
     }
     return result;
   }
@@ -962,6 +1006,25 @@ function getHistoryOverview() {
     max: fileBounds.max,
     monthsAvailable: fileBounds.monthsAvailable
   };
+}
+
+/** history_materialized 原生表目前的儲存大小（Tables.get 是免費的 metadata 呼叫，不算查詢用量）。
+ *  external 模式是 view，沒有自己的儲存量可看，不提供。 */
+function getMaterializedTableSizeBytes_(settings) {
+  try {
+    var table = BigQuery.Tables.get(settings.projectId, settings.dataset, CONFIG.BIGQUERY_MATERIALIZED_TABLE);
+    return table.numBytes ? parseInt(table.numBytes, 10) : 0;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 前端「資料總覽」：股票代號格式診斷（見 buildStockIdQualitySql_ 的詳細說明）。 */
+function getHistoryStockIdQualityCheck() {
+  var settings = requireBigQueryProjectId_();
+  refreshDataSourceForMode_(settings);
+  var rows = runBqQuery_(buildStockIdQualitySql_(sourceRefForBigQueryRead_(settings)), 'stock_id_quality');
+  return mapStockIdQualityRows_(rows);
 }
 
 /** 前端「立即重新整理」按鈕（materialized 模式）：強制重新整理，不管多久前才整理過。 */

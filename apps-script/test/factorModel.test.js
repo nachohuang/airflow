@@ -360,4 +360,35 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test buildHistoryRowsForStocksSql_ passed.');
 }
 
+// --- buildStockIdQualitySql_ / mapStockIdQualityRows_：股票代號格式診斷 ---
+{
+  const sql = context.buildStockIdQualitySql_('proj.ds.history_materialized');
+  assert.ok(sql.indexOf("FROM `proj.ds.history_materialized`") !== -1);
+  assert.ok(sql.indexOf("'length' AS kind") !== -1);
+  assert.ok(sql.indexOf("'top' AS kind") !== -1);
+  assert.ok(sql.indexOf("'rare' AS kind") !== -1);
+  assert.ok(sql.indexOf('GROUP BY LENGTH(stock_id)') !== -1);
+  assert.ok(sql.indexOf('ORDER BY cnt DESC LIMIT 20') !== -1);
+  assert.ok(sql.indexOf('ORDER BY cnt ASC LIMIT 20') !== -1);
+  console.log('Test buildStockIdQualitySql_ passed.');
+
+  const rawRows = [
+    { kind: 'length', key: '4', cnt: '1900000', distinct_ids: '1800' },
+    { kind: 'length', key: '7', cnt: '73715', distinct_ids: '52305' },
+    { kind: 'top', key: '2330', cnt: '129' },
+    { kind: 'top', key: '2603', cnt: '129' },
+    { kind: 'rare', key: '2330\r', cnt: '1' },
+    { kind: 'rare', key: ' 2330', cnt: '2' }
+  ];
+  const parsed = context.mapStockIdQualityRows_(rawRows);
+  assert.strictEqual(parsed.byLength.length, 2);
+  assert.strictEqual(parsed.byLength[0].length, 4, '筆數最多的長度該排第一');
+  assert.strictEqual(parsed.byLength[0].distinctIds, 1800);
+  assert.strictEqual(parsed.topStocks.length, 2);
+  assert.strictEqual(parsed.topStocks[0].stockId, '2330');
+  assert.strictEqual(parsed.rareStocks.length, 2);
+  assert.strictEqual(parsed.rareStocks[0].stockId, '2330\r');
+  console.log('Test mapStockIdQualityRows_ passed.');
+}
+
 console.log('All FactorRegression/BigQuerySync pure-function tests passed.');
