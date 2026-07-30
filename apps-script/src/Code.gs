@@ -29,6 +29,7 @@ function bootstrap() {
     historyFolderUrl: getArchiveFolder_().getUrl(),
     monthsAvailable: bounds.monthsAvailable,
     latestHistoryDate: bounds.max,
-    schedule: getScheduleSettings()
+    schedule: getScheduleSettings(),
+    aiProvider: getAiSettings().provider
   };
 }

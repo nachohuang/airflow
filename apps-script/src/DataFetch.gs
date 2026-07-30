@@ -241,45 +241,53 @@ function fetchAndMergeOneDay_(dateStr, formattedDate) {
   return merged;
 }
 
+/** 'yyyy-MM-dd'（給 backfillHistory 的 startStr/endStr/nextStart 用，跟 formatYmd_ 的
+ *  'yyyyMMdd' 是不同格式——之前 nextStart 誤用 formatYmd_，回傳的 'yyyyMMdd' 字串再餵回
+ *  new Date(startStr + 'T00:00:00') 沒有 '-' 會解析失敗，續跑第二批就會整個壞掉）。 */
+function formatDashedYmd_(date) {
+  return Utilities.formatDate(date, 'Asia/Taipei', 'yyyy-MM-dd');
+}
+
 /**
- * 補抓/重新合併一段日期區間，每抓完一天立刻 upsert 進 History（同日期資料會被新抓到的取代）。
- * 跳過規則跟每日排程共用一份設定（後台管理的「六日不執行」與「臨時停跑日」），
- * 確保排程不跑的區間，手動重新彙整也一樣跳過。
- * 有 4.5 分鐘內部時間預算，超過就回傳 done:false + nextStart，前端可再呼叫一次繼續。
+ * 補抓/重新合併一段日期區間，**一次只處理一天**，抓完立刻 upsert 進 History（同日期資料
+ * 會被新抓到的取代），回傳這一天的結果 + 還有沒有下一天要繼續（nextStart）。跳過規則跟
+ * 每日排程共用一份設定（後台管理的「六日不執行」與「臨時停跑日」）。
+ *
+ * 之前是內部跑 4.5 分鐘時間預算、一次處理一整批天數，前端只能在「一整批」結束後才更新一次
+ * 進度，使用者完全看不到目前處理到哪一天；而且單次呼叫動輒好幾分鐘，手機瀏覽器切到背景時
+ * 這一整批很容易被中斷、噴出網路錯誤，而且中斷後不知道實際做到哪一天。改成一次一天之後，
+ * 每次 google.script.run 呼叫只有一天的 TWSE 抓取時間（通常幾秒），前端可以逐天顯示「目前在
+ * 處理哪一天」，就算中途被中斷，也只損失「正在處理的這一天」，重新呼叫同一天繼續就好，
+ * 不用整批重來。
  */
 function backfillHistory(startStr, endStr) {
-  var start = new Date(startStr + 'T00:00:00');
+  var cur = new Date(startStr + 'T00:00:00');
   var end = new Date(endStr + 'T00:00:00');
-  var scriptStart = Date.now();
-  var TIME_BUDGET_MS = 4.5 * 60 * 1000;
-  var settings = getScheduleSettings();
-
-  var succeeded = [];
-  var failed = [];
-  var skipped = [];
-  var cur = new Date(start);
-
-  while (cur.getTime() <= end.getTime()) {
-    if (Date.now() - scriptStart > TIME_BUDGET_MS) {
-      return { done: false, succeeded: succeeded, failed: failed, skipped: skipped, nextStart: formatYmd_(cur) };
-    }
-    var ymd = formatYmd_(cur);
-    var skip = shouldSkipDate_(cur, settings);
-    if (skip.skip) {
-      skipped.push({ date: ymd, reason: skip.reason });
-    } else {
-      var slash = formatSlashDate_(cur);
-      try {
-        var rows = fetchAndMergeOneDay_(ymd, slash);
-        upsertHistoryRows_(rows);
-        succeeded.push(ymd);
-      } catch (e) {
-        failed.push({ date: ymd, error: String(e.message || e) });
-      }
-    }
-    cur.setDate(cur.getDate() + 1);
+  if (cur.getTime() > end.getTime()) {
+    return { done: true, result: null, nextStart: null };
   }
-  return { done: true, succeeded: succeeded, failed: failed, skipped: skipped, nextStart: null };
+
+  var settings = getScheduleSettings();
+  var ymd = formatYmd_(cur);
+  var result;
+  var skip = shouldSkipDate_(cur, settings);
+  if (skip.skip) {
+    result = { kind: 'skipped', date: ymd, reason: skip.reason };
+  } else {
+    var slash = formatSlashDate_(cur);
+    try {
+      var rows = fetchAndMergeOneDay_(ymd, slash);
+      upsertHistoryRows_(rows);
+      result = { kind: 'succeeded', date: ymd };
+    } catch (e) {
+      result = { kind: 'failed', date: ymd, error: String(e.message || e) };
+    }
+  }
+
+  var next = new Date(cur);
+  next.setDate(next.getDate() + 1);
+  var done = next.getTime() > end.getTime();
+  return { done: done, result: result, nextStart: done ? null : formatDashedYmd_(next) };
 }
 
 /** 手動「立即更新今日資料」按鈕用。 */

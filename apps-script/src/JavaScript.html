@@ -155,9 +155,12 @@
     });
   }
 
+  var AI_PROVIDER_LABEL = { claude: 'Claude API', gemini: 'Gemini API' };
+
   /** 供 Dashboard 卡片與個股分析頁共用：跑一次 AI 診斷並把結果渲染進指定容器。 */
   function runAiDiagnosisForButton_(code, containerEl) {
-    containerEl.innerHTML = '<div class="loading">AI 診斷中，會需要一點時間（要呼叫 Claude API + 抓 Goodinfo）...</div>';
+    var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
+    containerEl.innerHTML = '<div class="loading">AI 診斷中，會需要一點時間（要呼叫 ' + providerLabel + ' + 抓 Goodinfo）...</div>';
     withSpin(callServer('runAiDiagnosis', [code])).then(function (results) {
       var res = results[0];
       if (!res.ok) { containerEl.innerHTML = errorBox(res.error); return; }
@@ -522,6 +525,7 @@
   // ---------- AI 深度診斷設定 ----------
   function loadAiSettings() {
     return callServer('getAiSettings').then(function (s) {
+      window.__aiProvider = s.provider;
       document.getElementById('aiProviderSelect').value = s.provider;
       document.getElementById('aiKeyStatus').textContent = s.hasClaudeKey ? '✅ 已設定 Claude API 金鑰' : '尚未設定 Claude API 金鑰';
       document.getElementById('geminiKeyStatus').textContent = s.hasGeminiKey ? '✅ 已設定 Gemini API 金鑰' : '尚未設定 Gemini API 金鑰';
@@ -919,29 +923,51 @@
     runRemergeLoop(start, end, document.getElementById('remergeResult'), { succeeded: [], failed: [], skipped: [] }, 0);
   });
 
-  function runRemergeLoop(start, end, resultEl, acc, iteration) {
-    if (iteration > 50) {
-      resultEl.innerHTML = errorBox('已經連續跑了 50 批還沒結束，先停下來看看執行紀錄，需要的話可以縮小區間再試一次。');
+  /** 依目前累積結果 + 進行中狀態組出畫面（statusLine 為 null 代表整段區間已跑完）。 */
+  function renderRemergeProgress_(acc, statusLine) {
+    var headline = statusLine ?
+      '<div class="loading">⏳ ' + escapeHtml(statusLine) + '</div>' :
+      '<div class="meta-bar">✅ 完成</div>';
+    var summary = '<div class="meta-bar">已處理：成功 ' + acc.succeeded.length + ' 天、略過 ' + acc.skipped.length + ' 天' +
+      (acc.failed.length ? '、失敗 ' + acc.failed.length + ' 天' : '') + '</div>';
+    var failHtml = acc.failed.length ?
+      '<div class="table-scroll"><table class="simple-table"><thead><tr><th>日期</th><th>錯誤</th></tr></thead><tbody>' +
+      acc.failed.map(function (f) { return '<tr><td>' + escapeHtml(f.date) + '</td><td>' + escapeHtml(f.error) + '</td></tr>'; }).join('') +
+      '</tbody></table></div>' : '';
+    return headline + summary + failHtml;
+  }
+
+  /**
+   * 一次只處理「一天」（見 DataFetch.gs backfillHistory 的說明），逐天顯示目前進度，
+   * 也讓單次呼叫很短——手機瀏覽器切到背景中斷連線時，最多只影響「正在處理的這一天」，
+   * 失敗時會停下來給一個「從這天繼續」的按鈕，不用整段重新輸入日期重跑。
+   */
+  function runRemergeLoop(currentDate, end, resultEl, acc, iteration) {
+    if (iteration > 2000) {
+      resultEl.innerHTML = renderRemergeProgress_(acc, null) +
+        errorBox('已經連續跑了 2000 天還沒結束，先停下來看看執行紀錄，需要的話可以縮小區間再試一次。');
       return;
     }
-    resultEl.innerHTML = '<div class="loading">重新彙整中' + (acc.succeeded.length ? '（已完成 ' + acc.succeeded.length + ' 天）' : '') + '...</div>';
-    withSpin(callServer('backfillHistory', start, end)).then(function (res) {
-      acc.succeeded = acc.succeeded.concat(res.succeeded);
-      acc.failed = acc.failed.concat(res.failed);
-      acc.skipped = acc.skipped.concat(res.skipped);
+    resultEl.innerHTML = renderRemergeProgress_(acc, '目前處理中：' + currentDate);
+    withSpin(callServer('backfillHistory', currentDate, end)).then(function (res) {
+      if (res.result) {
+        if (res.result.kind === 'succeeded') acc.succeeded.push(res.result.date);
+        else if (res.result.kind === 'skipped') acc.skipped.push({ date: res.result.date, reason: res.result.reason });
+        else if (res.result.kind === 'failed') acc.failed.push({ date: res.result.date, error: res.result.error });
+      }
       if (res.done) {
-        var summary = '<div class="meta-bar">✅ 完成：成功 ' + acc.succeeded.length + ' 天、略過 ' + acc.skipped.length + ' 天' +
-          (acc.failed.length ? '、失敗 ' + acc.failed.length + ' 天' : '') + '</div>';
-        var failHtml = acc.failed.length ?
-          '<div class="table-scroll"><table class="simple-table"><thead><tr><th>日期</th><th>錯誤</th></tr></thead><tbody>' +
-          acc.failed.map(function (f) { return '<tr><td>' + escapeHtml(f.date) + '</td><td>' + escapeHtml(f.error) + '</td></tr>'; }).join('') +
-          '</tbody></table></div>' : '';
-        resultEl.innerHTML = summary + failHtml;
+        resultEl.innerHTML = renderRemergeProgress_(acc, null);
         loadedTabs.dashboard = false;
       } else {
         runRemergeLoop(res.nextStart, end, resultEl, acc, iteration + 1);
       }
-    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+    }).catch(function (err) {
+      resultEl.innerHTML = renderRemergeProgress_(acc, null) + errorBox(err) +
+        '<div class="form-actions"><button type="button" class="btn-secondary" id="remergeRetryBtn">從 ' + escapeHtml(currentDate) + ' 繼續</button></div>';
+      document.getElementById('remergeRetryBtn').addEventListener('click', function () {
+        runRemergeLoop(currentDate, end, resultEl, acc, iteration + 1);
+      });
+    });
   }
 
   // ---------- 資料總覽 ----------
@@ -1091,6 +1117,7 @@
 
     callServer('bootstrap').then(function (info) {
       window.__spreadsheetUrl = info.spreadsheetUrl;
+      window.__aiProvider = info.aiProvider;
       document.getElementById('spreadsheetLink').setAttribute('href', info.spreadsheetUrl);
       document.getElementById('historyFolderLink').setAttribute('href', info.historyFolderUrl || '#');
       loadDashboard();
