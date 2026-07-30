@@ -698,7 +698,7 @@ function upsertHistoryRowsToBigQuery_(newRows) {
     }
   }, settings.projectId, blob);
 
-  waitForBqJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
+  waitForBqLoadJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
   return { dates: dates, totalRows: newRows.length };
 }
 
@@ -754,6 +754,26 @@ function waitForBqJob_(projectId, jobId, location) {
   throw new Error('BigQuery 查詢逾時（超過 4 分鐘），可能是資料量太大，稍後再試一次。');
 }
 
+/** 輪詢一個「load job」（BigQuery.Jobs.insert 的 configuration.load，不是 query job）直到完成。
+ *  load job 沒有查詢結果可以撈，BigQuery.Jobs.getQueryResults 只認得 query job，
+ *  對 load job 呼叫會直接報錯「is not a query job」，要改用 BigQuery.Jobs.get 檢查
+ *  job.status.state，這是既有的月份同步（loadMonthIntoBigQuery_）跟新的每日直接寫入
+ *  （upsertHistoryRowsToBigQuery_）共用的錯誤，一次修好。 */
+function waitForBqLoadJob_(projectId, jobId, location) {
+  var deadline = Date.now() + 4 * 60 * 1000;
+  while (Date.now() < deadline) {
+    var job = BigQuery.Jobs.get(projectId, jobId, { location: location });
+    if (job.status && job.status.state === 'DONE') {
+      if (job.status.errorResult) {
+        throw new Error('BigQuery load job 失敗：' + job.status.errorResult.message);
+      }
+      return job;
+    }
+    Utilities.sleep(1000);
+  }
+  throw new Error('BigQuery load job 逾時（超過 4 分鐘）。');
+}
+
 /** 把某個月份的 CSV 檔案內容（換過欄名）用 load job 塞進 BigQuery 原始表。 */
 function loadMonthIntoBigQuery_(settings, monthKey) {
   var file = findMonthlyFile_(monthKey);
@@ -781,7 +801,7 @@ function loadMonthIntoBigQuery_(settings, monthKey) {
     }
   }, settings.projectId, blob);
 
-  waitForBqJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
+  waitForBqLoadJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
   return { monthKey: monthKey, loaded: true };
 }
 
