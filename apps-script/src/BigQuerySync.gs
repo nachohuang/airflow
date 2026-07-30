@@ -180,8 +180,14 @@ function buildDateBoundsSql_(dedupedViewRef) {
  */
 function buildStockIdQualitySql_(sourceRef) {
   return [
-    "(SELECT 'length' AS kind, CAST(LENGTH(stock_id) AS STRING) AS key, COUNT(*) AS cnt, COUNT(DISTINCT stock_id) AS distinct_ids",
-    '  FROM `' + sourceRef + '` GROUP BY LENGTH(stock_id) ORDER BY cnt DESC)',
+    // BigQuery 不接受 SELECT 清單裡對 GROUP BY 鍵再包一層函式（例如 CAST(LENGTH(stock_id) AS STRING)
+    // 卻 GROUP BY LENGTH(stock_id)）——就算裡面是同一個表達式，BigQuery 也不認得兩者是同一組鍵，
+    // 會報「references column stock_id which is neither grouped nor aggregated」。要先在子查詢裡
+    // GROUP BY 完（SELECT 清單跟 GROUP BY 用一模一樣的 LENGTH(stock_id)），外層才能自由 CAST。
+    "(SELECT 'length' AS kind, CAST(len AS STRING) AS key, cnt, distinct_ids FROM (",
+    '  SELECT LENGTH(stock_id) AS len, COUNT(*) AS cnt, COUNT(DISTINCT stock_id) AS distinct_ids',
+    '  FROM `' + sourceRef + '` GROUP BY LENGTH(stock_id)',
+    ') ORDER BY cnt DESC)',
     'UNION ALL',
     "(SELECT 'top' AS kind, stock_id AS key, COUNT(*) AS cnt, CAST(NULL AS INT64) AS distinct_ids",
     '  FROM `' + sourceRef + '` GROUP BY stock_id ORDER BY cnt DESC LIMIT 20)',

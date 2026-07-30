@@ -378,6 +378,12 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('GROUP BY LENGTH(stock_id)') !== -1);
   assert.ok(sql.indexOf('ORDER BY cnt DESC LIMIT 20') !== -1);
   assert.ok(sql.indexOf('ORDER BY cnt ASC LIMIT 20') !== -1);
+  // GROUP BY 鍵不能在 SELECT 清單裡直接包一層函式（BigQuery 實測會報
+  // "references column stock_id which is neither grouped nor aggregated"），
+  // 一定要先在子查詢裡 GROUP BY 完，外層才能對已經分組好的結果做 CAST。
+  assert.ok(sql.indexOf('CAST(LENGTH(stock_id)') === -1, 'GROUP BY 鍵不能在 SELECT 清單裡直接包一層函式');
+  assert.ok(sql.indexOf('SELECT LENGTH(stock_id) AS len') !== -1, '要先在子查詢裡單純 GROUP BY LENGTH(stock_id)');
+  assert.ok(sql.indexOf('CAST(len AS STRING)') !== -1, '外層對已分組完的結果自由 CAST 才安全');
   console.log('Test buildStockIdQualitySql_ passed.');
 
   const rawRows = [
