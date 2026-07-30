@@ -24,7 +24,9 @@ var CONFIG = {
     CLAUDE_PRICE_INPUT: 'CLAUDE_PRICE_INPUT',
     CLAUDE_PRICE_OUTPUT: 'CLAUDE_PRICE_OUTPUT',
     GEMINI_PRICE_INPUT: 'GEMINI_PRICE_INPUT',
-    GEMINI_PRICE_OUTPUT: 'GEMINI_PRICE_OUTPUT'
+    GEMINI_PRICE_OUTPUT: 'GEMINI_PRICE_OUTPUT',
+    BIGQUERY_PROJECT_ID: 'BIGQUERY_PROJECT_ID',
+    BIGQUERY_DATASET: 'BIGQUERY_DATASET'
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
@@ -47,7 +49,8 @@ var CONFIG = {
     BACKTEST: 'BacktestResults',
     FACTOR_SCAN: 'FactorScanResults',
     AI_DIAGNOSIS: 'AiDiagnosis',
-    AI_USAGE: 'AiUsage'
+    AI_USAGE: 'AiUsage',
+    FACTOR_MODEL_HISTORY: 'FactorModelHistory'
   },
 
   AI_DIAGNOSIS_COLUMNS: ['日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '最終建議', '診斷內容', '時間戳記'],
@@ -73,6 +76,63 @@ var CONFIG = {
   GEMINI_PRICE_OUTPUT_PER_M_DEFAULT: 2.5,
 
   AI_DAILY_TOP_N_DEFAULT: 3,
+
+  // BigQuery 因子回歸模型設定（選用進階功能，見 README「因子回歸模型」章節）。
+  // Apps Script 專案本身沒有 GCP 專案的概念，要使用者自己在 Apps Script 編輯器把
+  // 「Google Cloud Platform (GCP) 專案」換成自己的標準專案、啟用 BigQuery API + 綁定帳單，
+  // 這裡填的 BIGQUERY_PROJECT_ID 就是那個標準專案的 Project ID（不是 Apps Script 的專案）。
+  BIGQUERY_DATASET_DEFAULT: 'twse_factor_model',
+  BIGQUERY_RAW_TABLE: 'history_raw',
+  BIGQUERY_FEATURE_VIEW: 'factor_features',
+  BIGQUERY_LOCATION: 'US', // BigQuery Dataset 所在地區，跟後面所有 query 的 location 要一致
+
+  // 歷史資料 CSV 欄名（中文）-> BigQuery 欄名（ascii，BigQuery 對特殊符號欄名支援有限，
+  // 統一轉成安全的英文欄名），順序必須跟 HISTORY_COLUMNS 完全一致（用陣列索引對應）。
+  BQ_COLUMN_MAP: [
+    { cn: '日期', bq: 'date_str' },
+    { cn: '證券代號', bq: 'stock_id' },
+    { cn: '證券名稱', bq: 'stock_name' },
+    { cn: '外資', bq: 'foreign_net' },
+    { cn: '投信', bq: 'trust_net' },
+    { cn: '自營商', bq: 'dealer_net' },
+    { cn: '三大法人買賣超股數', bq: 'inst_net_shares' },
+    { cn: '成交股數', bq: 'volume_shares' },
+    { cn: '成交筆數', bq: 'trade_count' },
+    { cn: '成交金額', bq: 'turnover' },
+    { cn: '開盤價', bq: 'open_price' },
+    { cn: '最高價', bq: 'high_price' },
+    { cn: '最低價', bq: 'low_price' },
+    { cn: '收盤價', bq: 'close_price' },
+    { cn: '漲跌(+/-)', bq: 'change_sign' },
+    { cn: '漲跌價差', bq: 'change_amount' },
+    { cn: '最後揭示買價', bq: 'bid_price' },
+    { cn: '最後揭示買量', bq: 'bid_vol' },
+    { cn: '最後揭示賣價', bq: 'ask_price' },
+    { cn: '最後揭示賣量', bq: 'ask_vol' },
+    { cn: '殖利率(%)', bq: 'dividend_yield' },
+    { cn: '本益比', bq: 'pe_ratio' },
+    { cn: '股價淨值比', bq: 'pb_ratio' },
+    { cn: '財報年/季', bq: 'fin_report_period' }
+  ],
+
+  // 拿來做迴歸的候選因子欄位（都是 factor_features view 算出來的欄位名稱）。
+  FACTOR_CANDIDATE_COLUMNS: [
+    'inst_participation', 'inst_part_ma5', 'ibf_20d', 'trend_score', 'ma20_slope',
+    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio'
+  ],
+
+  // 兩個要預測的目標（label），對應「後續一個月的漲跌」跟「相對大盤的抗跌力」。
+  FACTOR_LABELS: {
+    RETURN_1M: { key: 'return1m', column: 'label_return_1m', name: '後續1個月報酬率' },
+    DOWNSIDE_RESISTANCE: { key: 'downsideResistance', column: 'label_downside_resistance', name: '相對大盤抗跌力' }
+  },
+
+  FACTOR_MODEL_L1_REG_DEFAULT: 0.05,
+
+  FACTOR_MODEL_COLUMNS: [
+    '執行時間', '標的Label', 'L1正規化強度', '使用特徵', '訓練列數',
+    'R2', '權重(JSON)', '狀態', '目前套用版本'
+  ],
 
   // History 分頁欄位 - 對應 Colab final_df 的 desired_final_columns
   HISTORY_COLUMNS: [
@@ -238,6 +298,7 @@ function initializeProject() {
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.SKIP_DATES, CONFIG.SKIP_DATES_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.AI_DIAGNOSIS, CONFIG.AI_DIAGNOSIS_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.AI_USAGE, CONFIG.AI_USAGE_COLUMNS);
+  ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.FACTOR_MODEL_HISTORY, CONFIG.FACTOR_MODEL_COLUMNS);
 
   // 預設分頁 'Sheet1' 若還存在且是空的，就把它砍掉，保持整潔
   var def = ss.getSheetByName('工作表1') || ss.getSheetByName('Sheet1');

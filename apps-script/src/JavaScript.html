@@ -484,7 +484,8 @@
     document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
     return Promise.all([
       loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder),
-      loadAiSettings(), loadAiUsage_(), loadAiPricing_()
+      loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
+      loadBqSettings_(), loadFactorModelHistory_()
     ]);
   }
 
@@ -573,6 +574,78 @@
       alert('✅ 已儲存單價設定');
     }).catch(function (err) { alert(err.message || err); });
   });
+
+  // ---------- 因子回歸模型（BigQuery） ----------
+  function loadBqSettings_() {
+    return callServer('getBigQuerySettings').then(function (s) {
+      document.getElementById('bqProjectIdInput').value = s.projectId;
+      document.getElementById('bqDatasetInput').value = s.dataset;
+      document.getElementById('bqSettingsStatus').textContent = s.projectId
+        ? '目前使用 GCP 專案：' + s.projectId + '（dataset: ' + s.dataset + '）'
+        : '尚未設定 GCP 專案 ID，因子回歸模型功能還不能用';
+    });
+  }
+
+  document.getElementById('bqSettingsForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var projectId = document.getElementById('bqProjectIdInput').value.trim();
+    var dataset = document.getElementById('bqDatasetInput').value.trim();
+    withSpin(callServer('setBigQuerySettings', projectId, dataset)).then(function () {
+      loadBqSettings_();
+      alert('✅ 已儲存 BigQuery 設定');
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  document.getElementById('bqSyncBtn').addEventListener('click', function () {
+    var resultEl = document.getElementById('bqActionResult');
+    resultEl.innerHTML = '<div class="meta-bar">同步中，資料量大時可能要一兩分鐘...</div>';
+    withSpin(callServer('syncHistoryToBigQuery', null)).then(function (res) {
+      var msg = '✅ 已同步月份：' + res.doneMonths.join(', ');
+      if (res.remainingMonths.length) {
+        msg += '<br>還有 ' + res.remainingMonths.length + ' 個月份沒同步完（' + res.remainingMonths.join(', ') + '），再按一次「同步」繼續。';
+      }
+      resultEl.innerHTML = '<div class="meta-bar">' + msg + '</div>';
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
+
+  document.getElementById('bqRegressionBtn').addEventListener('click', function () {
+    var resultEl = document.getElementById('bqActionResult');
+    resultEl.innerHTML = '<div class="meta-bar">執行迴歸中，通常要一到兩分鐘...</div>';
+    withSpin(callServer('runFactorRegression', null)).then(function (res) {
+      var rows = res.results.map(function (r) {
+        if (r.error) return '<div class="meta-bar">' + escapeHtml(r.labelName || r.labelKey) + '：失敗（' + escapeHtml(r.error) + '）</div>';
+        var topFeatures = Object.keys(r.weights).slice(0, 5).map(function (k) {
+          return k + ': ' + fmtNum(r.weights[k], 4);
+        }).join('、');
+        return '<div class="meta-bar"><b>' + escapeHtml(r.labelName) + '</b>　R² = ' + fmtNum(r.r2, 4) +
+          '<br>權重最高的因子：' + escapeHtml(topFeatures) + '</div>';
+      }).join('');
+      resultEl.innerHTML = rows;
+      loadFactorModelHistory_();
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
+
+  function loadFactorModelHistory_() {
+    return callServer('getFactorModelHistory', 20).then(function (rows) {
+      var tableEl = document.getElementById('factorModelHistoryTable');
+      if (!rows.length) { tableEl.innerHTML = '<div class="empty-hint">還沒有執行紀錄</div>'; return; }
+      var body = rows.map(function (r) {
+        return '<tr><td>' + escapeHtml(r['執行時間']) + '</td><td>' + escapeHtml(r['標的Label']) + '</td>' +
+          '<td>' + fmtNum(r['R2'], 4) + '</td><td>' + fmtNum(r['訓練列數'], 0) + '</td>' +
+          '<td>' + (r['目前套用版本'] || '') + '</td>' +
+          '<td><button data-ts="' + escapeHtml(r['執行時間']) + '" data-label="' + escapeHtml(r['標的Label']) + '">套用</button></td></tr>';
+      }).join('');
+      tableEl.innerHTML = '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
+        '<th>執行時間</th><th>Label</th><th>R²</th><th>列數</th><th>狀態</th><th></th></tr></thead><tbody>' + body + '</tbody></table></div>';
+      tableEl.querySelectorAll('button[data-ts]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          withSpin(callServer('applyFactorModel', btn.getAttribute('data-ts'), btn.getAttribute('data-label')))
+            .then(loadFactorModelHistory_)
+            .catch(function (err) { alert(err.message || err); });
+        });
+      });
+    });
+  }
 
   function loadScheduleSettings() {
     return callServer('getScheduleSettings').then(function (s) {

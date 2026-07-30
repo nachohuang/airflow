@@ -221,6 +221,32 @@
         </div>
 
         <div class="admin-section">
+          <h3>因子回歸模型（BigQuery，選用進階功能）</h3>
+          <div class="meta-bar">
+            以大表所有欄位為基礎，每次執行都用 BigQuery ML 找出目前最能預測「後續1個月報酬率」跟
+            「相對大盤抗跌力」的因子組合，結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。
+            這是選用的進階功能，需要你自己有一個 GCP 專案（見 README「因子回歸模型」章節的設定步驟），
+            這裡的沙盒環境不能代為設定。目前只會記錄/顯示結果，不會自動改變每日選股的 Armor_Score 計算方式。
+          </div>
+
+          <form id="bqSettingsForm" class="inline-form">
+            <input type="text" id="bqProjectIdInput" placeholder="GCP 專案 ID（例如 my-project-12345）">
+            <input type="text" id="bqDatasetInput" placeholder="Dataset 名稱（預設 twse_factor_model）">
+            <button type="submit" class="btn-primary">儲存</button>
+          </form>
+          <div id="bqSettingsStatus" class="meta-bar"></div>
+
+          <div class="form-actions" style="margin-top:10px;">
+            <button type="button" id="bqSyncBtn" class="btn-secondary">同步歷史資料到 BigQuery</button>
+            <button type="button" id="bqRegressionBtn" class="btn-primary">執行因子迴歸</button>
+          </div>
+          <div id="bqActionResult"></div>
+
+          <h4 style="margin-top:14px;">執行紀錄</h4>
+          <div id="factorModelHistoryTable"></div>
+        </div>
+
+        <div class="admin-section">
           <h3>執行紀錄</h3>
           <div id="runLogList" class="log-list"></div>
         </div>

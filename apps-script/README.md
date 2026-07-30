@@ -300,6 +300,93 @@ token 數，並用「後台管理 → AI 使用量與預估費用」裡設定的
 核對一次，在「參考單價」表單填入正確數字——這樣估算出來的費用才會貼近實際帳單，正確金額還是
 以你各自帳號後台的用量頁面為準。
 
+## 因子回歸模型（BigQuery，選用進階功能）
+
+這個功能回答的是「每天針對篩選因子的有效性做回歸測試，跟隨市場更新」：以歷史大表所有欄位為基礎，
+用 BigQuery ML 的 LASSO 線性迴歸（`linear_reg` + `l1_reg`）找出目前最能預測「後續1個月報酬率」跟
+「相對大盤抗跌力」的因子組合，每次執行的結果（R²、每個因子的權重）都記一筆到 `FactorModelHistory`
+分頁，方便觀察因子有效性有沒有隨著市場改變而漂移，也可以手動把某一版標記為「目前套用版本」。
+
+**目前的範圍**：這是研究/監控工具，`FactorModelHistory` 只負責記錄跟顯示，**不會**自動回頭改變
+`Analysis.gs` 每天算 `Armor_Score` 用的權重（45/30/15/10 那組固定係數）。要把這裡找到的最佳權重
+接回每日選股邏輯，是之後可以再做的一步，先確定迴歸結果穩定、可信賴之後再接會比較安全。
+
+### 「相對大盤的抗跌力」怎麼算
+
+不是股票自己的絕對回檔幅度，而是「大盤下跌的時候，這檔股票有沒有跌得比大盤少」：
+
+1. 市場當日報酬 `mkt_return(日期)` = 當天所有股票 `daily_return` 的橫斷面平均（等權重的市場代理指標，
+   因為大表裡沒有現成的加權指數欄位，用全市場股票當天報酬的平均數頂替）。
+2. 對每一檔股票、每一天 t，往後看 20 個交易日，只挑「大盤那天是下跌的」（`mkt_return < 0`）那幾天，
+   算這檔股票在那些天的 `(個股報酬 − 大盤報酬)` 平均值。
+3. 這個數字（`label_downside_resistance`）越大，代表大盤跌的時候這檔股票跌得比大盤少（甚至逆勢上漲）；
+   越小（負數）代表大盤跌的時候它跌得比大盤還兇——真正「抗跌」的相對意義。
+4. 往後 20 個交易日裡如果剛好大盤都沒跌，這個值會是 `NULL`，訓練時會被排除，不會硬塞一個假數字。
+
+對照的 SQL（`FactorRegression.gs` 的 `buildFeatureViewSql_`）：
+
+```sql
+AVG(CASE WHEN mkt_return < 0 THEN daily_return - mkt_return END)
+  OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING)
+```
+
+另一個預測目標「後續1個月報酬率」則單純是 20 個交易日後的收盤價相對現在的漲跌幅（`label_return_1m`）。
+
+候選因子（`CONFIG.FACTOR_CANDIDATE_COLUMNS`）目前包含：法人參與度（`inst_participation`／
+`inst_part_ma5`）、法人逢低承接比率（`ibf_20d`）、趨勢分數（`trend_score`）、均線斜率
+（`ma20_slope`）、量能比（`vol_ratio`）、乖離率（`bias60`）、殖利率、本益比、股價淨值比——
+都是大表裡（或由大表算出來的）數值型欄位，排除掉價格水準本身跟識別碼類欄位（這些不是有意義的
+獨立預測變數）。要增減候選因子，改 `Config.gs` 的 `FACTOR_CANDIDATE_COLUMNS` 跟
+`FactorRegression.gs` 的 `buildFeatureViewSql_` 就好。
+
+### 設定步驟（一次性，跟 clasp login 一樣只能你自己做，這個沙盒環境不能代勞）
+
+1. **準備一個標準 GCP 專案**：可以是新建的，也可以用你既有的（跟 Apps Script 自動配的那個
+   隱藏專案不一樣，那個不能用）。到 [console.cloud.google.com](https://console.cloud.google.com)
+   建立專案，記下 Project ID。
+2. **啟用 BigQuery API**：該專案的 API 程式庫搜尋「BigQuery API」，啟用。
+3. **綁定帳單帳戶**：BigQuery API 需要專案掛一個有效的帳單帳戶（信用卡）才能啟用，即使你完全用在
+   免費額度內也一樣要掛，這是 Google 的規定，不是這個 App 的限制。這個資料量幾乎不會產生實際費用
+   （見下面定價說明），但请自行留意。
+4. **把 Apps Script 專案換成這個 GCP 專案**：打開 Apps Script 編輯器 → 左側「專案設定」（齒輪圖示）
+   → 「Google Cloud Platform (GCP) 專案」→「變更專案」→ 貼上步驟 1 的 Project ID → 確認。
+5. **確認 BigQuery 進階服務有開**：Apps Script 編輯器左側「服務」旁邊的 `+`，如果清單裡沒有
+   `BigQuery`，加進去（`appsscript.json` 已經預先宣告 `enabledAdvancedServices`，`clasp push` 之後
+   通常會自動顯示，這步是保險確認）。
+6. **重新走一次授權**（跟部署步驟裡「第一次授權」一樣的畫面，只是這次會多跳出 BigQuery 權限的
+   同意項目）：Apps Script 編輯器執行任一函式（例如 `initializeProject`），照畫面同意新增的權限。
+7. 回到 App「後台管理」→「因子回歸模型」→ 貼上 Project ID（Dataset 名稱留預設 `twse_factor_model`
+   即可）→ 儲存。
+8. 按「同步歷史資料到 BigQuery」（第一次會把 Drive 上每個月的檔案都同步過去，資料量大的話可能要
+   分幾次按——沒同步完會顯示剩下哪些月份，再按一次繼續，已同步的月份不會重複處理）。
+9. 按「執行因子迴歸」，等一到兩分鐘，下面「執行紀錄」就會出現兩筆結果（兩個 label 各一筆），
+   可以點「套用」標記你現在採信的那一版。
+10. 之後資料持續累積，建議每週手動按一次「執行因子迴歸」（也可以之後自己加一個
+    `ScriptApp.newTrigger('runFactorRegression').timeBased().everyWeeks(1)...` 的排程，
+    目前這個進階功能還是先設計成手動觸發，避免資料量還小的階段自動燒錢）。
+
+### BigQuery 定價（這個資料規模下的估算）
+
+以下是 BigQuery on-demand（隨用隨付，預設方案，不用另外訂閱）的計費項目，**請以
+[cloud.google.com/bigquery/pricing](https://cloud.google.com/bigquery/pricing) 官方頁面公告的即時費率為準**，
+這裡只是列出計費項目跟這個 App 資料規模下大概會落在哪個量級：
+
+| 項目 | 官方定價（約） | 免費額度（每月） | 這個 App 的用量 | 估算費用 |
+|---|---|---|---|---|
+| **儲存空間（Active storage）** | 約 $0.02 / GB / 月 | 前 10 GB 免費 | 歷史資料一年約幾百 MB～1-2 GB（純文字 CSV 量級，遠小於股價等級的大型資料集） | 幾乎必落在免費額度內，$0 |
+| **儲存空間（Long-term storage，90 天未異動的資料）** | 約 $0.01 / GB / 月（比 active 便宜一半） | 同上 10 GB 額度共用 | 每月都會重新 DELETE+APPEND 當月資料，只有更舊的月份會變成 long-term | 同上，$0 |
+| **查詢（On-demand query，依掃描資料量計費）** | 約 $6.25 / TB 掃描 | 每月前 1 TB 免費 | 每次「執行因子迴歸」掃描的是 factor_features view（幾百 MB～低 GB 等級），一次掃描量遠低於 1 TB | 幾乎必落在免費額度內，$0 |
+| **BigQuery ML 訓練（`CREATE MODEL ... model_type='linear_reg'`）** | 計費方式等同一般查詢（依訓練查詢掃描的資料量計費，用的還是上面查詢的免費額度/費率），**不是** AutoML/DNN/Boosted Tree 那種另計費的模型類型 | 同查詢的 1 TB 免費額度 | 訓練資料是 factor_features 篩過 NOT NULL 之後的列，量級跟查詢差不多 | 幾乎必落在免費額度內，$0 |
+| **Load Job（把 CSV 灌進 BigQuery）** | 免費 | 不適用（本身就不計費） | 每次同步兩個 job：一個 DELETE query（算查詢）+ 一個 load job（免費） | Load job 本身 $0，DELETE query 併入上面查詢額度 |
+| **Streaming Insert** | 約 $0.01 / 200 MB | 無免費額度 | 這個 App **沒有用**streaming insert（用的是 load job，故意避開這個計費項目） | 不適用，$0 |
+
+**白話結論**：以你目前（幾個月、每天新增一批）的資料規模，正常使用（每週跑一次迴歸、每天同步一次）
+幾乎肯定整個月都在免費額度內，帳單會是 $0。真正會花錢的情況通常是：資料量成長到幾十 GB 以上、
+或查詢寫得很浪費一直全表掃描不篩選條件、或誤用了 AutoML/DNN/Boosted Tree 這幾種模型類型
+（`Config.gs`／`FactorRegression.gs` 目前只用 `linear_reg`，不會踩到這個坑）。建議設一個
+[BigQuery 預算警示](https://cloud.google.com/billing/docs/how-to/budgets)（例如 $1 就通知你），
+純粹當保險，不是預期真的會花到錢。
+
 ## 測試
 
 `Utils.gs` / `Analysis.gs` / `FactorScan.gs` / `Backtest.gs` 裡的核心運算都是純函式（不呼叫任何
@@ -330,3 +417,11 @@ npm test
 - **為什麼歷史資料用 CSV 不用 Excel**：這也是沿用原本 Colab 的教訓——資料量大了以後 Excel
   讀寫會變很慢。歷史資料（每月一份）跟匯入既有彙整表都是 CSV，不會有 Excel 資料量一大就變慢的問題；
   只有每日戰報快照跟原本 Colab 一樣輸出成 xlsx（單一天的資料量很小，沒有這個顧慮）。
+- **因子回歸模型需要你自己的 GCP 專案**：這個沙盒環境沒有、也不能取得任何 Google 帳號的 OAuth
+  憑證，「因子回歸模型」章節的 GCP 專案建立/API 啟用/帳單綁定/專案切換這幾步都只能你自己在
+  Google Cloud Console 跟 Apps Script 編輯器操作，跟 `clasp login` 的道理一樣。這是選用功能，
+  不影響其他頁面（今日戰報／持股管理／個股分析／回測研究／AI 深度診斷）的正常使用。
+- **因子迴歸結果不會自動套用**：目前「套用」按鈕只是在 `FactorModelHistory` 分頁做標記，
+  方便你自己追蹤/比較，選股用的 `Armor_Score` 權重還是 `Analysis.gs` 裡寫死的 45/30/15/10，
+  不會因為跑了迴歸就自動改變——這是刻意的，先讓迴歸結果穩定一段時間、你評估過可信賴之後，
+  要接回選股邏輯再手動改 `Analysis.gs`。
