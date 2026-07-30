@@ -362,14 +362,19 @@ function buildLatestDayFactorsSql_(sourceRef, cutoffStr) {
     // 改用 RANGE BETWEEN CURRENT ROW AND CURRENT ROW——這是 BigQuery 對「數值型別」window frame
     // 的標準同分（peer group）寫法，算出來的「這個值總共有幾筆」跟原本 PARTITION BY 版本數學上
     // 完全等價，只是換一種 BigQuery 允許的語法。
+    // 注意：RANGE frame 的 ORDER BY 不能加 NULLS LAST（BigQuery 實測會報「NULLS LAST not
+    // supported with ascending sort order in RANGE clauses」），但這不影響正確性——同分筆數
+    // 只看「值是否相等」，null 排在前面還是後面都不會改變「這個值總共有幾筆」的計算結果，
+    // 而且外層已經用 CASE 把 null 那一列的最終結果蓋成 null 了。RANK() 本身不是 RANGE frame，
+    // 不受這條限制，仍然保留 NULLS LAST 確保非 null 的名次不被 null 影響。
     '    CASE WHEN inst_part_ma5 IS NULL THEN NULL ELSE',
-    '      (RANK() OVER (ORDER BY inst_part_ma5 ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY inst_part_ma5 ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(inst_part_ma5) OVER ()',
+    '      (RANK() OVER (ORDER BY inst_part_ma5 ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY inst_part_ma5 ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(inst_part_ma5) OVER ()',
     '    END AS inst_part_rank,',
     '    CASE WHEN ibf_20d IS NULL THEN NULL ELSE',
-    '      (RANK() OVER (ORDER BY ibf_20d ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY ibf_20d ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(ibf_20d) OVER ()',
+    '      (RANK() OVER (ORDER BY ibf_20d ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY ibf_20d ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(ibf_20d) OVER ()',
     '    END AS ibf_20d_rank,',
     '    CASE WHEN vol_ratio IS NULL THEN NULL ELSE',
-    '      (RANK() OVER (ORDER BY vol_ratio ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY vol_ratio ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(vol_ratio) OVER ()',
+    '      (RANK() OVER (ORDER BY vol_ratio ASC NULLS LAST) + (COUNT(*) OVER (ORDER BY vol_ratio ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(vol_ratio) OVER ()',
     '    END AS vol_ratio_rank',
     '  FROM latest',
     ')',

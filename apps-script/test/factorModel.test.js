@@ -310,6 +310,10 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('PARTITION BY ibf_20d') === -1);
   assert.ok(sql.indexOf('PARTITION BY vol_ratio') === -1);
   assert.ok(sql.indexOf('RANGE BETWEEN CURRENT ROW AND CURRENT ROW') !== -1);
+  // RANGE frame 的 ORDER BY 不能加 NULLS LAST（BigQuery 實測會報「NULLS LAST not supported
+  // with ascending sort order in RANGE clauses」），RANK() 不是 RANGE frame 不受此限、要保留。
+  assert.ok(sql.indexOf('ASC NULLS LAST RANGE BETWEEN') === -1, 'RANGE frame 前面不能有 NULLS LAST');
+  assert.ok(sql.indexOf('ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW') !== -1, 'RANGE frame 的 ORDER BY 要用預設 null 排序');
 
   // Armor_Score 權重要對：法人參與度 45 + IBF 30 + 量能 15 + Trend_Score*10，任何一項 null 就整體 null
   assert.ok(sql.indexOf('inst_part_rank * 45 + ibf_20d_rank * 30 + vol_ratio_rank * 15 + trend_score * 10') !== -1);
