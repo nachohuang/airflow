@@ -153,8 +153,15 @@ function readAllHistoryFromFiles_() {
   return rows;
 }
 
-/** 目前歷史資料的涵蓋範圍摘要：最早/最新日期、有幾個月份的檔案。 */
+/**
+ * 目前歷史資料的涵蓋範圍摘要：最早/最新日期、有幾個月份的檔案。
+ * 給開機畫面用，刻意不在 external 模式下問 BigQuery（那要花一次真的查詢，開機每次都問不划算），
+ * 想看 external 模式下的實際資料範圍/列數/股票數，用「資料總覽」頁籤的 getHistoryOverview()。
+ */
 function getHistoryDateBounds() {
+  if (shouldUseBigQueryForReads_()) {
+    return { min: null, max: null, monthsAvailable: null };
+  }
   var months = listAvailableMonths_();
   if (months.length === 0) return { min: null, max: null, monthsAvailable: 0 };
 

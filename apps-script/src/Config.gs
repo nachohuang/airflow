@@ -85,13 +85,18 @@ var CONFIG = {
   BIGQUERY_DATASET_DEFAULT: 'twse_factor_model',
   BIGQUERY_RAW_TABLE: 'history_raw',
   BIGQUERY_EXTERNAL_TABLE: 'history_external',
+  BIGQUERY_DEDUPED_VIEW: 'history_deduped',
   BIGQUERY_FEATURE_VIEW: 'factor_features',
   BIGQUERY_LOCATION: 'US', // BigQuery Dataset 所在地區，跟後面所有 query 的 location 要一致
   // 資料來源模式：
-  //   'native'   -> 用「同步歷史資料到 BigQuery」把我們自己的月份 CSV 逐月載入 history_raw（管理型資料表，查詢快）
-  //   'external' -> 不匯入，直接建一個指向 Drive 檔案的外部資料表（history_external），
-  //                 每次執行迴歸前自動重新指向歷史資料夾裡「日期最新」的那個檔案，
-  //                 不用手動匯入，但查詢時是即時讀 Drive 檔案，速度比 native 模式慢。
+  //   'native'   -> 用「同步歷史資料到 BigQuery」把我們自己的月份 CSV 逐月載入 history_raw（管理型資料表，查詢快），
+  //                 只服務「因子回歸模型」，核心功能（今日戰報/個股分析/回測研究）維持讀 Drive 月份檔案。
+  //   'external' -> 完全不匯入。BigQuery 建一個指向 Drive 資料夾「所有」CSV 檔案的外部資料表
+  //                （history_external，涵蓋一次性大彙整檔 + 每日排程持續累加的月份檔案），
+  //                 用 history_deduped view 依 (股票代號, 日期) 去重。這個模式下，
+  //                 今日戰報／個股分析／回測研究／因子相關性掃描／因子回歸模型全部改成讀這裡，
+  //                 Apps Script 完全不會直接讀取歷史 CSV 檔案內容，也就不會有檔案太大的問題；
+  //                 代價是每次查詢都要即時讀 Drive + 跑 BigQuery，比 native 模式或純 Apps Script 慢。
   BIGQUERY_SOURCE_MODE_DEFAULT: 'native',
 
   // 歷史資料 CSV 欄名（中文）-> BigQuery 欄名（ascii，BigQuery 對特殊符號欄名支援有限，
@@ -129,6 +134,22 @@ var CONFIG = {
     'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio'
   ],
 
+  // BigQuery 因子回歸的候選欄位名稱 -> Analysis.gs computeFactors_ 算出來的同一個量（或原始 CSV 欄位）
+  // 的欄位名稱。套用某一版因子模型後，Analysis.gs 用這個對照表把 BQML 權重乘回每天算好的因子值，
+  // 算出「因子模型預測分數」跟 Armor_Score 並列顯示（不會取代 Armor_Score）。
+  BQ_FEATURE_TO_ANALYSIS_FIELD: {
+    inst_participation: 'Inst_Participation',
+    inst_part_ma5: 'Inst_Part_MA5',
+    ibf_20d: 'IBF_20D',
+    trend_score: 'Trend_Score',
+    ma20_slope: 'MA20_Slope',
+    vol_ratio: 'Vol_Ratio',
+    bias60: 'BIAS_60',
+    dividend_yield: '殖利率(%)',
+    pe_ratio: '本益比',
+    pb_ratio: '股價淨值比'
+  },
+
   // 兩個要預測的目標（label），對應「後續一個月的漲跌」跟「相對大盤的抗跌力」。
   FACTOR_LABELS: {
     RETURN_1M: { key: 'return1m', column: 'label_return_1m', name: '後續1個月報酬率' },
@@ -162,7 +183,8 @@ var CONFIG = {
   // 給 Reports 分頁 / 手機 UI 用的精簡欄位
   REPORT_COLUMNS: [
     '日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '建議動作',
-    '實相解讀', 'Trend_Score', 'Inst_Part_Rank', 'IBF_20D_Rank', '監控連結', '參考最高價'
+    '實相解讀', 'Trend_Score', 'Inst_Part_Rank', 'IBF_20D_Rank', '監控連結', '參考最高價',
+    '因子模型_預測1月報酬', '因子模型_預測抗跌力'
   ],
 
   // 給 Drive 上 xlsx 戰報快照用的完整欄位，跟原本 Colab v17.0 to_excel() 存出來的欄位一致
@@ -175,7 +197,8 @@ var CONFIG = {
     'Daily_Return', 'Is_Drop', 'Is_Inst_Buy_On_Drop', 'IBF_20D', 'IBF_20D_Rank',
     'MA20', 'MA20_Slope', 'Trend_Score', 'Vol_MA20', 'Vol_Ratio', 'Vol_Ratio_Rank',
     'MA60', 'BIAS_60', 'Armor_Score', 'Adjusted_Peak',
-    '操作策略', '建議動作', '實相解讀', '監控連結', '參考最高價'
+    '操作策略', '建議動作', '實相解讀', '監控連結', '參考最高價',
+    '因子模型_預測1月報酬', '因子模型_預測抗跌力'
   ],
 
   RUN_LOG_COLUMNS: ['時間戳記', '類型', '狀態', '訊息', '耗時(秒)'],

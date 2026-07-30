@@ -37,7 +37,7 @@
   // ---------- Tab 切換 ----------
   var TAB_TITLES = {
     dashboard: '今日戰報', portfolio: '持股管理', stock: '個股分析',
-    research: '回測研究', admin: '後台管理'
+    research: '研究', data: '資料總覽', admin: '後台管理'
   };
   var loadedTabs = {};
 
@@ -56,6 +56,7 @@
     if (tab === 'dashboard') loadDashboard();
     if (tab === 'portfolio') loadPortfolio();
     if (tab === 'admin') loadAdmin();
+    if (tab === 'data') loadDataTab_();
   }
 
   document.querySelectorAll('.nav-btn').forEach(function (btn) {
@@ -67,6 +68,7 @@
     if (activeTab === 'dashboard') withSpin(loadDashboard(true));
     else if (activeTab === 'portfolio') withSpin(loadPortfolio());
     else if (activeTab === 'admin') withSpin(loadAdmin());
+    else if (activeTab === 'data') withSpin(loadDataTab_());
     else if (activeTab === 'stock' && currentStockCode) withSpin(loadStock(currentStockCode));
   });
 
@@ -103,6 +105,13 @@
       listEl.innerHTML = result.report.map(function (r) {
         var color = STRATEGY_HINT[r['操作策略']] || 'var(--text)';
         var code = r['證券代號'];
+        var predReturn = r['因子模型_預測1月報酬'];
+        var predResist = r['因子模型_預測抗跌力'];
+        var predictedLine = (predReturn === null || predReturn === undefined) ? '' :
+          '<div class="stock-card-note" style="opacity:0.8;">因子模型預測：1個月 ' +
+          (predReturn >= 0 ? '+' : '') + fmtNum(predReturn * 100, 1) + '%' +
+          (predResist === null || predResist === undefined ? '' : '　抗跌力 ' + (predResist >= 0 ? '+' : '') + fmtNum(predResist * 100, 2) + '%') +
+          '</div>';
         return '<div class="stock-card">' +
           '<div class="stock-card-head">' +
           '<span><span class="stock-card-code">' + escapeHtml(code) + '</span>' +
@@ -111,6 +120,7 @@
           '</div>' +
           '<div class="stock-card-strategy" style="color:' + color + '">' + escapeHtml(r['操作策略']) + ' · ' + escapeHtml(r['建議動作']) + '</div>' +
           '<div class="stock-card-note">' + escapeHtml(r['實相解讀']) + '</div>' +
+          predictedLine +
           '<div class="form-actions">' +
           '<a class="stock-card-link" href="' + escapeHtml(r['監控連結']) + '" target="_blank" rel="noopener">查看個股詳情 ↗</a>' +
           '<button type="button" class="btn-secondary ai-diagnose-btn" data-code="' + escapeHtml(code) + '">🧠 AI 深度診斷</button>' +
@@ -897,6 +907,37 @@
       }
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   }
+
+  // ---------- 資料總覽 ----------
+  function loadDataTab_() {
+    return loadHistoryOverview_();
+  }
+
+  function loadHistoryOverview_() {
+    var el = document.getElementById('historyOverviewResult');
+    el.innerHTML = '<div class="loading">讀取統計中...</div>';
+    return withSpin(callServer('getHistoryOverview')).then(function (o) {
+      if (o.mode === 'external') {
+        if (!o.min) { el.innerHTML = '<div class="empty-hint">歷史資料夾裡還沒有任何資料</div>'; return; }
+        el.innerHTML = '<div class="meta-bar">資料來源：BigQuery（external，直接讀 Drive 檔案）</div>' +
+          '<table class="simple-table"><tbody>' +
+          '<tr><td>資料日期範圍</td><td>' + escapeHtml(o.min) + ' ～ ' + escapeHtml(o.max) + '</td></tr>' +
+          '<tr><td>交易日數</td><td>' + fmtNum(o.tradingDays, 0) + '</td></tr>' +
+          '<tr><td>股票數（去重後）</td><td>' + fmtNum(o.stockCount, 0) + '</td></tr>' +
+          '<tr><td>總列數（去重後）</td><td>' + fmtNum(o.rowCount, 0) + '</td></tr>' +
+          '</tbody></table>';
+      } else {
+        el.innerHTML = '<div class="meta-bar">資料來源：Apps Script 直讀 Drive 月份檔案（native）</div>' +
+          '<table class="simple-table"><tbody>' +
+          '<tr><td>資料日期範圍</td><td>' + (o.min ? escapeHtml(o.min) + ' ～ ' + escapeHtml(o.max) : '尚無資料') + '</td></tr>' +
+          '<tr><td>月份檔案數</td><td>' + fmtNum(o.monthsAvailable, 0) + '</td></tr>' +
+          '</tbody></table>' +
+          '<div class="meta-bar" style="margin-top:8px;">要看更完整的統計（股票數、總列數），到「研究」→「因子回歸模型」把資料來源模式切成 external。</div>';
+      }
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  }
+
+  document.getElementById('overviewRefreshBtn').addEventListener('click', function () { loadHistoryOverview_(); });
 
   function loadRunLog() {
     return callServer('getRecentRunLogs', 50).then(function (logs) {

@@ -169,11 +169,15 @@ function runAnalysis() {
   if (!latestDateStr) return { latestDate: null, report: [], fullReport: [] };
 
   var scanRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+  var appliedFactorModels = getAppliedFactorModels(); // 讀 FactorModelHistory 分頁，跟 BigQuery 無關，很快
   var report = [];
   var fullReport = [];
   scanRows.forEach(function (r) {
     var diag = diagnoseRow_(r, portfolioMap);
     if (diag.strategy === 'Neutral') return;
+    var predicted = computePredictedFactorScores_(r, appliedFactorModels);
+    r['因子模型_預測1月報酬'] = predicted.predictedReturn1M;
+    r['因子模型_預測抗跌力'] = predicted.predictedDownsideResistance;
     report.push({
       '日期': latestDateStr,
       '證券代號': r['證券代號'],
@@ -186,7 +190,9 @@ function runAnalysis() {
       'Inst_Part_Rank': r.Inst_Part_Rank,
       'IBF_20D_Rank': r.IBF_20D_Rank,
       '監控連結': diag.url,
-      '參考最高價': diag.peak
+      '參考最高價': diag.peak,
+      '因子模型_預測1月報酬': predicted.predictedReturn1M,
+      '因子模型_預測抗跌力': predicted.predictedDownsideResistance
     });
     fullReport.push(buildFullReportRow_(r, diag));
   });

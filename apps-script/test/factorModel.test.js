@@ -112,4 +112,82 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test summarizeWeights_ passed.');
 }
 
+// --- buildDedupedViewSql_ ---
+{
+  const sql = context.buildDedupedViewSql_('proj.ds.history_external', 'proj.ds.history_deduped');
+  assert.ok(sql.indexOf('CREATE OR REPLACE VIEW `proj.ds.history_deduped`') === 0);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_external`') !== -1);
+  assert.ok(sql.indexOf('PARTITION BY stock_id, date_str') !== -1);
+  assert.ok(sql.indexOf('WHERE rn = 1') !== -1);
+  console.log('Test buildDedupedViewSql_ passed.');
+}
+
+// --- buildHistoryRangeQuerySql_ ---
+{
+  const both = context.buildHistoryRangeQuerySql_('proj.ds.history_deduped', '2026-01-01', '2026-07-31');
+  assert.ok(both.indexOf('FROM `proj.ds.history_deduped`') !== -1);
+  assert.ok(both.indexOf("date_str >= '2026-01-01'") !== -1);
+  assert.ok(both.indexOf("date_str <= '2026-07-31'") !== -1);
+  assert.ok(both.indexOf('AND') !== -1);
+
+  const noRange = context.buildHistoryRangeQuerySql_('proj.ds.history_deduped', null, null);
+  assert.ok(noRange.indexOf('WHERE') === -1);
+
+  const startOnly = context.buildHistoryRangeQuerySql_('proj.ds.history_deduped', '2026-01-01', null);
+  assert.ok(startOnly.indexOf("date_str >= '2026-01-01'") !== -1);
+  assert.ok(startOnly.indexOf('date_str <=') === -1);
+  console.log('Test buildHistoryRangeQuerySql_ passed.');
+}
+
+// --- buildDateBoundsSql_ ---
+{
+  const sql = context.buildDateBoundsSql_('proj.ds.history_deduped');
+  assert.ok(sql.indexOf('MIN(date_str) AS min_date') !== -1);
+  assert.ok(sql.indexOf('MAX(date_str) AS max_date') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_deduped`') !== -1);
+  console.log('Test buildDateBoundsSql_ passed.');
+}
+
+// --- mapBqRowToHistoryRow_ ---
+{
+  const bqRow = { date_str: '2026-07-30', stock_id: '2330', stock_name: '台積電', close_price: '1000.5', foreign_net: '1234' };
+  const row = context.mapBqRowToHistoryRow_(bqRow);
+  assert.strictEqual(row['日期'], '2026-07-30');
+  assert.strictEqual(row['證券代號'], '2330');
+  assert.strictEqual(row['證券名稱'], '台積電');
+  assert.strictEqual(row['收盤價'], 1000.5); // 數值欄位轉成 number
+  assert.strictEqual(row['外資'], 1234);
+  // 完整欄位數要跟 HISTORY_COLUMNS 一致
+  assert.strictEqual(Object.keys(row).length, context.CONFIG.HISTORY_COLUMNS.length);
+  console.log('Test mapBqRowToHistoryRow_ passed.');
+}
+
+// --- computeWeightedFactorScore_ / computePredictedFactorScores_ ---
+{
+  const row = { Inst_Participation: 0.1, IBF_20D: 0.5, Trend_Score: 2, BIAS_60: null };
+  const weights = { inst_participation: 2, ibf_20d: 1 };
+  // 0.1*2 + 0.5*1 = 0.7
+  const score = context.computeWeightedFactorScore_(row, weights);
+  assert.ok(Math.abs(score - 0.7) < 1e-9);
+  console.log('Test computeWeightedFactorScore_ (basic weighted sum) passed.');
+
+  // 缺任何一項因子值就回傳 null，不給誤導性的部分預測值
+  const weightsNeedingMissing = { inst_participation: 2, bias60: 1 };
+  assert.strictEqual(context.computeWeightedFactorScore_(row, weightsNeedingMissing), null);
+  console.log('Test computeWeightedFactorScore_ (missing factor -> null) passed.');
+
+  assert.strictEqual(context.computeWeightedFactorScore_(row, null), null);
+  console.log('Test computeWeightedFactorScore_ (no weights -> null) passed.');
+
+  const predicted = context.computePredictedFactorScores_(row, { return1m: { weights: weights } });
+  assert.ok(Math.abs(predicted.predictedReturn1M - 0.7) < 1e-9);
+  assert.strictEqual(predicted.predictedDownsideResistance, null);
+  console.log('Test computePredictedFactorScores_ passed.');
+
+  const predictedNoModels = context.computePredictedFactorScores_(row, {});
+  assert.strictEqual(predictedNoModels.predictedReturn1M, null);
+  assert.strictEqual(predictedNoModels.predictedDownsideResistance, null);
+  console.log('Test computePredictedFactorScores_ (no applied models) passed.');
+}
+
 console.log('All FactorRegression/BigQuerySync pure-function tests passed.');

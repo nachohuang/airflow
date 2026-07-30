@@ -81,22 +81,41 @@ function upsertRowsByDate_(sheet, columns, newRows) {
 }
 
 /**
- * History 現在存在 Drive 上按月分開的 CSV 檔（HistoryFiles.gs），不是 Google Sheets 分頁。
- * 這三個函式維持原本的名稱與介面，只是內部改成呼叫檔案版實作 —— Analysis.gs / Backtest.gs /
- * FactorScan.gs / DataFetch.gs / ImportHistory.gs / Portfolio.gs / StockAnalysis.gs
- * 完全不需要跟著改，一樣呼叫 upsertHistoryRows_ / readRecentHistory_ / readHistoryRange_ 就好。
+ * 寫入永遠是 Drive 上按月分開的 CSV 檔（HistoryFiles.gs），不管資料來源模式是什麼——
+ * 每日排程抓到的當天資料一律先落地成月份檔案，這條路徑從來不會有大檔案問題。
  */
 function upsertHistoryRows_(newRows) {
   return upsertHistoryRowsToMonthlyFiles_(newRows);
 }
 
+/**
+ * 讀取歷史資料的入口，Analysis.gs / Backtest.gs / FactorScan.gs / StockAnalysis.gs 都呼叫這兩個函式，
+ * 完全不用管資料到底存在哪裡。依「因子回歸模型」設定的資料來源模式決定實際去哪裡讀：
+ *   - BigQuery 設定為 external 模式：改讀 BigQuery（見 BigQuerySync.gs 的 queryHistoryRowsFromBigQuery_），
+ *     Apps Script 完全不會直接讀取 Drive 上的歷史 CSV 檔案內容，不管檔案多大都不會卡住。
+ *   - 其他情況（沒設定 BigQuery，或設定為 native 模式）：維持原本讀 Drive 月份檔案的做法
+ *     （HistoryFiles.gs），這樣就算沒有 GCP 專案，App 的核心功能還是能正常運作。
+ */
+function shouldUseBigQueryForReads_() {
+  var settings = getBigQuerySettings();
+  return !!settings.projectId && settings.sourceMode === 'external';
+}
+
 /** 只讀最近 N 天（含）的歷史資料，給每日分析用，避免不必要地讀太多月份的檔案。 */
 function readRecentHistory_(days) {
+  if (shouldUseBigQueryForReads_()) {
+    var cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    return queryHistoryRowsFromBigQuery_(normalizeDateStr(cutoff), null);
+  }
   return readRecentHistoryFromFiles_(days);
 }
 
-/** 讀取指定日期區間（含頭尾）的歷史資料，給回測/因子掃描用。 */
+/** 讀取指定日期區間（含頭尾）的歷史資料，給回測/因子掃描/個股分析用。 */
 function readHistoryRange_(startStr, endStr) {
+  if (shouldUseBigQueryForReads_()) {
+    return queryHistoryRowsFromBigQuery_(startStr || null, endStr || null);
+  }
   return readHistoryRangeFromFiles_(startStr, endStr);
 }
 

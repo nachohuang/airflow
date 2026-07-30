@@ -136,11 +136,44 @@ function summarizeWeights_(weightRows) {
   return out;
 }
 
+/**
+ * 用套用中的一組 BQML 權重，對 Analysis.gs 已經算好因子的一列資料算出 Σ(權重 × 因子值)。
+ * row 是 computeFactors_ 算完後的列（Inst_Participation / IBF_20D / ... 都已經在上面）。
+ * 只要缺任何一項權重對應的因子值，就回傳 null（不給可能誤導的部分預測值），
+ * 例如剛上市不滿 60 天的股票 BIAS_60 還是 null，或某天法人資料缺漏。
+ */
+function computeWeightedFactorScore_(row, weights) {
+  if (!weights) return null;
+  var sum = 0;
+  var keys = Object.keys(weights);
+  for (var i = 0; i < keys.length; i++) {
+    var bqName = keys[i];
+    var analysisField = CONFIG.BQ_FEATURE_TO_ANALYSIS_FIELD[bqName];
+    if (!analysisField) continue; // 理論上不會發生（權重欄位都來自候選因子清單），保守跳過
+    var v = row[analysisField];
+    if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+    sum += weights[bqName] * v;
+  }
+  return sum;
+}
+
+/**
+ * 對一列資料算出兩個目標各自的「因子模型預測分數」（用目前套用中的權重，沒有套用中的版本就是 null）。
+ * appliedModels 是 getAppliedFactorModels() 的回傳值：{return1m: {weights,...}, downsideResistance: {weights,...}}。
+ */
+function computePredictedFactorScores_(row, appliedModels) {
+  var applied = appliedModels || {};
+  return {
+    predictedReturn1M: applied.return1m ? computeWeightedFactorScore_(row, applied.return1m.weights) : null,
+    predictedDownsideResistance: applied.downsideResistance ? computeWeightedFactorScore_(row, applied.downsideResistance.weights) : null
+  };
+}
+
 // ---- Apps Script 專屬：實際呼叫 BigQuery + 寫入 FactorModelHistory 分頁 ----
 
 function ensureFeatureView_(settings) {
   if (settings.sourceMode === 'external') {
-    syncExternalTableToLatestDriveFile(); // metadata-only，重新指向 Drive 資料夾裡日期最新的檔案
+    refreshExternalHistoryTable(); // metadata-only，重新指向資料夾裡目前所有 CSV 檔案並重建去重 view
   }
   runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqFeatureViewRef_(settings)));
 }
