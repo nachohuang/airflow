@@ -320,6 +320,37 @@ token 數，並用「後台管理 → AI 使用量與預估費用」裡設定的
 `Analysis.gs` 每天算 `Armor_Score` 用的權重（45/30/15/10 那組固定係數）。要把這裡找到的最佳權重
 接回每日選股邏輯，是之後可以再做的一步，先確定迴歸結果穩定、可信賴之後再接會比較安全。
 
+### 兩種資料來源模式：native（同步進 BigQuery）vs external（直接讀 Drive 檔案）
+
+「後台管理 → 因子回歸模型」裡有個「資料來源模式」下拉選單：
+
+- **native（預設）**：先用「同步歷史資料到 BigQuery」把歷史資料夾裡「每月一份」的
+  `YYYY-MM_ALL_COMBINED.csv` 逐月載入 BigQuery 原生資料表 `history_raw`，之後查詢速度快，
+  但前提是資料要先變成月份檔案（daily 排程抓的資料本來就是月份檔案；如果是外部匯入的舊資料，
+  要先透過「匯入既有彙整表」轉成月份檔案）。
+- **external（不想每次都要匯入的話用這個）**：完全不匯入，直接在 BigQuery 建一個指向
+  Google Drive 檔案的**外部資料表**（`history_external`），查詢時 BigQuery 自己去讀 Drive 上的
+  檔案內容，Apps Script 完全不會經手檔案，所以再大的檔案也不會撞到 Apps Script 讀取 Drive
+  大檔案的上限。執行「執行因子迴歸」之前會自動把這個外部資料表重新指向歷史資料夾裡「日期最新」
+  的檔案（跟「列出歷史資料夾裡的檔案」用同一套判斷邏輯：優先看檔名日期），不用手動同步；
+  也可以按「重新指向最新檔案」手動觸發一次（純粹是重新定義資料表指到哪個檔案，不會讀檔案內容，
+  所以是秒級的 metadata 操作，不是資料匯入）。
+
+  **external 模式的限制：**
+  - 每次查詢都是即時讀 Drive 檔案，比 native 模式（先進 BigQuery 原生儲存）慢，資料量大或
+    常常跑迴歸的話，native 模式體驗較好。
+  - **欄位順序敏感**：`history_external` 的 schema 是照固定順序（日期、證券代號、證券名稱、
+    外資...，跟 `Config.gs` 的 `HISTORY_COLUMNS` 同順序）逐欄位對應，**不是**照 CSV 標題列的
+    欄名去比對——如果 Drive 上那個檔案的欄位順序跟這個不一樣，資料會整個對錯欄位而不會報錯，
+    要特別注意（這是 BigQuery CSV 外部資料表本身的行為，不是這個 App 的限制）。
+  - 只會挑「一個」檔案（日期最新那個），不會合併資料夹裡多個檔案；如果你的匯出習慣是「每次都是
+    從頭到現在的完整彙整表」（例如 `起始日_結束日_ALL_COMBINED.csv` 這種涵蓋全部歷史的檔案），
+    這樣運作沒問題；如果是「只有這幾天的增量」，external 模式會漏掉之前的資料，要用 native 模式。
+
+  切換到 external 模式後，`Config.gs`／`FactorRegression.gs` 的 `buildFeatureViewSql_` 不用改，
+  它是照參數吃來源表名稱，`ensureFeatureView_` 會自動依目前的資料來源模式決定要讀
+  `history_raw` 還是 `history_external`。
+
 ### 「相對大盤的抗跌力」怎麼算
 
 不是股票自己的絕對回檔幅度，而是「大盤下跌的時候，這檔股票有沒有跌得比大盤少」：
@@ -386,7 +417,8 @@ AVG(CASE WHEN mkt_return < 0 THEN daily_return - mkt_return END)
 | **儲存空間（Long-term storage，90 天未異動的資料）** | 約 $0.01 / GB / 月（比 active 便宜一半） | 同上 10 GB 額度共用 | 每月都會重新 DELETE+APPEND 當月資料，只有更舊的月份會變成 long-term | 同上，$0 |
 | **查詢（On-demand query，依掃描資料量計費）** | 約 $6.25 / TB 掃描 | 每月前 1 TB 免費 | 每次「執行因子迴歸」掃描的是 factor_features view（幾百 MB～低 GB 等級），一次掃描量遠低於 1 TB | 幾乎必落在免費額度內，$0 |
 | **BigQuery ML 訓練（`CREATE MODEL ... model_type='linear_reg'`）** | 計費方式等同一般查詢（依訓練查詢掃描的資料量計費，用的還是上面查詢的免費額度/費率），**不是** AutoML/DNN/Boosted Tree 那種另計費的模型類型 | 同查詢的 1 TB 免費額度 | 訓練資料是 factor_features 篩過 NOT NULL 之後的列，量級跟查詢差不多 | 幾乎必落在免費額度內，$0 |
-| **Load Job（把 CSV 灌進 BigQuery）** | 免費 | 不適用（本身就不計費） | 每次同步兩個 job：一個 DELETE query（算查詢）+ 一個 load job（免費） | Load job 本身 $0，DELETE query 併入上面查詢額度 |
+| **Load Job（把 CSV 灌進 BigQuery，native 模式）** | 免費 | 不適用（本身就不計費） | 每次同步兩個 job：一個 DELETE query（算查詢）+ 一個 load job（免費） | Load job 本身 $0，DELETE query 併入上面查詢額度 |
+| **外部資料表查詢（external 模式，讀 Drive 檔案）** | 計費方式等同一般查詢（依掃描量計費，用同一個查詢免費額度） | 同查詢的 1 TB 免費額度 | 每次查詢都要即時讀 Drive 檔案內容，通常比讀原生儲存慢，但計費一樣算「掃描量」，量級跟 native 模式差不多 | 幾乎必落在免費額度內，$0（但速度會慢，不是免費模式比較貴，只是比較慢） |
 | **Streaming Insert** | 約 $0.01 / 200 MB | 無免費額度 | 這個 App **沒有用**streaming insert（用的是 load job，故意避開這個計費項目） | 不適用，$0 |
 
 **白話結論**：以你目前（幾個月、每天新增一批）的資料規模，正常使用（每週跑一次迴歸、每天同步一次）

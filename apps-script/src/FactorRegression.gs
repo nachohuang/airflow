@@ -139,7 +139,10 @@ function summarizeWeights_(weightRows) {
 // ---- Apps Script 專屬：實際呼叫 BigQuery + 寫入 FactorModelHistory 分頁 ----
 
 function ensureFeatureView_(settings) {
-  runBqQuery_(buildFeatureViewSql_(bqRawTableRef_(settings), bqFeatureViewRef_(settings)));
+  if (settings.sourceMode === 'external') {
+    syncExternalTableToLatestDriveFile(); // metadata-only，重新指向 Drive 資料夾裡日期最新的檔案
+  }
+  runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqFeatureViewRef_(settings)));
 }
 
 function trainFactorModel_(settings, labelDef, l1Reg) {

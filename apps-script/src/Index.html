@@ -258,8 +258,24 @@
           </form>
           <div id="bqSettingsStatus" class="meta-bar"></div>
 
+          <label style="display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--text-muted); margin:10px 0;">
+            資料來源模式
+            <select id="bqSourceModeSelect">
+              <option value="native">同步進 BigQuery（native，查詢快，需要先匯入成月份檔案）</option>
+              <option value="external">直接讀 Drive 檔案（external，免匯入，查詢較慢）</option>
+            </select>
+          </label>
+          <div class="meta-bar">
+            「直接讀 Drive 檔案」模式：不用先匯入，執行因子迴歸前會自動把 BigQuery 外部資料表重新指向
+            歷史資料夾裡「日期最新」的那個檔案（判斷方式跟「列出歷史資料夾裡的檔案」一樣），
+            Apps Script 完全不會讀取檔案內容，多大的檔案都不會撞到上限；缺點是每次查詢都是即時讀 Drive，
+            比先匯入到 BigQuery 原生儲存慢一些。<b>注意</b>：這個模式要求 Drive 上的 CSV 欄位順序
+            跟系統原本的欄位順序一致（日期、證券代號、證券名稱...），因為是用欄位順序對應、不是欄名比對。
+          </div>
+
           <div class="form-actions" style="margin-top:10px;">
-            <button type="button" id="bqSyncBtn" class="btn-secondary">同步歷史資料到 BigQuery</button>
+            <button type="button" id="bqSyncBtn" class="btn-secondary">同步歷史資料到 BigQuery（native 模式用）</button>
+            <button type="button" id="bqRepointBtn" class="btn-secondary">重新指向最新檔案（external 模式用）</button>
             <button type="button" id="bqRegressionBtn" class="btn-primary">執行因子迴歸</button>
           </div>
           <div id="bqActionResult"></div>

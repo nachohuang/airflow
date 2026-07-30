@@ -580,11 +580,25 @@
     return callServer('getBigQuerySettings').then(function (s) {
       document.getElementById('bqProjectIdInput').value = s.projectId;
       document.getElementById('bqDatasetInput').value = s.dataset;
+      document.getElementById('bqSourceModeSelect').value = s.sourceMode;
       document.getElementById('bqSettingsStatus').textContent = s.projectId
         ? '目前使用 GCP 專案：' + s.projectId + '（dataset: ' + s.dataset + '）'
         : '尚未設定 GCP 專案 ID，因子回歸模型功能還不能用';
     });
   }
+
+  document.getElementById('bqSourceModeSelect').addEventListener('change', function () {
+    withSpin(callServer('setBigQuerySourceMode', this.value)).catch(function (err) { alert(err.message || err); });
+  });
+
+  document.getElementById('bqRepointBtn').addEventListener('click', function () {
+    var resultEl = document.getElementById('bqActionResult');
+    resultEl.innerHTML = '<div class="loading">重新指向最新檔案中...</div>';
+    withSpin(callServer('syncExternalTableToLatestDriveFile')).then(function (res) {
+      resultEl.innerHTML = '<div class="meta-bar">✅ 外部資料表已指向：' + escapeHtml(res.fileName) +
+        '（判斷日期：' + escapeHtml(res.detectedDate) + '）</div>';
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
 
   document.getElementById('bqSettingsForm').addEventListener('submit', function (e) {
     e.preventDefault();

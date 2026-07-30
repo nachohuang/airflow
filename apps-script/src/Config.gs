@@ -26,7 +26,8 @@ var CONFIG = {
     GEMINI_PRICE_INPUT: 'GEMINI_PRICE_INPUT',
     GEMINI_PRICE_OUTPUT: 'GEMINI_PRICE_OUTPUT',
     BIGQUERY_PROJECT_ID: 'BIGQUERY_PROJECT_ID',
-    BIGQUERY_DATASET: 'BIGQUERY_DATASET'
+    BIGQUERY_DATASET: 'BIGQUERY_DATASET',
+    BIGQUERY_SOURCE_MODE: 'BIGQUERY_SOURCE_MODE' // 'native' | 'external'
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
@@ -83,8 +84,15 @@ var CONFIG = {
   // 這裡填的 BIGQUERY_PROJECT_ID 就是那個標準專案的 Project ID（不是 Apps Script 的專案）。
   BIGQUERY_DATASET_DEFAULT: 'twse_factor_model',
   BIGQUERY_RAW_TABLE: 'history_raw',
+  BIGQUERY_EXTERNAL_TABLE: 'history_external',
   BIGQUERY_FEATURE_VIEW: 'factor_features',
   BIGQUERY_LOCATION: 'US', // BigQuery Dataset 所在地區，跟後面所有 query 的 location 要一致
+  // 資料來源模式：
+  //   'native'   -> 用「同步歷史資料到 BigQuery」把我們自己的月份 CSV 逐月載入 history_raw（管理型資料表，查詢快）
+  //   'external' -> 不匯入，直接建一個指向 Drive 檔案的外部資料表（history_external），
+  //                 每次執行迴歸前自動重新指向歷史資料夾裡「日期最新」的那個檔案，
+  //                 不用手動匯入，但查詢時是即時讀 Drive 檔案，速度比 native 模式慢。
+  BIGQUERY_SOURCE_MODE_DEFAULT: 'native',
 
   // 歷史資料 CSV 欄名（中文）-> BigQuery 欄名（ascii，BigQuery 對特殊符號欄名支援有限，
   // 統一轉成安全的英文欄名），順序必須跟 HISTORY_COLUMNS 完全一致（用陣列索引對應）。

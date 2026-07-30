@@ -53,14 +53,26 @@ function buildDeleteMonthSql_(fullTableRef, monthKey) {
   return 'DELETE FROM `' + fullTableRef + '` WHERE date_str >= \'' + range.start + '\' AND date_str <= \'' + range.end + '\'';
 }
 
+/** BigQuery 外部資料表（讀 Google Drive 檔案）要求的 URI 格式。 */
+function buildDriveFileUri_(fileId) {
+  return 'https://drive.google.com/open?id=' + fileId;
+}
+
 // ---- Apps Script 專屬（需要 BigQuery 進階服務 + DriveApp，無法在 Node.js 測試）----
 
 function getBigQuerySettings() {
   var props = PropertiesService.getScriptProperties();
   return {
     projectId: props.getProperty(CONFIG.PROP_KEYS.BIGQUERY_PROJECT_ID) || '',
-    dataset: props.getProperty(CONFIG.PROP_KEYS.BIGQUERY_DATASET) || CONFIG.BIGQUERY_DATASET_DEFAULT
+    dataset: props.getProperty(CONFIG.PROP_KEYS.BIGQUERY_DATASET) || CONFIG.BIGQUERY_DATASET_DEFAULT,
+    sourceMode: props.getProperty(CONFIG.PROP_KEYS.BIGQUERY_SOURCE_MODE) || CONFIG.BIGQUERY_SOURCE_MODE_DEFAULT
   };
+}
+
+function setBigQuerySourceMode(mode) {
+  var m = (mode === 'external') ? 'external' : 'native';
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BIGQUERY_SOURCE_MODE, m);
+  return getBigQuerySettings();
 }
 
 function setBigQuerySettings(projectId, dataset) {
@@ -84,6 +96,15 @@ function bqRawTableRef_(settings) {
 
 function bqFeatureViewRef_(settings) {
   return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_FEATURE_VIEW;
+}
+
+function bqExternalTableRef_(settings) {
+  return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_EXTERNAL_TABLE;
+}
+
+/** factor_features view 實際要讀的來源表：native 模式讀 history_raw，external 模式讀 history_external。 */
+function bqActiveSourceTableRef_(settings) {
+  return settings.sourceMode === 'external' ? bqExternalTableRef_(settings) : bqRawTableRef_(settings);
 }
 
 function ensureBigQueryDataset_(settings) {
@@ -220,4 +241,45 @@ function syncHistoryToBigQuery(monthKeys) {
 /** 前端用：列出目前 Drive 上有哪些月份可以同步。 */
 function listSyncableMonths() {
   return listAvailableMonths_();
+}
+
+/**
+ * External 模式：建立（或重建）一個指向 Drive 檔案的 BigQuery 外部資料表，查詢時 BigQuery 直接讀
+ * Drive 上的檔案內容，Apps Script 完全不會去讀這個檔案，也就不會撞到 Drive 大檔案讀取上限。
+ * 缺點：查詢速度比 native 模式（先載入 BigQuery 原生儲存）慢，檔案越大越明顯。
+ * 用跟「列出歷史資料夾裡的檔案」一樣的邏輯（listHistoryFolderCandidates，檔名日期優先）挑最新檔案。
+ */
+function ensureExternalHistoryTable_(settings, fileId) {
+  var tableId = CONFIG.BIGQUERY_EXTERNAL_TABLE;
+  try {
+    BigQuery.Tables.remove(settings.projectId, settings.dataset, tableId);
+  } catch (e) {
+    // 表不存在就算了，繼續往下建立新的
+  }
+  BigQuery.Tables.insert({
+    tableReference: { projectId: settings.projectId, datasetId: settings.dataset, tableId: tableId },
+    type: 'EXTERNAL',
+    externalDataConfiguration: {
+      sourceFormat: 'CSV',
+      sourceUris: [buildDriveFileUri_(fileId)],
+      autodetect: false,
+      csvOptions: { skipLeadingRows: 1, allowJaggedRows: true, allowQuotedNewlines: true },
+      schema: { fields: bqColumnNames_().map(function (name) { return { name: name, type: 'STRING' }; }) }
+    }
+  }, settings.projectId, settings.dataset);
+}
+
+/**
+ * 把 external 資料表重新指向歷史資料夾裡「日期最新」的檔案（跟匯入頁面「列出歷史資料夾裡的檔案」
+ * 用同一套判斷邏輯：優先看檔名日期）。這是純 metadata 操作（重新定義資料表指到哪個檔案），
+ * 不會讀檔案內容，所以再大的檔案也不會卡住——執行因子迴歸前會自動呼叫這個函式，不用手動同步。
+ */
+function syncExternalTableToLatestDriveFile() {
+  var settings = requireBigQueryProjectId_();
+  ensureBigQueryDataset_(settings);
+  var candidates = listHistoryFolderCandidates();
+  if (candidates.length === 0) throw new Error('歷史資料夾裡沒有任何檔案，無法建立外部資料表。');
+  var picked = candidates[0]; // 已經依日期新到舊排序
+  ensureExternalHistoryTable_(settings, picked.fileId);
+  return { fileId: picked.fileId, fileName: picked.name, detectedDate: picked.detectedDate };
 }

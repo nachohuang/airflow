@@ -46,6 +46,12 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test monthStartEnd_ passed.');
 }
 
+// --- buildDriveFileUri_ ---
+{
+  assert.strictEqual(context.buildDriveFileUri_('abcDEF123456'), 'https://drive.google.com/open?id=abcDEF123456');
+  console.log('Test buildDriveFileUri_ passed.');
+}
+
 // --- buildDeleteMonthSql_ ---
 {
   const sql = context.buildDeleteMonthSql_('proj.ds.history_raw', '2026-07');
