@@ -126,13 +126,34 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test summarizeWeights_ passed.');
 }
 
+// --- resolveActualColumnNames_ ---
+{
+  const columnMap = context.CONFIG.BQ_COLUMN_MAP;
+  // 常見情境：第一欄檔名帶 BOM（'﻿日期'），其餘欄位一字不差
+  const detectedWithBom = columnMap.map(function (m, i) { return i === 0 ? '﻿' + m.cn : m.cn; });
+  const resolved = context.resolveActualColumnNames_(detectedWithBom, columnMap);
+  assert.strictEqual(resolved.length, columnMap.length);
+  assert.strictEqual(resolved[0].actualName, '﻿' + columnMap[0].cn); // 用實際（帶 BOM）的名稱去參照
+  assert.strictEqual(resolved[0].bq, columnMap[0].bq);
+  assert.strictEqual(resolved[1].actualName, columnMap[1].cn); // 其他欄位沒有 BOM，原樣比對
+  console.log('Test resolveActualColumnNames_ (BOM-prefixed first column) passed.');
+
+  // 找不到對應欄位時要丟出看得懂的錯誤，而不是讓後面的 SQL 去撞 BigQuery 的 Unrecognized name
+  const detectedMissing = columnMap.slice(1).map(function (m) { return m.cn; }); // 缺第一個欄位「日期」
+  assert.throws(function () { context.resolveActualColumnNames_(detectedMissing, columnMap); }, /日期/);
+  console.log('Test resolveActualColumnNames_ (missing column throws clear error) passed.');
+}
+
 // --- buildMaterializeSql_ ---
 {
-  const sql = context.buildMaterializeSql_('proj.ds.history_external_autodetect', 'proj.ds.history_materialized');
+  const columnMap = context.CONFIG.BQ_COLUMN_MAP;
+  const detectedWithBom = columnMap.map(function (m, i) { return i === 0 ? '﻿' + m.cn : m.cn; });
+  const resolvedColumns = context.resolveActualColumnNames_(detectedWithBom, columnMap);
+  const sql = context.buildMaterializeSql_('proj.ds.history_external_autodetect', 'proj.ds.history_materialized', resolvedColumns);
   assert.ok(sql.indexOf('CREATE OR REPLACE TABLE `proj.ds.history_materialized`') === 0);
   assert.ok(sql.indexOf('FROM `proj.ds.history_external_autodetect`') !== -1);
-  // 用「欄名」對應，不是位置：來源欄位要用中文標題列文字（反引號括起來）
-  assert.ok(sql.indexOf('SAFE_CAST(`日期` AS STRING) AS date_str') !== -1);
+  // 用「實際偵測到的欄名」對應（包含 BOM 那個），不是我們假設的乾淨字串
+  assert.ok(sql.indexOf('SAFE_CAST(`﻿日期` AS STRING) AS date_str') !== -1);
   assert.ok(sql.indexOf('SAFE_CAST(`證券代號` AS STRING) AS stock_id') !== -1);
   assert.ok(sql.indexOf('SAFE_CAST(`漲跌(+/-)` AS STRING) AS change_sign') !== -1);
   // 去重邏輯

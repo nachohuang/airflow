@@ -357,6 +357,12 @@ token 數，並用「後台管理 → AI 使用量與預估費用」裡設定的
      BigQuery 原生表 `history_materialized`（`buildMaterializeSql_`）。不管來源檔案欄位順序
      跟系統預期的一不一樣，都能正確對應；如果標題列文字對不上（打字不同、缺欄位），
      複製這一步會直接報錯，而不是像 external 模式那樣靜默把資料塞錯欄位。
+     BigQuery autodetect 出來的欄名不一定跟預期的中文字串一模一樣——最常見的是第一欄
+     （通常是「日期」）前面黏著檔案本身的 UTF-8 BOM（我們自己存檔、或使用者從別處匯出的
+     CSV 常常都有這個隱藏字元），變成一個外觀一樣但實際不同的字串。`resolveActualColumnNames_`
+     會先問 BigQuery 實際偵測到的欄名清單，比對時忽略開頭的 BOM／前後空白，再拿「實際偵測到的
+     名稱」去組 SQL，而不是硬用我們假設的乾淨字串——不然會撞到
+     `Unrecognized name: \`日期\`` 這種因為欄名多了看不見字元而找不到欄位的錯誤。
   2. **查詢快**：`history_materialized` 是真正的 BigQuery 原生表（有優化過的儲存），不是每次都
      重新讀 Drive。查詢前只有「超過 `CONFIG.BIGQUERY_MATERIALIZED_MAX_AGE_MINUTES`（預設 360 分鐘）
      沒重新整理過」才會真的重新整理一次；其餘時候直接沿用既有的原生表，速度接近 native 模式。

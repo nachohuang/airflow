@@ -81,15 +81,48 @@ function buildDedupedViewSql_(externalTableRef, viewRef) {
 }
 
 /**
+ * autodetect 出來的欄名不一定跟我們預期的中文欄名一字不差——最常見的是第一欄「日期」前面
+ * 帶著檔案本身的 UTF-8 BOM（我們自己 writeMonthlyFileRows_ 存檔時就會加 BOM，使用者的其他匯出
+ * 檔案也常常有），變成隱藏字元跟「日期」黏在一起的一個不同字串；也可能因為某欄標題列文字
+ * autodetect 判斷不出來，退回用 `string_field_N` 這種通用命名。
+ * 這裡拿 BigQuery 實際偵測到的欄名清單，去比對我們要的每一個中文欄名（比對時忽略開頭 BOM
+ * 跟前後空白），解析不出來就直接丟一個看得懂的錯誤，而不是讓後面的 SQL 用錯欄名去撞
+ * BigQuery 的「Unrecognized name」。
+ */
+function resolveActualColumnNames_(detectedNames, columnMap) {
+  var normalize = function (s) { return String(s).replace(/^\uFEFF/, '').trim(); };
+  var byNormalized = {};
+  detectedNames.forEach(function (n) { byNormalized[normalize(n)] = n; });
+
+  var missing = [];
+  var resolved = columnMap.map(function (m) {
+    var actual = byNormalized[normalize(m.cn)];
+    if (actual === undefined) missing.push(m.cn);
+    return { actualName: actual, bq: m.bq, cn: m.cn };
+  });
+
+  if (missing.length > 0) {
+    throw new Error(
+      'BigQuery 自動偵測 CSV 標題列時，找不到這些欄位：' + missing.join('、') + '。' +
+      '偵測到的實際欄位有：' + detectedNames.join('、') + '。' +
+      '請確認 Drive 上的 CSV 檔案標題列文字跟系統預期的一致（常見原因：多餘空格、欄位名稱打字不同）。'
+    );
+  }
+  return resolved;
+}
+
+/**
  * materialized 模式的核心 SQL：從一個「用 autodetect 建的外部資料表」（欄名就是 CSV 標題列文字，
  * 不是位置）依「欄位名稱」把資料複製進一份 BigQuery 原生表，欄位順序不管跟系統預期的一不一樣都沒差，
  * 因為是照名字找欄位，不是照位置——這是跟 external 模式（history_external，位置對應）最大的差異。
+ * resolvedColumns 是 resolveActualColumnNames_() 解析過的結果（{actualName, bq}），
+ * 用「實際偵測到的欄名」去參照，不是我們原本假設的乾淨中文字串。
  * 用兩層 CTE（先命名對應、再依 (stock_id, date_str) 去重）避免同一層 SELECT 裡
  * window function 參照到同層剛定義的別名（BigQuery 雖然大多情況支援，但用 CTE 分層更保險、好懂）。
  */
-function buildMaterializeSql_(autodetectExternalTableRef, materializedTableRef) {
-  var mappedCols = CONFIG.BQ_COLUMN_MAP.map(function (m) {
-    return '    SAFE_CAST(`' + m.cn + '` AS STRING) AS ' + m.bq;
+function buildMaterializeSql_(autodetectExternalTableRef, materializedTableRef, resolvedColumns) {
+  var mappedCols = resolvedColumns.map(function (m) {
+    return '    SAFE_CAST(`' + m.actualName + '` AS STRING) AS ' + m.bq;
   }).join(',\n');
   return [
     'CREATE OR REPLACE TABLE `' + materializedTableRef + '` AS',
@@ -488,6 +521,12 @@ function ensureAutodetectExternalTable_(settings, fileIds) {
   }, settings.projectId, settings.dataset);
 }
 
+/** BigQuery 實際偵測到的欄位名稱清單（autodetect 之後才知道，不是我們可以事先假設的）。 */
+function getAutodetectTableColumnNames_(settings) {
+  var table = BigQuery.Tables.get(settings.projectId, settings.dataset, CONFIG.BIGQUERY_AUTODETECT_EXTERNAL_TABLE);
+  return table.schema.fields.map(function (f) { return f.name; });
+}
+
 /**
  * 把資料夾裡所有 CSV 依「欄位名稱」複製進 history_materialized 原生表（見 buildMaterializeSql_）。
  * 這是真的會讀資料、寫進原生儲存的操作（不是純 metadata），所以不應該每次查詢都做一次——
@@ -499,7 +538,9 @@ function materializeHistoryTable() {
   var fileIds = listAllHistoryCsvFileIds_();
   if (fileIds.length === 0) throw new Error('歷史資料夾裡沒有任何 CSV 檔案，無法整理進 BigQuery。');
   ensureAutodetectExternalTable_(settings, fileIds);
-  runBqQuery_(buildMaterializeSql_(bqAutodetectExternalTableRef_(settings), bqMaterializedTableRef_(settings)), 'materialize');
+  var detectedNames = getAutodetectTableColumnNames_(settings);
+  var resolvedColumns = resolveActualColumnNames_(detectedNames, CONFIG.BQ_COLUMN_MAP);
+  runBqQuery_(buildMaterializeSql_(bqAutodetectExternalTableRef_(settings), bqMaterializedTableRef_(settings), resolvedColumns), 'materialize');
   PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BIGQUERY_MATERIALIZED_LAST_REFRESH, String(Date.now()));
   logRun_('BigQuery 整理', '成功', 'history_materialized 已重新整理（' + fileIds.length + ' 個來源檔案）', 0);
   return { fileCount: fileIds.length };
