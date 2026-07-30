@@ -559,7 +559,12 @@ function getBigQueryUsageSummary(days) {
   var todayCost = 0;
 
   rows.forEach(function (r) {
-    var d = String(r['日期']);
+    // Google Sheets 會把 logBqUsage_ 寫進去的 'yyyy-MM-dd' 字串自動轉型成 Date 儲存格，
+    // 讀回來時 r['日期'] 其實是 Date 物件，String(dateObj) 會變成
+    // "Thu Jul 30 2026 00:00:00 GMT+0800 (台北標準時間)" 這種格式，拿去跟 cutoffStr／
+    // todayStr 這種 'yyyy-MM-dd' 字串比較或當分組 key 都不對，要用 normalizeDateStr 轉回一致格式
+    // （這個檔案其他讀 Sheets 日期欄位的地方都是這樣處理，這裡漏掉了）。
+    var d = normalizeDateStr(r['日期']);
     if (d < cutoffStr) return;
     var bytes = parseInt(r['掃描位元組數'], 10) || 0;
     var cost = parseFloat(r['預估費用(USD)']) || 0;
