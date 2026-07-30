@@ -352,7 +352,7 @@
             <button class="folder-tab-btn" data-folder="reports">每日戰報</button>
             <button class="folder-tab-btn" data-folder="regression">回測/研究</button>
           </div>
-          <div class="meta-bar">「歷史資料」是每月一份的 ALL_COMBINED CSV，每天自動抓的資料都會直接更新對應月份的檔案。</div>
+          <div class="meta-bar">「歷史資料」放的是舊有的每月一份 ALL_COMBINED CSV 檔案。如果有設定 BigQuery 專案，每天自動抓取／補抓的新資料現在會直接寫進 BigQuery（不會再更新這裡的月份檔案）；沒有設定 BigQuery 才會繼續更新這裡的月份檔案。</div>
           <div id="fileList" class="file-list"></div>
         </div>
 
