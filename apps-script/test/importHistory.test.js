@@ -28,6 +28,9 @@ assert.strictEqual(context.extractDateFromFilename_('2026_07_30.csv'), '2026-07-
 assert.strictEqual(context.extractDateFromFilename_('2026-07_ALL_COMBINED.csv'), '2026-07-01');
 assert.strictEqual(context.extractDateFromFilename_('random_export.csv'), null);
 assert.strictEqual(context.extractDateFromFilename_('2026-13-40.csv'), null); // 月/日超出範圍
+// 「起始日_結束日」區間命名：取後面那組（比較新的日期）
+assert.strictEqual(context.extractDateFromFilename_('20260102_20260713_ALL_COMBINED.csv'), '2026-07-13');
+assert.strictEqual(context.extractDateFromFilename_('20260102_20260721_ALL_COMBINED.csv'), '2026-07-21');
 console.log('Test extractDateFromFilename_ passed.');
 
 console.log('All ImportHistory.gs tests passed.');

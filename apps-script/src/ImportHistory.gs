@@ -17,16 +17,27 @@ function extractDriveFileId_(input) {
 /**
  * 從檔名裡找日期字串，抓不到就回傳 null（讓呼叫端改用 Drive 的最後修改時間當備案）。
  * 支援 2026-07-30 / 2026_07_30 / 20260730 / 2026-07（只到月份，補成當月第一天）這幾種常見格式。
+ * 檔名裡如果有多組日期（例如「起始日_結束日_ALL_COMBINED.csv」這種區間命名），
+ * 取「最後一組」——這種命名習慣通常是後面那組才是資料涵蓋到的最新日期。
  */
 function extractDateFromFilename_(name) {
-  var full = String(name || '').match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})/);
-  if (full) {
-    var y = full[1], mo = full[2], d = full[3];
-    if (mo >= '01' && mo <= '12' && d >= '01' && d <= '31') return y + '-' + mo + '-' + d;
+  var s = String(name || '');
+  var best = null;
+
+  var fullRe = /(\d{4})[-_]?(\d{2})[-_]?(\d{2})/g;
+  var m;
+  while ((m = fullRe.exec(s)) !== null) {
+    var y = m[1], mo = m[2], d = m[3];
+    if (mo >= '01' && mo <= '12' && d >= '01' && d <= '31') best = y + '-' + mo + '-' + d;
   }
-  var monthOnly = String(name || '').match(/(\d{4})[-_](\d{2})(?!\d)/);
-  if (monthOnly && monthOnly[2] >= '01' && monthOnly[2] <= '12') return monthOnly[1] + '-' + monthOnly[2] + '-01';
-  return null;
+  if (best) return best;
+
+  var monthRe = /(\d{4})[-_](\d{2})(?!\d)/g;
+  var m2;
+  while ((m2 = monthRe.exec(s)) !== null) {
+    if (m2[2] >= '01' && m2[2] <= '12') best = m2[1] + '-' + m2[2] + '-01';
+  }
+  return best;
 }
 
 /**
