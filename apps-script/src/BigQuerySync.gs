@@ -302,7 +302,12 @@ function buildLatestDayFactorsSql_(sourceRef, cutoffStr) {
   var w20 = 'ROWS BETWEEN 19 PRECEDING AND CURRENT ROW';
   var w60 = 'ROWS BETWEEN 59 PRECEDING AND CURRENT ROW';
   return [
-    'WITH base AS (',
+    'WITH bounds AS (',
+    '  SELECT MAX(SAFE_CAST(date_str AS DATE)) AS latest_dt',
+    '  FROM `' + sourceRef + '`',
+    "  WHERE date_str >= '" + cutoffStr + "'",
+    '),',
+    'base AS (',
     '  SELECT',
     '    stock_id, stock_name, date_str, SAFE_CAST(date_str AS DATE) AS dt,',
     '    IFNULL(SAFE_CAST(foreign_net AS FLOAT64), 0) AS foreign_v,',
@@ -384,7 +389,13 @@ function buildLatestDayFactorsSql_(sourceRef, cutoffStr) {
     '  FROM step4',
     '),',
     'latest AS (',
-    '  SELECT * FROM step5 WHERE dt = (SELECT MAX(dt) FROM step5)',
+    // 「最新一天」要用 bounds（沒有 stock_id 格式篩選）決定，不能用 MAX(dt) FROM step5——
+    // step5 是從已經濾掉 LENGTH(stock_id) != 4 的 base 算出來的，如果最新那幾天剛好大部分
+    // stock_id 格式跑掉，MAX(dt) FROM step5 會悄悄退回「還有乾淨資料」的更舊一天，
+    // 使用者會看到戰報停在很久以前、卻不知道明明資料庫裡有更新的資料。用 bounds 決定日期，
+    // 這樣如果最新一天真的全部被篩掉，這裡就會是 0 列（誠實的「這天沒有乾淨資料」），
+    // 不是靜靜地換一個更舊的日期。
+    '  SELECT * FROM step5 WHERE dt = (SELECT latest_dt FROM bounds)',
     '),',
     'ranked AS (',
     '  SELECT *,',

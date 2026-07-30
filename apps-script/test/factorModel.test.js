@@ -303,6 +303,15 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf("date_str >= '2026-03-01'") !== -1, '要用 cutoff 限制範圍，不然 expanding max 會變成全部歷史以來');
   assert.ok(sql.indexOf('LENGTH(stock_id) = 4') !== -1);
 
+  // 「最新一天是哪一天」要從沒有 stock_id 格式篩選的 bounds CTE 決定，只在 cutoff 之後
+  // 加條件；如果連 LENGTH(stock_id)=4 都篩了才找 MAX(dt)，遇到最新幾天大部分 stock_id
+  // 格式跑掉時會悄悄退回還有乾淨資料的舊日期，使用者會看到戰報停在很久以前的日期，
+  // 卻不知道資料庫其實已經有更新的資料。
+  const boundsSection = sql.slice(sql.indexOf('bounds AS ('), sql.indexOf('base AS ('));
+  assert.ok(boundsSection.indexOf('MAX(SAFE_CAST(date_str AS DATE)) AS latest_dt') !== -1);
+  assert.ok(boundsSection.indexOf("date_str >= '2026-03-01'") !== -1);
+  assert.ok(boundsSection.indexOf('LENGTH(stock_id)') === -1, 'bounds 不能篩 stock_id 格式，不然「最新一天」的判斷會被污染資料誤導');
+
   // rolling window 大小要對：MA20/Vol_MA20/IBF20 用 19 PRECEDING，MA60 用 59 PRECEDING，Inst_Part_MA5 用 4 PRECEDING
   assert.ok(sql.indexOf('ROWS BETWEEN 19 PRECEDING AND CURRENT ROW') !== -1);
   assert.ok(sql.indexOf('ROWS BETWEEN 59 PRECEDING AND CURRENT ROW') !== -1);
@@ -321,7 +330,14 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('WHEN drop_count_20 IS NULL OR drop_count_20 = 0 THEN 0') !== -1);
 
   // 只取最新一天，不是整段回看範圍都回傳
-  assert.ok(sql.indexOf('WHERE dt = (SELECT MAX(dt) FROM step5)') !== -1);
+  assert.ok(sql.indexOf('WHERE dt = (SELECT latest_dt FROM bounds)') !== -1);
+  // 「最新一天」要用完全沒有 stock_id 格式篩選的 bounds 決定，不能用「已經濾掉髒資料的
+  // step5」自己的 MAX(dt)——不然如果最新幾天剛好大部分 stock_id 格式跑掉，會悄悄退回
+  // 舊的乾淨日期，使用者完全看不出資料庫其實有更新的資料。
+  assert.ok(sql.indexOf('MAX(dt) FROM step5') === -1, '不能再用濾過的 step5 自己決定最新日期');
+  assert.ok(sql.indexOf('bounds AS (') !== -1);
+  assert.ok(sql.indexOf('MAX(SAFE_CAST(date_str AS DATE)) AS latest_dt') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_materialized`') !== -1, 'bounds 也要查同一個 sourceRef');
 
   // percentRank 是「平均名次 / 非 null 筆數」，不是 BigQuery 內建 PERCENT_RANK()
   assert.ok(sql.indexOf('PERCENT_RANK()') === -1, '不能用 BigQuery 內建 PERCENT_RANK()，公式跟 pandas rank(pct=True) 不一樣');

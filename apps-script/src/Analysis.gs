@@ -175,6 +175,14 @@ function computeLatestDayRows_(portfolioMap) {
   return rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
 }
 
+/** 這份戰報實際是從哪裡讀資料的：native（Drive 月份檔案）／external／materialized
+ *  （BigQuery），前端拿這個字串顯示「資料來源」，不用讓使用者自己猜。跟 sourceMode 這個
+ *  Script Property 設定值不完全一樣——沒設定 BigQuery 專案的話，就算 sourceMode 存的是
+ *  external/materialized，實際讀取還是會落到 native（見 shouldUseBigQueryForReads_）。 */
+function getEffectiveDataSourceMode_() {
+  return shouldUseBigQueryForReads_() ? getBigQuerySettings().sourceMode : 'native';
+}
+
 /** 回報「這份戰報實際用了哪個區間的歷史資料」：以戰報日期為基準往前推 ANALYSIS_LOOKBACK_DAYS 天
  *  （MA60/rolling 因子的回看視窗），給前端顯示「使用資料：X ~ 戰報日期」用，讓使用者知道
  *  這次結果是用多少歷史資料算出來的，不是只用來源事後猜測。 */
@@ -223,7 +231,13 @@ function runAnalysis() {
   report.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
   fullReport.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
 
-  var result = { latestDate: latestDateStr, lookbackStart: computeLookbackStartStr_(latestDateStr), report: report, fullReport: fullReport };
+  var result = {
+    latestDate: latestDateStr,
+    lookbackStart: computeLookbackStartStr_(latestDateStr),
+    dataSourceMode: getEffectiveDataSourceMode_(),
+    report: report,
+    fullReport: fullReport
+  };
   if (report.length === 0) {
     result.diagnostics = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
   }
@@ -330,6 +344,7 @@ function getCachedDashboardReport() {
   return {
     latestDate: latestDateStr,
     lookbackStart: computeLookbackStartStr_(latestDateStr),
+    dataSourceMode: getEffectiveDataSourceMode_(),
     report: latestRows,
     cached: true,
     isToday: latestDateStr === normalizeDateStr(new Date())

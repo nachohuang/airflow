@@ -110,6 +110,12 @@
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   }
 
+  var DATA_SOURCE_LABEL = {
+    native: 'Drive 月份檔案（native）',
+    external: 'BigQuery external',
+    materialized: 'BigQuery materialized'
+  };
+
   function loadDashboard(forceRefresh) {
     var listEl = document.getElementById('dashboardList');
     var metaEl = document.getElementById('dashboardMeta');
@@ -129,13 +135,14 @@
       }
       var isToday = result.latestDate === todayDateStr_();
       var rangeNote = result.lookbackStart ? '　使用資料：' + result.lookbackStart + ' ~ ' + result.latestDate : '';
+      var sourceNote = result.dataSourceMode ? '　資料來源：' + (DATA_SOURCE_LABEL[result.dataSourceMode] || result.dataSourceMode) : '';
       var noteParts = [];
       if (forceRefresh && res.fetch && !res.fetch.ok) {
         noteParts.push('⚠️ 今天最新資料還沒抓到（' + res.fetch.error + '），已改用目前最新的既有資料');
       } else if (!isToday) {
         noteParts.push('不是今天，按右上角🔄重新整理更新');
       }
-      metaEl.textContent = '戰報日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號' + rangeNote +
+      metaEl.textContent = '戰報日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號' + rangeNote + sourceNote +
         (noteParts.length ? '　' + noteParts.join('；') : '');
       if (result.report.length === 0) {
         if (forceRefresh) {
