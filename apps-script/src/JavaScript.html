@@ -222,7 +222,9 @@
     return callServer('getCachedDashboardReport').then(function (result) {
       if (!result || !result.latestDate) {
         metaEl.textContent = '目前還沒有任何戰報，按右上角🔄選「重新計算戰報」產生一次。';
-        loadScreeningDiagnostics_(listEl);
+        listEl.innerHTML = '<div class="form-actions"><button type="button" class="btn-secondary" id="screeningFunnelBtn">🔍 查看篩選漏斗明細</button></div>';
+        document.getElementById('screeningFunnelBtn').addEventListener('click', openScreeningFunnelSheet_);
+        openScreeningFunnelSheet_();
         return;
       }
       var isToday = result.latestDate === todayDateStr_();
@@ -240,15 +242,12 @@
         (result.report.length > 0 ? '<button type="button" class="btn-secondary" id="aiTopPicksBtn">🧠 AI 掃描全部候選，推薦前三檔</button>' : '') +
         '<button type="button" class="btn-secondary" id="screeningFunnelBtn">🔍 查看篩選漏斗明細</button>' +
         '</div>' +
-        (result.report.length > 0 ? '<div id="aiTopPicksResult" style="margin-bottom:10px;"></div>' : '') +
-        '<div id="screeningFunnelResult" style="margin-bottom:10px;"></div>';
+        (result.report.length > 0 ? '<div id="aiTopPicksResult" style="margin-bottom:10px;"></div>' : '');
 
       if (result.report.length === 0) {
         listEl.innerHTML = actionsHtml + '<div class="empty-hint">這天沒有符合條件的訊號</div>';
-        document.getElementById('screeningFunnelBtn').addEventListener('click', function () {
-          loadScreeningDiagnostics_(document.getElementById('screeningFunnelResult'));
-        });
-        if (autoShowDiagnostics) loadScreeningDiagnostics_(document.getElementById('screeningFunnelResult'));
+        document.getElementById('screeningFunnelBtn').addEventListener('click', openScreeningFunnelSheet_);
+        if (autoShowDiagnostics) openScreeningFunnelSheet_();
         return;
       }
       listEl.innerHTML = actionsHtml +
@@ -289,9 +288,7 @@
       document.getElementById('aiTopPicksBtn').addEventListener('click', function () {
         runAiTopPicksForButton_(document.getElementById('aiTopPicksResult'));
       });
-      document.getElementById('screeningFunnelBtn').addEventListener('click', function () {
-        loadScreeningDiagnostics_(document.getElementById('screeningFunnelResult'));
-      });
+      document.getElementById('screeningFunnelBtn').addEventListener('click', openScreeningFunnelSheet_);
     }).catch(function (err) {
       metaEl.textContent = '';
       listEl.innerHTML = errorBox(err);
@@ -621,6 +618,18 @@
   }
   document.getElementById('stockDetailSheetCloseBtn').addEventListener('click', function () { closeSheet_(stockDetailSheet); });
   stockDetailSheet.addEventListener('click', function (e) { if (e.target === stockDetailSheet) closeSheet_(stockDetailSheet); });
+
+  /** 篩選漏斗明細改成彈出式 modal（跟股票詳情共用同一套 bottom sheet 元件），不佔用最新戰報
+   *  主畫面的版面——那裡應該優先留給股票卡片跟 AI 診斷本身，篩選漏斗是輔助診斷資訊，
+   *  需要時才點開看，不用一直卡在主要內容中間。 */
+  var screeningFunnelSheet = document.getElementById('screeningFunnelSheet');
+  var screeningFunnelSheetBody = document.getElementById('screeningFunnelSheetBody');
+  function openScreeningFunnelSheet_() {
+    openSheet_(screeningFunnelSheet);
+    loadScreeningDiagnostics_(screeningFunnelSheetBody);
+  }
+  document.getElementById('screeningFunnelSheetCloseBtn').addEventListener('click', function () { closeSheet_(screeningFunnelSheet); });
+  screeningFunnelSheet.addEventListener('click', function (e) { if (e.target === screeningFunnelSheet) closeSheet_(screeningFunnelSheet); });
 
   /** modal 裡「+ 快捷加入持股」：帶著代號/名稱/現價/今天日期跳去持股庫存表單，
    *  使用者確認或調整成本/日期後還是要自己按「儲存」，不會沒經過確認就直接寫入。 */
