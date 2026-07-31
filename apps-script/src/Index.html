@@ -372,6 +372,21 @@
       <button class="nav-btn" data-tab="data"><span class="nav-icon">🗂️</span><span>資料總覽</span></button>
       <button class="nav-btn" data-tab="admin"><span class="nav-icon">⚙️</span><span>後台管理</span></button>
     </nav>
+
+    <div id="refreshActionSheet" class="sheet-overlay hidden">
+      <div class="sheet-panel">
+        <div class="sheet-header"><h3>重新整理最新戰報</h3><button type="button" class="sheet-close-btn" id="refreshSheetCloseBtn">✕</button></div>
+        <button type="button" class="action-sheet-btn" id="refreshSheetLight">
+          🔄 刷新目前畫面
+          <span class="as-sub">只重新讀取已經存好的戰報，不會呼叫證交所或重算，幾乎瞬間完成</span>
+        </button>
+        <button type="button" class="action-sheet-btn" id="refreshSheetFetch">
+          📡 抓取最新資料並重新計算
+          <span class="as-sub">向證交所抓最新一天資料、重新跑一次完整分析，需要數十秒，且今天資料還沒公布時可能會抓不到</span>
+        </button>
+        <button type="button" class="action-sheet-cancel" id="refreshSheetCancel">取消</button>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>

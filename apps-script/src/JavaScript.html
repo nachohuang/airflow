@@ -66,11 +66,35 @@
 
   refreshBtn.addEventListener('click', function () {
     var activeTab = document.querySelector('.nav-btn.active').getAttribute('data-tab');
-    if (activeTab === 'dashboard') withSpin(loadDashboard(true));
-    else if (activeTab === 'portfolio') withSpin(loadPortfolio());
+    // 最新戰報的重新整理分兩種完全不同量級的動作（單純重讀已存好的結果 vs. 真的去抓證交所
+    // 資料重算），原本點一下圖示就直接跑最重的那條路徑，使用者分不清楚接下來要等多久、
+    // 會不會消耗資料額度，改成明確彈出兩個選項讓使用者自己選。
+    if (activeTab === 'dashboard') { showRefreshActionSheet_(); return; }
+    if (activeTab === 'portfolio') withSpin(loadPortfolio());
     else if (activeTab === 'admin') withSpin(loadAdmin());
     else if (activeTab === 'data') withSpin(loadDataTab_());
     else if (activeTab === 'stock' && currentStockCode) withSpin(loadStock(currentStockCode));
+  });
+
+  /** 通用 bottom sheet 開關（action sheet 跟個股詳情 modal 共用同一套顯示/隱藏邏輯）。 */
+  function openSheet_(overlayEl) { overlayEl.classList.remove('hidden'); }
+  function closeSheet_(overlayEl) { overlayEl.classList.add('hidden'); }
+
+  var refreshActionSheet = document.getElementById('refreshActionSheet');
+  function showRefreshActionSheet_() {
+    openSheet_(refreshActionSheet);
+  }
+  function hideRefreshActionSheet_() { closeSheet_(refreshActionSheet); }
+  document.getElementById('refreshSheetCloseBtn').addEventListener('click', hideRefreshActionSheet_);
+  document.getElementById('refreshSheetCancel').addEventListener('click', hideRefreshActionSheet_);
+  refreshActionSheet.addEventListener('click', function (e) { if (e.target === refreshActionSheet) hideRefreshActionSheet_(); });
+  document.getElementById('refreshSheetLight').addEventListener('click', function () {
+    hideRefreshActionSheet_();
+    withSpin(loadDashboard(false));
+  });
+  document.getElementById('refreshSheetFetch').addEventListener('click', function () {
+    hideRefreshActionSheet_();
+    withSpin(loadDashboard(true));
   });
 
   // ---------- 最新戰報 ----------
