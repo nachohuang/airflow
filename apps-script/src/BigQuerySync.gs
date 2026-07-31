@@ -955,16 +955,18 @@ function listSyncableMonths() {
   return listAvailableMonths_();
 }
 
-/** 歷史資料夾裡所有看起來是 CSV 的檔案 ID（不分是一次性大彙整檔還是每日排程的月份檔案）。 */
-function listAllHistoryCsvFileIds_() {
+/** 歷史資料夾裡所有看起來是 CSV 的檔案（不分是一次性大彙整檔還是每日排程的月份檔案），
+ *  同時回傳 id（BigQuery 外部資料表要用）跟 name（給使用者看「涵蓋了哪幾個檔案」用，
+ *  只顯示一個數字看不出是不是漏掉了預期的檔案）。 */
+function listAllHistoryCsvFiles_() {
   var folder = getArchiveFolder_();
   var it = folder.getFiles();
-  var ids = [];
+  var files = [];
   while (it.hasNext()) {
     var f = it.next();
-    if (/\.csv$/i.test(f.getName())) ids.push(f.getId());
+    if (/\.csv$/i.test(f.getName())) files.push({ id: f.getId(), name: f.getName() });
   }
-  return ids;
+  return files;
 }
 
 /**
@@ -1005,11 +1007,11 @@ function ensureDedupedView_(settings) {
 function refreshExternalHistoryTable() {
   var settings = requireBigQueryProjectId_();
   ensureBigQueryDataset_(settings);
-  var fileIds = listAllHistoryCsvFileIds_();
-  if (fileIds.length === 0) throw new Error('歷史資料夾裡沒有任何 CSV 檔案，無法建立外部資料表。');
-  ensureExternalHistoryTable_(settings, fileIds);
+  var files = listAllHistoryCsvFiles_();
+  if (files.length === 0) throw new Error('歷史資料夾裡沒有任何 CSV 檔案，無法建立外部資料表。');
+  ensureExternalHistoryTable_(settings, files.map(function (f) { return f.id; }));
   ensureDedupedView_(settings);
-  return { fileCount: fileIds.length };
+  return { fileCount: files.length, fileNames: files.map(function (f) { return f.name; }) };
 }
 
 /**
@@ -1079,14 +1081,16 @@ function ensureExternalTablesForHeaderGroups_(settings, fileIds) {
 function materializeHistoryTable() {
   var settings = requireBigQueryProjectId_();
   ensureBigQueryDataset_(settings);
-  var fileIds = listAllHistoryCsvFileIds_();
-  if (fileIds.length === 0) throw new Error('歷史資料夾裡沒有任何 CSV 檔案，無法整理進 BigQuery。');
-  var groupTableRefs = ensureExternalTablesForHeaderGroups_(settings, fileIds);
+  var files = listAllHistoryCsvFiles_();
+  if (files.length === 0) throw new Error('歷史資料夾裡沒有任何 CSV 檔案，無法整理進 BigQuery。');
+  var groupTableRefs = ensureExternalTablesForHeaderGroups_(settings, files.map(function (f) { return f.id; }));
   runBqQuery_(buildMaterializeSql_(groupTableRefs, bqMaterializedTableRef_(settings)), 'materialize');
   ensureUnifiedView_(settings);
   PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.BIGQUERY_MATERIALIZED_LAST_REFRESH, String(Date.now()));
-  logRun_('BigQuery 整理', '成功', 'history_materialized 已重新整理（' + fileIds.length + ' 個來源檔案，' + groupTableRefs.length + ' 種欄位順序）', 0);
-  return { fileCount: fileIds.length, groupCount: groupTableRefs.length };
+  var fileNames = files.map(function (f) { return f.name; });
+  logRun_('BigQuery 整理', '成功', 'history_materialized 已重新整理（' + files.length + ' 個來源檔案：' +
+    fileNames.join('、') + '，' + groupTableRefs.length + ' 種欄位順序）', 0);
+  return { fileCount: files.length, fileNames: fileNames, groupCount: groupTableRefs.length };
 }
 
 /** 建立/更新「統一讀取 view」（見 buildUnifiedViewSql_ 的說明）。history_raw 表如果還不存在
@@ -1309,7 +1313,74 @@ function cleanupMalformedDateRows() {
   return { deletedCount: before, affectedDates: affectedDates };
 }
 
-/** 前端「立即重新整理」按鈕（materialized 模式）：強制重新整理，不管多久前才整理過。 */
+/** 前端「立即重新整理」按鈕（materialized 模式）：強制重新整理，不管多久前才整理過。
+ *  保留給 materializeHistoryTableIfStale_ 的其他呼叫端（例如查詢前的自動判斷）直接同步呼叫用；
+ *  手動按鈕改走下面的背景 job（startMaterializeJob），不要再直接呼叫這個。 */
 function refreshMaterializedHistoryTable() {
   return materializeHistoryTableIfStale_(0);
+}
+
+// ============================================================
+// 「立即重新整理」（materialized 模式）背景 job（機制跟其他三個背景 job 相同）。
+// 要讀資料夾裡所有 CSV 檔案的標題列 + 跑 CREATE OR REPLACE TABLE AS SELECT，檔案一多容易
+// 超過瀏覽器/行動網路能穩定撐住的連線時間，跟因子迴歸、重新計算戰報是同一類問題。
+// ============================================================
+
+function getMaterializeJobState_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.MATERIALIZE_JOB_STATE);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveMaterializeJobState_(state) {
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.MATERIALIZE_JOB_STATE, JSON.stringify(state));
+}
+
+function deleteMaterializeJobTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'processMaterializeJobTick_') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/** 前端「立即重新整理」按鈕呼叫：排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，
+ *  實際整理在另一次獨立觸發的執行裡進行，不受這次瀏覽器連線影響。 */
+function startMaterializeJob() {
+  deleteMaterializeJobTriggers_();
+  saveMaterializeJobState_({ status: 'running', updatedAt: Date.now() });
+  ScriptApp.newTrigger('processMaterializeJobTick_').timeBased().after(1000).create();
+  return { status: 'running' };
+}
+
+/** 前端輪詢用：狀態存在 Script Properties，任何時候打開頁面呼叫都看得到最新進度或結果。 */
+function getMaterializeJobStatus() {
+  return getMaterializeJobState_() || { status: 'idle' };
+}
+
+/** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器。 */
+function clearMaterializeJob_() {
+  deleteMaterializeJobTriggers_();
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.MATERIALIZE_JOB_STATE);
+  return { status: 'idle' };
+}
+
+/** 真正做事的地方，由時間觸發器呼叫，完全不受瀏覽器分頁影響。單一批次，沒有時間預算/續跑機制。 */
+function processMaterializeJobTick_() {
+  deleteMaterializeJobTriggers_();
+  var state = getMaterializeJobState_();
+  if (!state || state.status !== 'running') return;
+
+  var startTime = Date.now();
+  try {
+    var result = materializeHistoryTable();
+    state.status = 'done';
+    state.fileCount = result.fileCount;
+    state.fileNames = result.fileNames;
+    state.updatedAt = Date.now();
+    saveMaterializeJobState_(state);
+  } catch (e) {
+    state.status = 'error';
+    state.errorMessage = String(e.message || e);
+    state.updatedAt = Date.now();
+    saveMaterializeJobState_(state);
+    logRun_('BigQuery 整理', '失敗', String(e.message || e), Math.round((Date.now() - startTime) / 1000));
+  }
 }

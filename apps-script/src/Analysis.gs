@@ -453,6 +453,36 @@ function getCachedDashboardReport() {
 }
 
 /**
+ * 除錯用：直接回報 Reports 分頁「現在」的實際狀態，不做任何篩選/排序——用來確認
+ * getCachedDashboardReport() 讀到的到底是不是預期的資料。跟 getCachedDashboardReport()
+ * 讀的是完全同一個 sheet 物件（同一個 getReportsSheet_()），如果這裡顯示有資料、但「戰報與
+ * 個股」還是顯示「目前還沒有任何戰報」，代表問題在前端渲染那一段，不是資料庫或讀取邏輯本身；
+ * 如果這裡也是 0 列，代表問題出在「寫入」那一段（例如 upsertRowsByDate_ 沒有真的執行到，
+ * 或寫進了另一份試算表），不是「讀取」的問題。給「系統與資料後台」的除錯按鈕用。
+ */
+function getReportsSheetDebugInfo() {
+  var ss = getSpreadsheet_();
+  var sheet = getReportsSheet_();
+  var rows = readSheetObjects_(sheet);
+  var dateCounts = {};
+  rows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    dateCounts[d] = (dateCounts[d] || 0) + 1;
+  });
+  var dates = Object.keys(dateCounts).sort();
+  return {
+    spreadsheetId: ss.getId(),
+    spreadsheetUrl: ss.getUrl(),
+    sheetName: sheet.getName(),
+    sheetLastRow: sheet.getLastRow(),
+    sheetLastColumn: sheet.getLastColumn(),
+    totalRows: rows.length,
+    distinctDates: dates,
+    rowsPerDate: dateCounts
+  };
+}
+
+/**
  * 純函式：對「已經算完因子、篩到最新一天」的 scanRows 統計篩選漏斗每一關卡掉多少檔股票，
  * 方便判斷到底是「今天市場真的沒有符合條件的股票」（v16.10 策略本來就選得很嚴，
  * 這是正常情況），還是「資料有問題」（例如 external 模式欄位順序對錯，導致排名/因子值全部異常）。

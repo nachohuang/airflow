@@ -61,4 +61,16 @@ loadIntoContext('JobQueue.gs');
   console.log('Test jobQueueDetail_ (analysis) passed.');
 }
 
+// --- jobQueueDetail_: materialize ---
+{
+  assert.strictEqual(context.jobQueueDetail_('materialize', { status: 'running' }), '');
+  const detail = context.jobQueueDetail_('materialize', {
+    status: 'done', fileCount: 3, fileNames: ['2026-01_ALL_COMBINED.csv', '2026-02_ALL_COMBINED.csv', '2026-03_ALL_COMBINED.csv']
+  });
+  assert.ok(detail.indexOf('涵蓋 3 個來源檔案') !== -1);
+  assert.ok(detail.indexOf('2026-01_ALL_COMBINED.csv') !== -1);
+  assert.ok(detail.indexOf('2026-02_ALL_COMBINED.csv') !== -1);
+  console.log('Test jobQueueDetail_ (materialize) passed.');
+}
+
 console.log('All JobQueue.gs tests passed.');

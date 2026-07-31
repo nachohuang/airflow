@@ -748,7 +748,8 @@
       loadHistoryFolderStatus_(),
       loadBqSettings_(), loadBqMaterializedStatus_(),
       loadJobQueue_(),
-      loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_()
+      loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_(),
+      checkMaterializeJobOnLoad_()
     ]);
   }
 
@@ -863,18 +864,68 @@
     var resultEl = document.getElementById('bqDbActionResult');
     resultEl.innerHTML = '<div class="loading">重新整理外部資料表中...</div>';
     withSpin(callServer('refreshExternalHistoryTable')).then(function (res) {
-      resultEl.innerHTML = '<div class="meta-bar">✅ 外部資料表已重新整理，涵蓋 ' + res.fileCount + ' 個檔案</div>';
+      resultEl.innerHTML = '<div class="meta-bar">✅ 外部資料表已重新整理，涵蓋 ' + res.fileCount + ' 個檔案' +
+        (res.fileNames && res.fileNames.length ? '：' + res.fileNames.map(escapeHtml).join('、') : '') + '</div>';
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
 
+  /**
+   * 「立即重新整理」（materialized 模式）改成背景 job：資料夾裡檔案一多，要讀每個檔案的
+   * 標題列 + 跑 CREATE OR REPLACE TABLE AS SELECT，容易超過瀏覽器/行動網路能穩定撐住的
+   * 連線時間，跟因子迴歸、重新計算戰報是同一類問題。這次呼叫只是「排工作」立刻回傳，
+   * 前端改用輪詢 getMaterializeJobStatus() 顯示進度，並明確列出涵蓋了哪幾個來源檔案
+   * （只顯示數字看不出是不是漏掉了預期的檔案）。
+   */
   document.getElementById('bqMaterializeBtn').addEventListener('click', function () {
     var resultEl = document.getElementById('bqDbActionResult');
-    resultEl.innerHTML = '<div class="loading">重新整理中，資料量大時可能要一兩分鐘...</div>';
-    withSpin(callServer('refreshMaterializedHistoryTable')).then(function (res) {
-      resultEl.innerHTML = '<div class="meta-bar">✅ 已重新整理，涵蓋 ' + res.fileCount + ' 個來源檔案</div>';
-      loadBqMaterializedStatus_();
+    resultEl.innerHTML = '<div class="loading">⏳ 背景重新整理中，可以切到別的畫面或關掉螢幕，不會中斷，資料量大時可能要一兩分鐘...</div>';
+    withSpin(callServer('startMaterializeJob')).then(function () {
+      pollMaterializeJob_();
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
+
+  var materializePollTimer_ = null;
+  function stopMaterializePoll_() {
+    if (materializePollTimer_) { clearInterval(materializePollTimer_); materializePollTimer_ = null; }
+  }
+
+  function pollMaterializeJob_() {
+    stopMaterializePoll_();
+    var poll = function () {
+      callServer('getMaterializeJobStatus').then(function (state) {
+        if (!state || state.status === 'running') return;
+        stopMaterializePoll_();
+        renderMaterializeJobResult_(state);
+      }).catch(function () {
+        // 輪詢本身失敗（例如剛好網路不穩）不代表背景工作失敗，畫面維持現狀，下一次輪詢再試
+      });
+    };
+    poll();
+    materializePollTimer_ = setInterval(poll, 3000);
+  }
+
+  function renderMaterializeJobResult_(state) {
+    var resultEl = document.getElementById('bqDbActionResult');
+    if (state.status === 'error') { resultEl.innerHTML = errorBox('背景重新整理失敗：' + state.errorMessage); return; }
+    var names = state.fileNames || [];
+    resultEl.innerHTML = '<div class="meta-bar">✅ 已重新整理，涵蓋 ' + fmtNum(state.fileCount, 0) + ' 個來源檔案' +
+      (names.length ? '：' + names.map(escapeHtml).join('、') : '') + '</div>';
+    loadBqMaterializedStatus_();
+  }
+
+  /** 「系統與資料後台」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後，完全不知道背景工作
+   *  跑到哪、甚至早就做完了。只有真的有 job（狀態是 running）時才顯示/開始輪詢。 */
+  function checkMaterializeJobOnLoad_() {
+    return callServer('getMaterializeJobStatus').then(function (state) {
+      if (state && state.status === 'running') {
+        document.getElementById('bqDbActionResult').innerHTML =
+          '<div class="loading">⏳ 背景重新整理中，可以切到別的畫面或關掉螢幕，不會中斷這個工作...</div>';
+        pollMaterializeJob_();
+        return;
+      }
+      if (state && (state.status === 'done' || state.status === 'error')) renderMaterializeJobResult_(state);
+    }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
+  }
 
   function loadBqMaterializedStatus_() {
     return callServer('getHistoryOverview').then(function (o) {
@@ -1036,6 +1087,7 @@
     if (key === 'analysis') stopAnalysisJobPoll_();
     else if (key === 'backfill') stopBackfillPoll_();
     else if (key === 'factorRegression') stopFactorRegressionPoll_();
+    else if (key === 'materialize') stopMaterializePoll_();
   }
 
   function renderJobQueue_(jobs) {
@@ -1076,6 +1128,7 @@
           if (key === 'analysis') pollAnalysisJob_();
           else if (key === 'backfill') pollBackfillStatus_();
           else if (key === 'factorRegression') pollFactorRegressionJob_();
+          else if (key === 'materialize') pollMaterializeJob_();
         }).catch(function (err) { alert(err.message || err); });
       });
     });
@@ -1099,6 +1152,30 @@
   }
 
   document.getElementById('jobQueueRefreshBtn').addEventListener('click', function () { withSpin(loadJobQueue_()); });
+
+  /** 「檢查 Reports 分頁實際內容」：跟「戰報與個股」讀的是完全同一個 sheet 物件
+   *  （getReportsSheetDebugInfo 內部呼叫 getReportsSheet_()，跟 getCachedDashboardReport 一樣），
+   *  用來確認到底是「寫入沒成功」還是「前端顯示」的問題。 */
+  document.getElementById('reportsDebugBtn').addEventListener('click', function () {
+    var el = document.getElementById('reportsDebugResult');
+    el.innerHTML = '<div class="loading">讀取中...</div>';
+    withSpin(callServer('getReportsSheetDebugInfo')).then(function (info) {
+      var dateRows = info.distinctDates.map(function (d) {
+        return '<tr><td>' + escapeHtml(d) + '</td><td>' + fmtNum(info.rowsPerDate[d], 0) + '</td></tr>';
+      }).join('');
+      el.innerHTML =
+        '<table class="simple-table"><tbody>' +
+        '<tr><td>試算表</td><td><a href="' + escapeHtml(info.spreadsheetUrl) + '" target="_blank" rel="noopener">開啟</a>（' + escapeHtml(info.spreadsheetId) + '）</td></tr>' +
+        '<tr><td>分頁名稱</td><td>' + escapeHtml(info.sheetName) + '</td></tr>' +
+        '<tr><td>sheet.getLastRow()</td><td>' + fmtNum(info.sheetLastRow, 0) + '</td></tr>' +
+        '<tr><td>總列數（不含標題）</td><td>' + fmtNum(info.totalRows, 0) + '</td></tr>' +
+        '</tbody></table>' +
+        (info.distinctDates.length
+          ? '<div class="meta-bar" style="margin-top:8px;">現有的日期跟各自列數：</div>' +
+            '<table class="simple-table"><thead><tr><td>日期</td><td>列數</td></tr></thead><tbody>' + dateRows + '</tbody></table>'
+          : '<div class="meta-bar" style="margin-top:8px;">⚠️ 目前完全沒有資料——問題出在「重新計算戰報」寫入這一段，不是前端顯示。</div>');
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
 
   function loadScheduleSettings() {
     return callServer('getScheduleSettings').then(function (s) {

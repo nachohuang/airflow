@@ -1,10 +1,10 @@
 /**
  * JobQueue.gs
- * 「排程佇列」：把目前所有背景 job（重新計算戰報 / 資料範圍重新彙整 / 因子迴歸模型，
- * 三個都是各自檔案裡用時間觸發器實作的獨立狀態機，見 Analysis.gs / DataFetch.gs /
- * FactorRegression.gs）彙整成同一份清單，給「系統與資料後台」的排程佇列區塊統一顯示
- * 狀態、錯誤內容，並提供「重新啟動」——不用回到各自的頁籤重新操作一次。
- * 只讀彙整 + 轉派重啟，不擁有任何 job 自己的狀態或邏輯。
+ * 「排程佇列」：把目前所有背景 job（重新計算戰報 / 資料範圍重新彙整 / 因子迴歸模型 /
+ * 立即重新整理，四個都是各自檔案裡用時間觸發器實作的獨立狀態機，見 Analysis.gs /
+ * DataFetch.gs / FactorRegression.gs / BigQuerySync.gs）彙整成同一份清單，給「系統與資料
+ * 後台」的排程佇列區塊統一顯示狀態、錯誤內容，並提供「重新啟動」——不用回到各自的頁籤
+ * 重新操作一次。只讀彙整 + 轉派重啟，不擁有任何 job 自己的狀態或邏輯。
  */
 
 /** 刻意延後到呼叫時才組出這份清單（而不是檔案最上層的 var）：Apps Script 不保證多個 .gs
@@ -15,7 +15,8 @@ function jobQueueDefs_() {
   return [
     { key: 'analysis', label: '重新計算戰報', getStatus: getAnalysisJobStatus },
     { key: 'backfill', label: '資料範圍重新彙整', getStatus: getBackfillJobStatus },
-    { key: 'factorRegression', label: '因子迴歸模型', getStatus: getFactorRegressionJobStatus }
+    { key: 'factorRegression', label: '因子迴歸模型', getStatus: getFactorRegressionJobStatus },
+    { key: 'materialize', label: '立即重新整理（materialized）', getStatus: getMaterializeJobStatus }
   ];
 }
 
@@ -46,6 +47,12 @@ function jobQueueDetail_(key, state) {
     }
     return '戰報日期 ' + state.latestDate + '，' + state.reportCount + ' 檔訊號' +
       (state.scannedCount !== null && state.scannedCount !== undefined ? '（共掃描 ' + state.scannedCount + ' 檔）' : '');
+  }
+  if (key === 'materialize') {
+    if (state.status !== 'done') return '';
+    var names = state.fileNames || [];
+    return '涵蓋 ' + (state.fileCount === null || state.fileCount === undefined ? names.length : state.fileCount) +
+      ' 個來源檔案' + (names.length ? '：' + names.join('、') : '');
   }
   return '';
 }
@@ -87,6 +94,7 @@ function restartJob(key) {
     var regressionState = getFactorRegressionJobStatus();
     return startFactorRegressionJob(regressionState && regressionState.l1Reg);
   }
+  if (key === 'materialize') return startMaterializeJob();
   throw new Error('未知的工作類型：' + key);
 }
 
@@ -95,5 +103,6 @@ function deleteJob(key) {
   if (key === 'analysis') return clearAnalysisJob_();
   if (key === 'backfill') return clearBackfillJob_();
   if (key === 'factorRegression') return clearFactorRegressionJob_();
+  if (key === 'materialize') return clearMaterializeJob_();
   throw new Error('未知的工作類型：' + key);
 }
