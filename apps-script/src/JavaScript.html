@@ -1455,6 +1455,32 @@
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   });
 
+  /** 「檢查日期格式」：history_raw 有些列的 date_str 如果格式不是 yyyy-MM-dd（例如舊版寫入邏輯
+   *  留下的 'yyyy/MM/dd'），會被 SAFE_CAST(date_str AS DATE) 悄悄忽略，讓最新戰報卡在「格式
+   *  正確的最後一天」不會往前進。這裡先查有幾列，使用者確認後才真的刪除（刪除是不可逆的，
+   *  刪掉之後那幾天要另外用「手動抓取/重新彙整區間」重新抓一次）。 */
+  document.getElementById('malformedDateCheckBtn').addEventListener('click', function () {
+    var el = document.getElementById('malformedDateResult');
+    el.innerHTML = '<div class="loading">檢查中...</div>';
+    withSpin(callServer('getMalformedDateRowCount')).then(function (r) {
+      if (r.count === 0) {
+        el.innerHTML = '<div class="meta-bar">✅ 沒有發現日期格式錯誤的資料。</div>';
+        return;
+      }
+      el.innerHTML = '<div class="error-box">⚠️ 發現 ' + fmtNum(r.count, 0) + ' 列 history_raw 的日期格式不是 yyyy-MM-dd，' +
+        '這些列會讓「最新戰報」卡在格式正確的最後一天讀不到更新的資料。</div>' +
+        '<div class="form-actions"><button type="button" class="btn-danger" id="malformedDateCleanupBtn">刪除這些格式錯誤的列</button></div>' +
+        '<div class="meta-bar" style="margin-top:6px;">刪除後那幾天等於沒有資料，要另外到「手動抓取/重新彙整區間」把那幾天重新抓一次（這次會用正確格式寫入，不會再壞掉）。</div>';
+      document.getElementById('malformedDateCleanupBtn').addEventListener('click', function () {
+        if (!confirm('確定要刪除這 ' + r.count + ' 列格式錯誤的資料嗎？刪除後要另外重新抓取那幾天，這個動作無法復原。')) return;
+        el.innerHTML = '<div class="loading">刪除中...</div>';
+        withSpin(callServer('cleanupMalformedDateRows')).then(function (res) {
+          el.innerHTML = '<div class="meta-bar">✅ 已刪除 ' + fmtNum(res.deletedCount, 0) + ' 列，記得到「手動抓取/重新彙整區間」重新抓那幾天的資料。</div>';
+        }).catch(function (err) { el.innerHTML = errorBox(err); });
+      });
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
+
   function loadRunLog() {
     return callServer('getRecentRunLogs', 50).then(function (logs) {
       var el = document.getElementById('runLogList');

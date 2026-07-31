@@ -60,6 +60,20 @@ function buildDeleteDatesSql_(fullTableRef, dateStrs) {
   return 'DELETE FROM `' + fullTableRef + '` WHERE date_str IN (' + list + ')';
 }
 
+/** date_str 不是標準 yyyy-MM-dd（例如舊版寫入邏輯留下的 'yyyy/MM/dd'）的列數——這些列會被
+ *  SAFE_CAST(date_str AS DATE) 悄悄忽略，讓仰賴它判斷「最新一天」的查詢（buildLatestDayFactorsSql_
+ *  的 bounds CTE）卡在「格式正確的最後一天」，看起來像資料停在很久以前不動。給「系統與資料
+ *  後台」的檢查/清理按鈕用。 */
+function buildMalformedDateCountSql_(fullTableRef) {
+  return "SELECT COUNT(*) AS cnt FROM `" + fullTableRef + "` WHERE NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')";
+}
+
+/** 清掉 history_raw 裡 date_str 格式不是 yyyy-MM-dd 的列——清掉之後那幾天等於沒有資料，
+ *  要另外用「手動抓取/重新彙整區間」把那幾天重新抓一次（這次會用正規化過的格式寫入）。 */
+function buildDeleteMalformedDateRowsSql_(fullTableRef) {
+  return "DELETE FROM `" + fullTableRef + "` WHERE NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')";
+}
+
 /** BigQuery 外部資料表（讀 Google Drive 檔案）要求的 URI 格式。 */
 function buildDriveFileUri_(fileId) {
   return 'https://drive.google.com/open?id=' + fileId;
@@ -699,6 +713,28 @@ function shouldWriteToBigQuery_() {
 }
 
 /**
+ * 把要寫進 history_raw 的列的「日期」欄位正規化成 yyyy-MM-dd 再回傳新陣列（不改原本的列物件，
+ * Drive 月份 CSV 那條路徑還是要用原本 formatSlashDate_ 產生的 'yyyy/MM/dd' 顯示格式，不能共用
+ * 同一份被改過的列）。
+ *
+ * 每日抓取的列物件的「日期」欄位是 formatSlashDate_ 產生的 'yyyy/MM/dd'（沿用 TWSE 慣用的顯示
+ * 格式，不是 ISO 格式）。history_raw 的 date_str 卻要能被 BigQuery 的 SAFE_CAST(date_str AS
+ * DATE) 解析成功（只接受 'yyyy-MM-dd'），不正規化直接寫進去的話，這幾天的資料在任何用
+ * SAFE_CAST 判斷「最新一天」的查詢裡（例如 buildLatestDayFactorsSql_ 的 bounds CTE）都會被
+ * 悄悄跳過——資料總覽用 MAX(date_str) 做純字串比較不受影響，還是看得到日期範圍有更新，但
+ * 戰報會像是卡住不動一樣，一直停在「格式正確的最後一天」。這裡統一正規化成 yyyy-MM-dd，
+ * 跟 history_materialized（從 Drive CSV 整理進來的舊資料基準）的格式對齊。
+ */
+function normalizeRowsDateField_(rows) {
+  return rows.map(function (r) {
+    var copy = {};
+    for (var k in r) copy[k] = r[k];
+    copy['日期'] = normalizeDateStr(r['日期']);
+    return copy;
+  });
+}
+
+/**
  * 把新抓到的資料（正常一次只有一天，但寫成通用版本也能一次處理多天，例如舊版 CSV 匯入）
  * 直接 WRITE_APPEND 進 history_raw，取代寫進 Drive 月份 CSV 檔案——避免使用者手上的歷史大檔案
  * 越滾越大，某一天 Apps Script 讀不動整個檔案（跟這次修好的 BigQuery 查詢記憶體問題是同一種
@@ -721,7 +757,7 @@ function upsertHistoryRowsToBigQuery_(newRows) {
 
   runBqQuery_(buildDeleteDatesSql_(bqRawTableRef_(settings), dates), 'delete_dates');
 
-  var csv = remapCsvHeaderToBigQuery_(rowsToCsv_(CONFIG.HISTORY_COLUMNS, newRows));
+  var csv = remapCsvHeaderToBigQuery_(rowsToCsv_(CONFIG.HISTORY_COLUMNS, normalizeRowsDateField_(newRows)));
   var blob = Utilities.newBlob(csv, 'text/csv', 'daily.csv');
   var job = BigQuery.Jobs.insert({
     configuration: {
@@ -1214,6 +1250,29 @@ function getHistoryStockIdQualityCheck() {
   refreshDataSourceForMode_(settings);
   var rows = runBqQuery_(buildStockIdQualitySql_(sourceRefForBigQueryRead_(settings)), 'stock_id_quality');
   return mapStockIdQualityRows_(rows);
+}
+
+/** 前端「資料總覽」：檢查 history_raw 裡有幾列 date_str 格式不是 yyyy-MM-dd（見
+ *  buildMalformedDateCountSql_ 的說明——這種列會讓「最新戰報」卡在格式正確的最後一天）。
+ *  只查 history_raw，不查 history_unified/materialized，因為問題只會出在直接寫入的 history_raw；
+ *  history_materialized 是從 Drive CSV 整理進來的舊資料基準，格式一直是正確的。 */
+function getMalformedDateRowCount() {
+  var settings = requireBigQueryProjectId_();
+  var rows = runBqQuery_(buildMalformedDateCountSql_(bqRawTableRef_(settings)), 'malformed_date_check');
+  return { count: rows.length ? parseInt(rows[0].cnt, 10) : 0 };
+}
+
+/** 前端「清理格式錯誤的日期資料」按鈕：刪掉 history_raw 裡 date_str 格式不對的列。
+ *  清掉之後那幾天就沒有資料了，要另外用「手動抓取/重新彙整區間」把那幾天重新抓一次
+ *  （這次寫入時 upsertHistoryRowsToBigQuery_ 已經會正規化成 yyyy-MM-dd，不會再壞掉）。 */
+function cleanupMalformedDateRows() {
+  var settings = requireBigQueryProjectId_();
+  var before = getMalformedDateRowCount().count;
+  if (before > 0) {
+    runBqQuery_(buildDeleteMalformedDateRowsSql_(bqRawTableRef_(settings)), 'cleanup_malformed_dates');
+  }
+  logRun_('清理日期格式錯誤資料', '成功', '刪除 ' + before + ' 列 history_raw 裡 date_str 格式不是 yyyy-MM-dd 的資料', 0);
+  return { deletedCount: before };
 }
 
 /** 前端「立即重新整理」按鈕（materialized 模式）：強制重新整理，不管多久前才整理過。 */

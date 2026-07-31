@@ -546,9 +546,15 @@ function screeningFunnelStages_(stats) {
 /**
  * 把戰報匯出成 .xlsx 存進 Drive 的 Reports 資料夾（完整欄位版本，對應原本 Colab 的存檔格式）。
  * 做法：先建立一份暫存 Google Sheet 寫入資料，透過 export URL 轉存 xlsx blob，再刪除暫存表單。
+ * 同一天可能因為手動重試、debug 而重複執行「重新計算戰報」，檔名是依日期算出來的固定值，
+ * 每次都直接存新檔案的話同一天會愈堆愈多份內容幾乎一樣的快照——建檔前先把資料夾裡同名的
+ * 舊檔案丟進垃圾桶，維持「同一天最多一份、永遠是最新一次算出來的結果」。
  */
 function exportReportToDrive_(fullReportRows, dateStr) {
   if (!fullReportRows || fullReportRows.length === 0) return null;
+  var fileName = dateStr.replace(/-/g, '') + '_v17.0_趨勢共鳴戰報.xlsx';
+  var folder = getReportsFolder_();
+
   var tempName = 'tmp_export_' + dateStr;
   var tempSs = SpreadsheetApp.create(tempName);
   var tempSheet = tempSs.getSheets()[0];
@@ -559,10 +565,19 @@ function exportReportToDrive_(fullReportRows, dateStr) {
   var resp = UrlFetchApp.fetch(exportUrl, {
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }
   });
-  var fileName = dateStr.replace(/-/g, '') + '_v17.0_趨勢共鳴戰報.xlsx';
   var blob = resp.getBlob().setName(fileName);
-  var file = getReportsFolder_().createFile(blob);
+
+  removeExistingFilesByName_(folder, fileName);
+  var file = folder.createFile(blob);
 
   DriveApp.getFileById(tempSs.getId()).setTrashed(true);
   return file.getId();
+}
+
+/** 把資料夾裡跟 fileName 完全同名的檔案都丟進垃圾桶（用在匯出前清掉舊版同名快照）。 */
+function removeExistingFilesByName_(folder, fileName) {
+  var it = folder.getFilesByName(fileName);
+  while (it.hasNext()) {
+    it.next().setTrashed(true);
+  }
 }

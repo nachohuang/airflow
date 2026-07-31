@@ -81,6 +81,36 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test buildDeleteDatesSql_ passed.');
 }
 
+// --- buildMalformedDateCountSql_ / buildDeleteMalformedDateRowsSql_：找出/清掉 date_str 不是
+//     yyyy-MM-dd 的列（例如舊版寫入邏輯留下的 'yyyy/MM/dd'，會被 SAFE_CAST(date_str AS DATE)
+//     悄悄忽略，讓「最新戰報」卡在格式正確的最後一天）---
+{
+  const countSql = context.buildMalformedDateCountSql_('proj.ds.history_raw');
+  assert.ok(countSql.indexOf('SELECT COUNT(*) AS cnt FROM `proj.ds.history_raw`') === 0);
+  assert.ok(countSql.indexOf("NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')") !== -1);
+
+  const deleteSql = context.buildDeleteMalformedDateRowsSql_('proj.ds.history_raw');
+  assert.ok(deleteSql.indexOf('DELETE FROM `proj.ds.history_raw`') === 0);
+  assert.ok(deleteSql.indexOf("NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')") !== -1);
+  console.log('Test buildMalformedDateCountSql_ / buildDeleteMalformedDateRowsSql_ passed.');
+}
+
+// --- normalizeRowsDateField_：寫進 history_raw 前把 formatSlashDate_ 的 'yyyy/MM/dd' 轉成
+//     yyyy-MM-dd（不然 SAFE_CAST(date_str AS DATE) 解析失敗，這是這次修的實際 bug）；
+//     不能動到原本的列物件，Drive 月份 CSV 路徑還要繼續用未改過的 'yyyy/MM/dd' 顯示格式 ---
+{
+  const original = [
+    { '日期': '2026/07/30', '證券代號': '2330', '收盤價': 100 },
+    { '日期': '2026-07-21', '證券代號': '1101', '收盤價': 50 }
+  ];
+  const normalized = context.normalizeRowsDateField_(original);
+  assert.strictEqual(normalized[0]['日期'], '2026-07-30');
+  assert.strictEqual(normalized[1]['日期'], '2026-07-21');
+  assert.strictEqual(normalized[0]['證券代號'], '2330', '其他欄位要原封不動保留');
+  assert.strictEqual(original[0]['日期'], '2026/07/30', '不能動到原本的列物件（Drive CSV 路徑還要用未改過的格式）');
+  console.log('Test normalizeRowsDateField_ passed.');
+}
+
 // --- buildUnifiedViewSql_：history_raw（每天直接寫入）UNION history_materialized（舊資料基準），
 //     同一天同一檔股票兩邊都有的話 history_raw 要贏（比較新鮮）---
 {
