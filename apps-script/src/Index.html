@@ -52,8 +52,7 @@
       <section id="tab-research" class="tab-panel">
         <div class="sub-tabs">
           <button class="sub-tab-btn active" data-subtab="backtest">📊 策略回測驗證</button>
-          <button class="sub-tab-btn" data-subtab="factorscan">🔥 因子健康度</button>
-          <button class="sub-tab-btn" data-subtab="factorregression">🧠 因子迴歸模型</button>
+          <button class="sub-tab-btn" data-subtab="factorregression">🧠 因子健康度＋迴歸模型</button>
         </div>
 
         <div id="subtab-backtest" class="sub-tab-panel active">
@@ -81,27 +80,32 @@
           <div id="backtestResult"></div>
         </div>
 
-        <div id="subtab-factorscan" class="sub-tab-panel">
-          <div class="meta-bar">🔥 因子有效性熱力榜：預設分析近 30 天單一因子與股價漲跌的關聯度，Apps Script 現場算，秒級出結果。</div>
-          <form id="factorScanForm" class="form-card">
-            <label>起始日 <input id="fsStart" type="date"></label>
-            <label>結束日 <input id="fsEnd" type="date"></label>
-            <div class="form-actions">
-              <button type="submit" class="btn-primary">🔥 開始掃描</button>
-              <button type="button" id="fsSaveBtn" class="btn-secondary" disabled>存成檔案</button>
-            </div>
-          </form>
-          <div id="factorScanResult"></div>
-        </div>
-
         <div id="subtab-factorregression" class="sub-tab-panel">
+          <div class="admin-section">
+            <h3>🔥 因子健康度（秒級）</h3>
+            <div class="meta-bar">
+              預設分析近 30 天單一因子與股價漲跌的關聯度，Apps Script 現場算，秒級出結果、
+              不用 BigQuery，適合在下面決定要不要重新訓練因子迴歸模型前，先快速看一眼
+              「這幾個因子這陣子還有沒有效」。
+            </div>
+            <form id="factorScanForm" class="form-card" style="margin-bottom:0;">
+              <label>起始日 <input id="fsStart" type="date"></label>
+              <label>結束日 <input id="fsEnd" type="date"></label>
+              <div class="form-actions">
+                <button type="submit" class="btn-primary">🔥 開始掃描</button>
+                <button type="button" id="fsSaveBtn" class="btn-secondary" disabled>存成檔案</button>
+              </div>
+            </form>
+            <div id="factorScanResult"></div>
+          </div>
+
           <div id="factorActiveModelCard"></div>
 
           <details class="info-collapse">
             <summary>ℹ️ 什麼是 BigQuery 因子回歸模型？</summary>
             <div class="info-body">
               以大表所有欄位為基礎，用 BigQuery ML 找出目前最能預測「後續1個月報酬率」跟
-              「相對大盤抗跌力」的因子組合（多因子 LASSO 迴歸，比左邊的單因子相關性更深入），
+              「相對大盤抗跌力」的因子組合（多因子 LASSO 迴歸，比上面的單因子相關性更深入），
               結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。套用某一版之後，最新戰報會多顯示
               一組「因子模型預測分數」供對照，但不會改變 Armor_Score 本身的選股邏輯。
               GCP 專案 ID 與資料來源模式設定移到「系統與資料後台」頁籤最上方的「資料庫狀態」，
