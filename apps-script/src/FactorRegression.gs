@@ -285,6 +285,15 @@ function getFactorRegressionJobStatus() {
   return getFactorRegressionJobState_() || { status: 'idle' };
 }
 
+/** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器，
+ *  回到乾淨的 idle。給觸發器不知道為什麼沒有真的被觸發、狀態卡在 running 卻再也不會有
+ *  進度的情況用（見 DataFetch.gs 的 clearBackfillJob_ 同樣的說明跟限制）。 */
+function clearFactorRegressionJob_() {
+  deleteFactorRegressionJobTriggers_();
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.FACTOR_REGRESSION_JOB_STATE);
+  return { status: 'idle' };
+}
+
 /** 真正做事的地方，由時間觸發器呼叫，完全不受瀏覽器分頁影響。跟 processAnalysisJobTick_
  *  一樣是單一批次（對兩個 label 各跑一次），沒有像補抓 job 那樣的時間預算/續跑機制。 */
 function processFactorRegressionJobTick_() {

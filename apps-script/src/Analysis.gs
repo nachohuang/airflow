@@ -326,6 +326,15 @@ function getAnalysisJobStatus() {
   return getAnalysisJobState_() || { status: 'idle' };
 }
 
+/** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器，
+ *  回到乾淨的 idle。給觸發器不知道為什麼沒有真的被觸發、狀態卡在 running 卻再也不會有
+ *  進度的情況用（見 DataFetch.gs 的 clearBackfillJob_ 同樣的說明跟限制）。 */
+function clearAnalysisJob_() {
+  deleteAnalysisJobTriggers_();
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.ANALYSIS_JOB_STATE);
+  return { status: 'idle' };
+}
+
 /**
  * 真正做事的地方，由時間觸發器呼叫（不是 google.script.run），完全不受瀏覽器分頁影響。
  * 分析本身是單一批次運算（不像補抓區間要一天一天跑），正常情況下一次 tick 就會跑完，

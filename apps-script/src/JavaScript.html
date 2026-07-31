@@ -1010,30 +1010,65 @@
     return callServer('getJobQueueOverview').then(renderJobQueue_).catch(function (err) { listEl.innerHTML = errorBox(err); });
   }
 
+  // 時間觸發器有時候不知道什麼原因就是沒有真的被 Apps Script 觸發，狀態會卡在 running
+  // 卻再也不會有進度更新；「更新時間」超過這個門檻還是 running，就提醒使用者可能已經卡住。
+  var JOB_STALE_THRESHOLD_MS = 10 * 60 * 1000;
+
+  function stopJobPollByKey_(key) {
+    if (key === 'analysis') stopAnalysisJobPoll_();
+    else if (key === 'backfill') stopBackfillPoll_();
+    else if (key === 'factorRegression') stopFactorRegressionPoll_();
+  }
+
   function renderJobQueue_(jobs) {
     var listEl = document.getElementById('jobQueueList');
     listEl.innerHTML = jobs.map(function (j) {
       var statusLabel = JOB_STATUS_LABEL[j.status] || j.status;
       var color = JOB_STATUS_COLOR[j.status] || 'var(--text)';
       var updatedLabel = j.updatedAt ? new Date(j.updatedAt).toLocaleString('zh-TW') : '';
+      var staleWarning = '';
+      if (j.status === 'running' && j.updatedAt && (Date.now() - j.updatedAt) > JOB_STALE_THRESHOLD_MS) {
+        var minutesAgo = Math.round((Date.now() - j.updatedAt) / 60000);
+        staleWarning = '<div class="error-box" style="margin-top:6px;">⚠️ 已經 ' + minutesAgo + ' 分鐘沒有更新，' +
+          '很可能是時間觸發器沒有被正常觸發、卡住了，可以按下面「重新啟動」或「刪除」處理。</div>';
+      }
+      var actionBtns = '';
+      if (j.canRestart) actionBtns += '<button type="button" class="btn-secondary job-restart-btn" data-key="' + escapeHtml(j.key) + '">🔄 重新啟動</button>';
+      if (j.canDelete) actionBtns += '<button type="button" class="btn-danger job-delete-btn" data-key="' + escapeHtml(j.key) + '">🗑 刪除</button>';
       return '<div class="stock-card">' +
         '<div class="stock-card-head"><span class="stock-card-code">' + escapeHtml(j.label) + '</span>' +
         '<span style="color:' + color + '; font-weight:700;">' + escapeHtml(statusLabel) + '</span></div>' +
         (updatedLabel ? '<div class="stock-card-note">更新時間：' + escapeHtml(updatedLabel) + '</div>' : '') +
         (j.detail ? '<div class="stock-card-note">' + escapeHtml(j.detail) + '</div>' : '') +
         (j.errorMessage ? '<div class="error-box" style="margin-top:6px;">' + escapeHtml(j.errorMessage) + '</div>' : '') +
-        (j.canRestart ? '<div class="form-actions"><button type="button" class="btn-secondary job-restart-btn" data-key="' + escapeHtml(j.key) + '">重新啟動</button></div>' : '') +
+        staleWarning +
+        (actionBtns ? '<div class="form-actions">' + actionBtns + '</div>' : '') +
         '</div>';
     }).join('');
     listEl.querySelectorAll('.job-restart-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var key = btn.getAttribute('data-key');
+        var job = jobs.filter(function (j) { return j.key === key; })[0];
+        if (job && job.status === 'running' &&
+          !confirm('這個工作目前顯示「執行中」。如果它其實還在背景跑（只是比較慢），重新啟動可能讓兩個工作同時執行、\n' +
+            '互相覆蓋彼此的進度；確定它是卡住了（更新時間很久以前）才重新啟動。要繼續嗎？')) return;
         withSpin(callServer('restartJob', key)).then(function () {
           loadJobQueue_();
           // 順便接上該 job 自己頁籤上的進度輪詢，不用切過去該頁籤才看得到即時進度。
           if (key === 'analysis') pollAnalysisJob_();
           else if (key === 'backfill') pollBackfillStatus_();
           else if (key === 'factorRegression') pollFactorRegressionJob_();
+        }).catch(function (err) { alert(err.message || err); });
+      });
+    });
+    listEl.querySelectorAll('.job-delete-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-key');
+        if (!confirm('確定要清除這個背景工作的狀態嗎？如果它其實還在執行中，清除只是不再顯示/追蹤，\n' +
+          '不會真的中斷那次執行，它跑完後寫回的結果可能會讓這張卡片重新出現。')) return;
+        withSpin(callServer('deleteJob', key)).then(function () {
+          stopJobPollByKey_(key);
+          loadJobQueue_();
         }).catch(function (err) { alert(err.message || err); });
       });
     });

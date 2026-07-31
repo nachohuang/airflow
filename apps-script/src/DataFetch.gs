@@ -326,6 +326,21 @@ function cancelBackfillJob() {
 }
 
 /**
+ * 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器，
+ * 回到乾淨的 idle。用在觸發器不知道為什麼沒有真的被 Apps Script 觸發、狀態卡在 running
+ * 卻再也不會有進度的情況——這種情況下 cancelBackfillJob() 也沒用（它假設還會有下一次
+ * tick 來看到 cancelled 狀態，但卡住的工作根本不會再有下一次 tick）。
+ * 如果那個卡住的執行其實還是活的（只是很慢），刪除並不會真的中斷它，只是不再顯示/追蹤，
+ * 它跑完後寫回的狀態會覆蓋掉這次刪除——這是 Apps Script 觸發器機制本身的限制，無法從
+ * 另一次執行裡強制終止一次正在跑的執行。
+ */
+function clearBackfillJob_() {
+  deleteBackfillJobTriggers_();
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.BACKFILL_JOB_STATE);
+  return { status: 'idle' };
+}
+
+/**
  * 真正做事的地方，由時間觸發器呼叫（不是 google.script.run），完全不受瀏覽器分頁影響。
  * 有 4.5 分鐘內部時間預算，時間到了就存好目前進度、排下一次 tick 繼續，直到整段
  * 區間跑完、被取消，或遇到未預期的例外（會被接住寫進 job 狀態變成 status:'error'，

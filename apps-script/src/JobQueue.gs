@@ -50,7 +50,7 @@ function jobQueueDetail_(key, state) {
   return '';
 }
 
-/** 前端「排程佇列」區塊呼叫：回傳三個背景 job 目前各自的狀態、進度摘要、能不能重啟。 */
+/** 前端「排程佇列」區塊呼叫：回傳三個背景 job 目前各自的狀態、進度摘要、能不能重啟/刪除。 */
 function getJobQueueOverview() {
   return jobQueueDefs_().map(function (def) {
     var state = def.getStatus() || { status: 'idle' };
@@ -62,12 +62,20 @@ function getJobQueueOverview() {
       updatedAt: state.updatedAt || null,
       detail: jobQueueDetail_(def.key, state),
       errorMessage: state.errorMessage || null,
-      canRestart: status === 'error' || (def.key === 'backfill' && status === 'cancelled')
+      // running 也允許重啟：時間觸發器有時候不知道什麼原因就是沒有真的被 Apps Script 觸發，
+      // 狀態會卡在 running 卻再也不會有進度更新，跟 error/cancelled 一樣需要使用者手動介入，
+      // 不能只靠等待（等不到）。是否真的卡住由使用者自己看「更新時間」判斷。
+      canRestart: status === 'error' || status === 'running' || (def.key === 'backfill' && status === 'cancelled'),
+      canDelete: status !== 'idle'
     };
   });
 }
 
-/** 排程佇列的「重新啟動」按鈕呼叫：用該 job 上一次的參數重新排一次背景工作。 */
+/** 排程佇列的「重新啟動」按鈕呼叫：用該 job 上一次的參數重新排一次背景工作。
+ *  如果目前狀態其實還在執行中（不是卡住，只是比較慢），重新啟動不會中斷那次執行——
+ *  Apps Script 沒有辦法從另一次執行裡強制終止一次正在跑的觸發器執行，兩邊都跑完後，
+ *  最後寫回狀態的那個會蓋過另一個，這是背景 job 用時間觸發器實作時無法避免的限制，
+ *  前端按鈕會在使用者按下時另外提示一次。 */
 function restartJob(key) {
   if (key === 'analysis') return startAnalysisJob();
   if (key === 'backfill') {
@@ -79,5 +87,13 @@ function restartJob(key) {
     var regressionState = getFactorRegressionJobStatus();
     return startFactorRegressionJob(regressionState && regressionState.l1Reg);
   }
+  throw new Error('未知的工作類型：' + key);
+}
+
+/** 排程佇列的「刪除」按鈕呼叫：轉派給各自檔案的 clearXJob_，不管目前狀態是什麼都清回 idle。 */
+function deleteJob(key) {
+  if (key === 'analysis') return clearAnalysisJob_();
+  if (key === 'backfill') return clearBackfillJob_();
+  if (key === 'factorRegression') return clearFactorRegressionJob_();
   throw new Error('未知的工作類型：' + key);
 }
