@@ -136,6 +136,16 @@ function summarizeWeights_(weightRows) {
   return out;
 }
 
+/** 依權重絕對值排序，取前 count 個因子欄位名稱（給「目前生效模型」卡片列出「關鍵影響因子」
+ *  用，權重絕對值愈大代表這個因子對預測結果的影響愈大，不分正負向）。抽成獨立的純函式，
+ *  不用真的接 BigQuery/Sheets 就能測試。 */
+function topWeightedFeatures_(weights, count) {
+  if (!weights) return [];
+  return Object.keys(weights).sort(function (a, b) {
+    return Math.abs(weights[b]) - Math.abs(weights[a]);
+  }).slice(0, count || 5);
+}
+
 /**
  * 用套用中的一組 BQML 權重，對 Analysis.gs 已經算好因子的一列資料算出 Σ(權重 × 因子值)。
  * row 是 computeFactors_ 算完後的列（Inst_Participation / IBF_20D / ... 都已經在上面）。
@@ -331,19 +341,25 @@ function getFactorModelHistory(limit) {
   return rows.slice(0, limit || 50).map(sanitizeRowForRpc_);
 }
 
-/** 前端：把某一筆歷史紀錄標記為「目前套用版本」（同一個 label 只會有一筆被標記）。
- *  timestamp 是前端從 getFactorModelHistory() 拿到、已經過 sanitizeRowForRpc_ 正規化的字串；
- *  這裡讀回來的 r['執行時間'] 則可能是 Sheets 自動轉型出來的 Date 物件（要看那一列是不是
- *  剛好碰上自動轉型），兩邊都要正規化成同樣格式才能正確比對，不能直接用 === 比字串跟
- *  Date 物件。 */
-function applyFactorModel(timestamp, labelKey) {
+/**
+ * 前端：把某一次「執行因子迴歸」（timestamp）產生的所有 label（1個月報酬 + 抗跌力）一起
+ * 標記為「目前套用版本」，同時清掉其他所有版本（不管哪個 label）的套用標記。
+ *
+ * 套用刻意做成「整個版本」等級的動作，不是兩個 label 各自獨立套用——原本可以分開套用會導致
+ * 「目前生效的到底是哪一版」沒有單一答案（例如 1個月報酬用 A 版、抗跌力卻套用 B 版），
+ * 使用者在畫面上完全看不出這種不一致，也很難回答「這一版模型」對戰報的影響是什麼。
+ *
+ * timestamp 是前端從 getFactorModelHistory() 拿到、已經過 sanitizeRowForRpc_ 正規化的字串；
+ * 這裡讀回來的 r['執行時間'] 則可能是 Sheets 自動轉型出來的 Date 物件（要看那一列是不是
+ * 剛好碰上自動轉型），兩邊都要正規化成同樣格式才能正確比對，不能直接用 === 比字串跟
+ * Date 物件。
+ */
+function applyFactorModel(timestamp) {
   var sheet = getFactorModelHistorySheet_();
   var rows = readSheetObjects_(sheet);
   rows.forEach(function (r) {
-    if (r['標的Label'] === labelKey) {
-      var rowTimestamp = (r['執行時間'] instanceof Date) ? formatDateForRpc_(r['執行時間']) : r['執行時間'];
-      r['目前套用版本'] = (rowTimestamp === timestamp) ? '✓ 套用中' : '';
-    }
+    var rowTimestamp = (r['執行時間'] instanceof Date) ? formatDateForRpc_(r['執行時間']) : r['執行時間'];
+    r['目前套用版本'] = (rowTimestamp === timestamp) ? '✓ 套用中' : '';
   });
   writeSheetObjects_(sheet, CONFIG.FACTOR_MODEL_COLUMNS, rows);
   return { ok: true };
@@ -363,4 +379,37 @@ function getAppliedFactorModels() {
     }
   });
   return applied;
+}
+
+/**
+ * 前端「策略研究 > 因子回歸模型」的「🌟 目前生效模型」卡片專用：把 getAppliedFactorModels()
+ * 的原始資料整理成前端可以直接渲染的白話版本（人性化的中文因子名稱對照表放在前端
+ * JavaScript.html，這裡只回傳依權重絕對值排序好的原始 bq 欄位名稱清單）。
+ * sameVersion 標記兩個 label 目前套用的是不是同一次執行（正常情況下 applyFactorModel()
+ * 一定會讓兩者一致，這裡保留判斷是為了保護舊資料或未來手動改過 Sheet 的邊界情況）。
+ */
+function getActiveFactorModelSummary() {
+  var applied = getAppliedFactorModels();
+  var r1 = applied[CONFIG.FACTOR_LABELS.RETURN_1M.key];
+  var dr = applied[CONFIG.FACTOR_LABELS.DOWNSIDE_RESISTANCE.key];
+  if (!r1 && !dr) return { active: false };
+
+  function tsOf_(m) {
+    if (!m) return null;
+    return (m.timestamp instanceof Date) ? formatDateForRpc_(m.timestamp) : m.timestamp;
+  }
+  function summarize_(m) {
+    if (!m) return null;
+    return { timestamp: tsOf_(m), r2: m.r2, topFeatures: topWeightedFeatures_(m.weights, 5) };
+  }
+
+  var r1Timestamp = tsOf_(r1);
+  var drTimestamp = tsOf_(dr);
+
+  return {
+    active: true,
+    sameVersion: !!(r1Timestamp && drTimestamp && r1Timestamp === drTimestamp),
+    return1m: summarize_(r1),
+    downsideResistance: summarize_(dr)
+  };
 }

@@ -353,6 +353,23 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test computePredictedFactorScores_ (no applied models) passed.');
 }
 
+// --- topWeightedFeatures_：「目前生效模型」卡片列「關鍵影響因子」用，依權重絕對值排序，
+//     不分正負向（負權重代表因子越高分越不利，但影響力一樣大，不該被排到後面） ---
+{
+  // vm context 產生的陣列跟外層 Node realm 的 Array 建構子不同（跟本檔案其他測試碰過的
+  // cross-realm 問題一樣），deepStrictEqual 對建構子比對很嚴格，用 spread 複製成外層陣列再比對。
+  const weights = { inst_participation: 0.3, ibf_20d: -0.9, trend_score: 0.5, ma20_slope: 0.1, vol_ratio: -0.2, bias60: 0.05 };
+  const top3 = [...context.topWeightedFeatures_(weights, 3)];
+  assert.deepStrictEqual(top3, ['ibf_20d', 'trend_score', 'inst_participation'], '要依絕對值排序，負權重也要算進影響力大小');
+
+  const top5Default = [...context.topWeightedFeatures_(weights)];
+  assert.strictEqual(top5Default.length, 5, '不帶 count 預設取前 5 個');
+
+  assert.deepStrictEqual([...context.topWeightedFeatures_(null, 5)], [], 'weights 是 null 要回傳空陣列，不能拋例外');
+  assert.deepStrictEqual([...context.topWeightedFeatures_({}, 5)], [], '空物件要回傳空陣列');
+  console.log('Test topWeightedFeatures_ passed.');
+}
+
 // --- buildLatestDayFactorsSql_：今日戰報 BigQuery 模式的核心 SQL，逐項核對關鍵語意有沒有漏掉 ---
 {
   const sql = context.buildLatestDayFactorsSql_('proj.ds.history_materialized', '2026-03-01');

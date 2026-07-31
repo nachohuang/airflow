@@ -762,7 +762,79 @@
   }
 
   function loadResearchTab_() {
-    return Promise.all([loadFactorModelHistory_(), checkFactorRegressionJobOnLoad_()]);
+    return Promise.all([loadActiveFactorModelCard_(), loadFactorModelHistory_(), checkFactorRegressionJobOnLoad_()]);
+  }
+
+  // ---------- 因子回歸模型：人性化中文對照表 / R² 品質燈號 ----------
+
+  /** BQML 候選因子欄位代碼 -> 使用者看得懂的中文名詞（對照 Config.gs 的 FACTOR_CANDIDATE_COLUMNS
+   *  跟 Analysis.gs computeFactors_ 實際算法，跟後端欄位命名脫鉤，方便之後想換字眼不用動後端）。 */
+  var FACTOR_CODE_CN = {
+    inst_participation: '法人參與度',
+    inst_part_ma5: '法人參與度（5日均）',
+    ibf_20d: '下跌接手率',
+    trend_score: '趨勢動能',
+    ma20_slope: '20日均線斜率',
+    vol_ratio: '成交量放大倍數',
+    bias60: '60日乖離率',
+    dividend_yield: '殖利率',
+    pe_ratio: '本益比',
+    pb_ratio: '股價淨值比'
+  };
+  function factorCodeCn_(code) { return FACTOR_CODE_CN[code] || code; }
+
+  /** R2 是 0~1（甚至可能負值）的小數，畫面一律換算成百分比顯示；null/空字串/非數字一律顯示 '-'，
+   *  不能讓 fmtNum(null*100) 誤算成看起來像「剛好 0%」的假數字。 */
+  function pctOrDash_(v, digits) {
+    if (v === null || v === undefined || v === '') return '-';
+    var n = Number(v);
+    if (isNaN(n)) return '-';
+    return fmtNum(n * 100, digits === undefined ? 2 : digits) + '%';
+  }
+
+  /** 抗跌力／月報酬 R² 的白話品質燈號：>=8% 良好、4~8% 普通、<4% 偏弱（含負值）。 */
+  function r2Quality_(r2) {
+    if (r2 === null || r2 === undefined || r2 === '' || isNaN(Number(r2))) return { emoji: '⚪', text: '尚無資料' };
+    var pct = Number(r2) * 100;
+    if (pct >= 8) return { emoji: '🟢', text: '良好' };
+    if (pct >= 4) return { emoji: '🟡', text: '普通' };
+    return { emoji: '🔴', text: '偏弱' };
+  }
+
+  /** 「🌟 目前生效模型」卡片：白話呈現目前套用中的因子模型版本，見 FactorRegression.gs
+   *  的 getActiveFactorModelSummary()。 */
+  function loadActiveFactorModelCard_() {
+    var el = document.getElementById('factorActiveModelCard');
+    return callServer('getActiveFactorModelSummary').then(function (summary) {
+      renderActiveModelCard_(el, summary);
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  }
+
+  function renderActiveModelCard_(el, summary) {
+    if (!summary || !summary.active) {
+      el.innerHTML = '<div class="highlight-card hc-empty"><h3>🌟 目前沒有套用中的因子模型版本</h3>' +
+        '<div style="font-size:12px;">下面執行一次因子迴歸、套用其中一版之後，這裡會顯示白話版的模型效果。</div></div>';
+      return;
+    }
+    var r1 = summary.return1m, dr = summary.downsideResistance;
+    var versionLabel = summary.sameVersion ? (r1 ? r1.timestamp : dr.timestamp) :
+      [r1 ? ('1個月報酬 ' + r1.timestamp) : null, dr ? ('抗跌力 ' + dr.timestamp) : null].filter(function (s) { return s; }).join('　');
+
+    var r1Q = r1 ? r2Quality_(r1.r2) : null;
+    var drQ = dr ? r2Quality_(dr.r2) : null;
+    var factorCodes = (dr && dr.topFeatures.length) ? dr.topFeatures : (r1 ? r1.topFeatures : []);
+    var factorsHtml = factorCodes.length ? factorCodes.map(factorCodeCn_).join('、') : '（尚無權重資料）';
+
+    el.innerHTML =
+      '<div class="highlight-card">' +
+      '<h3>🌟 目前生效模型　' + escapeHtml(versionLabel) + ' 版</h3>' +
+      (r1 ? '<div class="hc-metric"><span>月報酬預測力</span>' +
+        '<span class="hc-metric-value">' + r1Q.emoji + ' ' + pctOrDash_(r1.r2) + '（' + r1Q.text + '）</span></div>' : '') +
+      (dr ? '<div class="hc-metric"><span>大盤抗跌預測力</span>' +
+        '<span class="hc-metric-value">' + drQ.emoji + ' ' + pctOrDash_(dr.r2) + '（' + drQ.text + '）</span></div>' : '') +
+      '<div class="hc-factors">關鍵影響因子：' + escapeHtml(factorsHtml) + '</div>' +
+      '<div class="hc-note">👉 此模型正用於「最新戰報」每檔股票的「因子模型預測分數」輔助欄位</div>' +
+      '</div>';
   }
 
   // ---------- AI 深度診斷設定 ----------
@@ -991,6 +1063,7 @@
    */
   document.getElementById('bqRegressionBtn').addEventListener('click', function () {
     var resultEl = document.getElementById('bqActionResult');
+    document.getElementById('factorCompareCard').innerHTML = '';
     resultEl.innerHTML = '<div class="loading">⏳ 背景執行因子迴歸中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，通常要一到兩分鐘...</div>';
     withSpin(callServer('startFactorRegressionJob', null)).then(function () {
       pollFactorRegressionJob_();
@@ -1019,19 +1092,77 @@
     factorRegressionPollTimer_ = setInterval(poll, 3000);
   }
 
+  /** job 完成後不直接把新模型的原始數字塞進畫面，而是先跟「目前套用中」的舊版本並列比較
+   *  （見 renderCompareCard_），使用者自己決定要不要套用——不然使用者永遠不知道這次重新訓練
+   *  到底有沒有比現在用的版本更好。 */
   function renderFactorRegressionJobResult_(state) {
     var resultEl = document.getElementById('bqActionResult');
-    if (state.status === 'error') { resultEl.innerHTML = errorBox('背景執行因子迴歸失敗：' + state.errorMessage); return; }
-    var rows = (state.results || []).map(function (r) {
-      if (r.error) return '<div class="meta-bar">' + escapeHtml(r.labelName || r.labelKey) + '：失敗（' + escapeHtml(r.error) + '）</div>';
-      var topFeatures = Object.keys(r.weights).slice(0, 5).map(function (k) {
-        return k + ': ' + fmtNum(r.weights[k], 4);
-      }).join('、');
-      return '<div class="meta-bar"><b>' + escapeHtml(r.labelName) + '</b>　R² = ' + fmtNum(r.r2, 4) +
-        '<br>權重最高的因子：' + escapeHtml(topFeatures) + '</div>';
-    }).join('');
-    resultEl.innerHTML = rows || '<div class="empty-hint">沒有結果</div>';
+    var compareEl = document.getElementById('factorCompareCard');
+    if (state.status === 'error') {
+      resultEl.innerHTML = errorBox('背景執行因子迴歸失敗：' + state.errorMessage);
+      compareEl.innerHTML = '';
+      return;
+    }
+    resultEl.innerHTML = '<div class="meta-bar">✅ 訓練完成，比對結果如下：</div>';
+    callServer('getActiveFactorModelSummary').then(function (activeSummary) {
+      renderCompareCard_(compareEl, state, activeSummary);
+    }).catch(function () {
+      renderCompareCard_(compareEl, state, { active: false });
+    });
     loadFactorModelHistory_();
+  }
+
+  /** 新舊模型效果比對卡片：「舊」是呼叫當下實際套用中的版本（訓練本身不會自動套用，
+   *  所以這裡查到的就是訓練開始前那個仍然生效的版本，不用另外在訓練前拍照存證）。 */
+  function renderCompareCard_(compareEl, state, activeSummary) {
+    var results = state.results || [];
+    if (!results.length) { compareEl.innerHTML = ''; return; }
+    var oldR2ByKey = {};
+    if (activeSummary && activeSummary.active) {
+      if (activeSummary.return1m) oldR2ByKey.return1m = activeSummary.return1m.r2;
+      if (activeSummary.downsideResistance) oldR2ByKey.downsideResistance = activeSummary.downsideResistance.r2;
+    }
+
+    var rowsHtml = results.map(function (r) {
+      if (r.error) {
+        return '<div class="compare-row"><span>' + escapeHtml(r.labelName || r.labelKey) + '</span>' +
+          '<span class="compare-delta down">訓練失敗：' + escapeHtml(r.error) + '</span></div>';
+      }
+      var oldR2 = oldR2ByKey[r.labelKey];
+      var hasOld = oldR2 !== undefined && oldR2 !== null && oldR2 !== '';
+      var deltaHtml;
+      if (hasOld) {
+        var deltaPct = (Number(r.r2) - Number(oldR2)) * 100;
+        var cls = deltaPct > 0.001 ? 'up' : (deltaPct < -0.001 ? 'down' : 'flat');
+        var arrow = deltaPct > 0.001 ? '📈 提升' : (deltaPct < -0.001 ? '📉 未提升' : '➡️ 持平');
+        deltaHtml = '<span class="compare-delta ' + cls + '">' + arrow + ' ' + (deltaPct >= 0 ? '+' : '') + fmtNum(deltaPct, 2) + '%</span>';
+      } else {
+        deltaHtml = '<span class="compare-delta">（目前沒有套用中的版本可比較）</span>';
+      }
+      return '<div class="compare-row"><span>' + escapeHtml(r.labelName) + '　新 R² ' + pctOrDash_(r.r2) +
+        (hasOld ? '　舊 R² ' + pctOrDash_(oldR2) : '') + '</span>' + deltaHtml + '</div>';
+    }).join('');
+
+    var hasSuccess = results.some(function (r) { return !r.error; });
+    compareEl.innerHTML = '<div class="compare-card"><h4>🆚 新舊模型效果比對（' + escapeHtml(state.timestamp) + ' 版）</h4>' +
+      rowsHtml +
+      (hasSuccess ? '<div class="form-actions" style="margin-top:10px;">' +
+        '<button type="button" class="btn-primary" id="factorApplyNewBtn">✅ 立即套用新版本</button>' +
+        '<button type="button" class="btn-secondary" id="factorDiscardNewBtn">放棄，保留現有版本</button>' +
+        '</div>' : '') +
+      '</div>';
+
+    if (!hasSuccess) return;
+    document.getElementById('factorApplyNewBtn').addEventListener('click', function () {
+      withSpin(callServer('applyFactorModel', state.timestamp)).then(function () {
+        compareEl.innerHTML = '<div class="meta-bar">✅ 已套用 ' + escapeHtml(state.timestamp) + ' 版</div>';
+        loadFactorModelHistory_();
+        loadActiveFactorModelCard_();
+      }).catch(function (err) { alert(err.message || err); });
+    });
+    document.getElementById('factorDiscardNewBtn').addEventListener('click', function () {
+      compareEl.innerHTML = '';
+    });
   }
 
   /** 「策略研究」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後，完全不知道背景工作
@@ -1048,26 +1179,47 @@
     }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
   }
 
+  /** 歷史版本紀錄：同一次「執行因子迴歸」會對兩個 label（1個月報酬 / 抗跌力）各寫一筆紀錄、
+   *  時間戳記相同，這裡按時間戳記分組成「一個版本一列」——套用也是整版一起套用（見
+   *  FactorRegression.gs applyFactorModel() 的說明），拆成兩行只會讓人搞不清楚「目前生效的
+   *  到底是哪一版」。 */
   function loadFactorModelHistory_() {
-    return callServer('getFactorModelHistory', 20).then(function (rows) {
+    return callServer('getFactorModelHistory', 40).then(function (rows) {
       var tableEl = document.getElementById('factorModelHistoryTable');
       if (!rows.length) { tableEl.innerHTML = '<div class="empty-hint">還沒有執行紀錄</div>'; return; }
-      var body = rows.map(function (r) {
-        return '<tr><td>' + escapeHtml(r['執行時間']) + '</td><td>' + escapeHtml(r['標的Label']) + '</td>' +
-          '<td>' + fmtNum(r['R2'], 4) + '</td><td>' + fmtNum(r['訓練列數'], 0) + '</td>' +
-          '<td>' + (r['目前套用版本'] || '') + '</td>' +
-          '<td><button data-ts="' + escapeHtml(r['執行時間']) + '" data-label="' + escapeHtml(r['標的Label']) + '">套用</button></td></tr>';
+
+      var byTs = {};
+      var order = [];
+      rows.forEach(function (r) {
+        var ts = r['執行時間'];
+        if (!byTs[ts]) { byTs[ts] = {}; order.push(ts); }
+        byTs[ts][r['標的Label']] = r;
+      });
+
+      var body = order.map(function (ts) {
+        var group = byTs[ts];
+        var r1 = group.return1m, dr = group.downsideResistance;
+        var applied = (r1 && String(r1['目前套用版本'] || '').indexOf('套用中') !== -1) ||
+          (dr && String(dr['目前套用版本'] || '').indexOf('套用中') !== -1);
+        var statusHtml = applied ? '<span style="color:var(--green);font-weight:700;">🟢 當前套用中</span>' : '—';
+        var actionHtml = applied ? '' :
+          '<button type="button" class="btn-secondary factor-apply-btn" data-ts="' + escapeHtml(ts) + '">切換套用此版本</button>';
+        return '<tr><td>' + escapeHtml(ts) + '</td>' +
+          '<td>' + (r1 ? pctOrDash_(r1['R2']) : '-') + '</td>' +
+          '<td>' + (dr ? pctOrDash_(dr['R2']) : '-') + '</td>' +
+          '<td>' + statusHtml + '</td><td>' + actionHtml + '</td></tr>';
       }).join('');
+
       tableEl.innerHTML = '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
-        '<th>執行時間</th><th>Label</th><th>R²</th><th>列數</th><th>狀態</th><th></th></tr></thead><tbody>' + body + '</tbody></table></div>';
-      tableEl.querySelectorAll('button[data-ts]').forEach(function (btn) {
+        '<th>執行時間</th><th>1個月報酬 R²</th><th>抗跌力 R²</th><th>狀態</th><th>操作</th></tr></thead><tbody>' + body + '</tbody></table></div>';
+      tableEl.querySelectorAll('.factor-apply-btn').forEach(function (btn) {
         btn.addEventListener('click', function () {
-          withSpin(callServer('applyFactorModel', btn.getAttribute('data-ts'), btn.getAttribute('data-label')))
-            .then(loadFactorModelHistory_)
+          withSpin(callServer('applyFactorModel', btn.getAttribute('data-ts')))
+            .then(function () { loadFactorModelHistory_(); loadActiveFactorModelCard_(); })
             .catch(function (err) { alert(err.message || err); });
         });
       });
-    });
+    }).catch(function (err) { document.getElementById('factorModelHistoryTable').innerHTML = errorBox(err); });
   }
 
   // ---------- 排程佇列（彙整三個背景 job 的狀態，見 JobQueue.gs） ----------

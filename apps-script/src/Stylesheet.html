@@ -240,4 +240,58 @@
     display: block; width: 100%; text-align: center; border: none; background: transparent;
     color: var(--text-muted); padding: 12px; font-size: 14px; cursor: pointer;
   }
+
+  /* 因子回歸模型「目前生效模型」卡片：故意用跟其他卡片不同的深色/高亮底色，
+     讓「這是目前真的在影響戰報的版本」在一堆歷史紀錄跟說明文字裡第一眼就看得到。 */
+  .highlight-card {
+    background: linear-gradient(135deg, #2563eb, #1e3a8a); color: #fff;
+    border-radius: 12px; padding: 16px; margin-bottom: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .highlight-card { background: linear-gradient(135deg, #1e3a8a, #172554); }
+  }
+  .highlight-card h3 { margin: 0 0 10px 0; font-size: 15px; }
+  .highlight-card.hc-empty { background: var(--card-bg); color: var(--text); border: 1px dashed var(--border); }
+  .highlight-card.hc-empty h3 { color: var(--text); }
+  .hc-metric {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  }
+  .highlight-card.hc-empty .hc-metric { border-bottom-color: var(--border); }
+  .hc-metric:last-of-type { border-bottom: none; }
+  .hc-metric-value { font-weight: 700; }
+  .hc-factors { font-size: 12px; margin-top: 8px; opacity: 0.92; line-height: 1.5; }
+  .hc-note {
+    font-size: 11px; margin-top: 10px; opacity: 0.8;
+    border-top: 1px dashed rgba(255, 255, 255, 0.3); padding-top: 8px;
+  }
+  .highlight-card.hc-empty .hc-note { border-top-color: var(--border); }
+
+  /* 摺疊式說明卡片（原本一大段文字改成點了才展開），用原生 <details> 不用額外寫開合邏輯。 */
+  details.info-collapse {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 14px; font-size: 13px;
+  }
+  details.info-collapse summary { cursor: pointer; font-weight: 600; list-style: none; }
+  details.info-collapse summary::-webkit-details-marker { display: none; }
+  details.info-collapse summary::before { content: '▸ '; }
+  details.info-collapse[open] summary::before { content: '▾ '; }
+  details.info-collapse[open] summary { margin-bottom: 8px; }
+  details.info-collapse .info-body { color: var(--text-muted); line-height: 1.6; }
+
+  /* 「執行因子迴歸」後跳出的新舊模型效果比對卡片。 */
+  .compare-card {
+    background: var(--card-bg); border: 2px solid var(--accent); border-radius: 12px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  .compare-card h4 { margin: 0 0 10px 0; font-size: 14px; }
+  .compare-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .compare-row:last-of-type { border-bottom: none; }
+  .compare-delta { font-weight: 700; white-space: nowrap; }
+  .compare-delta.up { color: var(--green); }
+  .compare-delta.down { color: var(--red); }
+  .compare-delta.flat { color: var(--text-muted); }
 </style>

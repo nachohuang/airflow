@@ -90,20 +90,27 @@
         </div>
 
         <div id="subtab-factorregression" class="sub-tab-panel">
-          <div class="meta-bar">
-            以大表所有欄位為基礎，用 BigQuery ML 找出目前最能預測「後續1個月報酬率」跟
-            「相對大盤抗跌力」的因子組合（多因子 LASSO 迴歸，比左邊的單因子相關性更深入），
-            結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。套用某一版之後，最新戰報會多顯示
-            一組「因子模型預測分數」供對照，但不會改變 Armor_Score 本身的選股邏輯。
-            GCP 專案 ID 與資料來源模式設定移到「系統與資料後台」頁籤最上方的「資料庫狀態」，
-            這裡只留「執行因子迴歸」跟歷史執行紀錄。
-          </div>
+          <div id="factorActiveModelCard"></div>
+
+          <details class="info-collapse">
+            <summary>ℹ️ 什麼是 BigQuery 因子回歸模型？</summary>
+            <div class="info-body">
+              以大表所有欄位為基礎，用 BigQuery ML 找出目前最能預測「後續1個月報酬率」跟
+              「相對大盤抗跌力」的因子組合（多因子 LASSO 迴歸，比左邊的單因子相關性更深入），
+              結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。套用某一版之後，最新戰報會多顯示
+              一組「因子模型預測分數」供對照，但不會改變 Armor_Score 本身的選股邏輯。
+              GCP 專案 ID 與資料來源模式設定移到「系統與資料後台」頁籤最上方的「資料庫狀態」，
+              這裡只留「執行因子迴歸」跟歷史執行紀錄。
+            </div>
+          </details>
+
           <div class="form-actions">
-            <button type="button" id="bqRegressionBtn" class="btn-primary">執行因子迴歸</button>
+            <button type="button" id="bqRegressionBtn" class="btn-primary">🚀 重新訓練並比對新模型</button>
           </div>
           <div id="bqActionResult"></div>
+          <div id="factorCompareCard"></div>
 
-          <h4 style="margin-top:14px;">執行紀錄</h4>
+          <h4 style="margin-top:14px;">📜 歷史版本紀錄</h4>
           <div id="factorModelHistoryTable"></div>
         </div>
       </section>
