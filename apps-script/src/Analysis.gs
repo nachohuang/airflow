@@ -202,7 +202,9 @@ function runAnalysis() {
     // scanRows 是空的代表連「最新一天」都讀不到任何一列資料——不是篩選篩掉，是資料來源
     // 那一關就沒東西可以篩。仍然附上 diagnostics（totalStocks 會是 0），讓呼叫端一眼看出
     // 「查無資料」跟「有資料但全部被篩掉」是兩件不同的事，不用另外猜。
-    return { latestDate: null, report: [], fullReport: [], diagnostics: computeScreeningStats_([], portfolioMap, null) };
+    var emptyDiagnostics = computeScreeningStats_([], portfolioMap, null);
+    emptyDiagnostics.reportCount = 0;
+    return { latestDate: null, report: [], fullReport: [], diagnostics: emptyDiagnostics };
   }
 
   var latestDateStr = scanRows[0]['日期'];
@@ -236,15 +238,20 @@ function runAnalysis() {
   report.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
   fullReport.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
 
+  // 一律附上篩選漏斗統計（不只 0 檔訊號才附），讓「查看篩選漏斗明細」隨時可用，也方便之後
+  // 換不同篩選/因子版本時比較漏斗人數的變化。reportCount 是這次實際跑出來的訊號數（跟
+  // report.length 同一個數字），讓 getScreeningDiagnostics() 的即時查詢分支能明確標出
+  // 「這次查到的資料實際上會產生幾檔訊號」，不用使用者自己拿漏斗最後幾關的數字去猜。
+  var diagnostics = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
+  diagnostics.reportCount = report.length;
+
   return {
     latestDate: latestDateStr,
     lookbackStart: computeLookbackStartStr_(latestDateStr),
     dataSourceMode: getEffectiveDataSourceMode_(),
     report: report,
     fullReport: fullReport,
-    // 一律附上篩選漏斗統計（不只 0 檔訊號才附），讓「查看篩選漏斗明細」隨時可用，也方便
-    // 之後換不同篩選/因子版本時比較漏斗人數的變化，不用等到剛好篩出 0 檔才看得到。
-    diagnostics: computeScreeningStats_(scanRows, portfolioMap, latestDateStr)
+    diagnostics: diagnostics
   };
 }
 
@@ -273,7 +280,14 @@ function runAnalysisAndSave() {
   var result = runAnalysis();
   // 篩選漏斗一律快取，即使這次連 latestDate 都沒有（scanRows 是空的）——這樣「查看篩選漏斗
   // 明細」在「完全查無資料」的情況下也能立刻顯示原因，不用另外重新讀一次歷史資料。
-  if (result.diagnostics) cacheScreeningDiagnostics_(result.diagnostics);
+  // savedToReport=true 標記這份漏斗統計是「真的存過 Reports 分頁」算出來的，跟
+  // getScreeningDiagnostics() 自己臨時查詢（不會存檔）算出來的漏斗要分清楚——不然使用者
+  // 會看到漏斗顯示「有 N 檔訊號」，回戰報頁卻還是「目前沒有任何戰報」，搞不清楚哪裡出問題
+  // （這份統計其實是另一次「只查不存」的呼叫算出來的，不是這次已經存檔的結果）。
+  if (result.diagnostics) {
+    result.diagnostics.savedToReport = true;
+    cacheScreeningDiagnostics_(result.diagnostics);
+  }
   if (!result.latestDate) return result;
 
   var sheet = getReportsSheet_();
@@ -485,18 +499,26 @@ function computeScreeningStats_(scanRows, portfolioMap, latestDateStr) {
 }
 
 /**
- * 前端「今日戰報」在 report.length === 0 時會自動呼叫這個函式並顯示結果。
- * 優先回傳今天稍早（不管是排程或這次呼叫本身）算過、快取在 Script Properties 裡的漏斗明細；
- * 沒有快取才真的重新讀一次歷史資料計算（例如今天第一次呼叫、還沒有任何快取的情況）。
+ * 「篩選漏斗明細」彈出視窗呼叫。優先回傳今天稍早（不管是「重新計算戰報」背景 job 或這次
+ * 呼叫本身）算過、快取在 Script Properties 裡的漏斗明細；沒有快取才真的重新讀一次歷史資料
+ * 計算（例如今天第一次呼叫、還沒有任何快取的情況）。
+ *
+ * 這裡故意呼叫完整的 runAnalysis()（會實際跑 diagnoseRow_ 判斷每一列的策略），而不是只呼叫
+ * computeScreeningStats_ 算漏斗關卡數字——因為漏斗最後一關的數字（例如「同時符合趨勢啟動
+ * 三條件」）不等於「實際會出現在戰報的訊號數」（診斷邏輯還有持股/止盈止損等其他分支），
+ * 要用同一套邏輯算出真正的訊號數（reportCount）才不會誤導。
+ * 但這裡「只算不存」，不會呼叫 upsertRowsByDate_ 寫回 Reports 分頁、也不會匯出 Excel
+ * 快照——只是讓使用者快速看一眼「如果現在按重新計算戰報，大概會有幾檔訊號」，savedToReport
+ * 標記為 false，前端會據此提醒「這是即時查詢結果，還沒有存成正式戰報」，避免使用者誤以為
+ * 看到漏斗有訊號、戰報頁卻還是空的是一個 bug。
  */
 function getScreeningDiagnostics() {
   var todayStr = normalizeDateStr(new Date());
   var stats = readCachedScreeningDiagnostics_(todayStr);
   if (!stats) {
-    var portfolioMap = getPortfolioMap_();
-    var scanRows = computeLatestDayRows_(portfolioMap);
-    var latestDateStr = scanRows.length > 0 ? scanRows[0]['日期'] : null;
-    stats = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
+    var analysis = runAnalysis();
+    stats = analysis.diagnostics;
+    stats.savedToReport = false;
     cacheScreeningDiagnostics_(stats);
   }
   stats.stages = screeningFunnelStages_(stats);

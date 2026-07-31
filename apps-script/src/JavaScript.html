@@ -120,7 +120,16 @@
       var rows = (d.stages || []).map(function (s) {
         return '<tr><td>' + escapeHtml(s.label) + '</td><td>' + fmtNum(s.count, 0) + (s.note ? '（' + escapeHtml(s.note) + '）' : '') + '</td></tr>';
       }).join('');
-      containerEl.innerHTML = '<div class="meta-bar">' + headerNote + '</div>' +
+      // savedToReport 是 false（明確標記過，不是舊快取沒有這個欄位的 undefined）代表這份漏斗
+      // 是「查看篩選漏斗明細」自己臨時算出來的，不是「重新計算戰報」存過的結果——如果剛好這次
+      // 查到有訊號，一定要講清楚「還沒存檔」，不然使用者會覺得漏斗有數字、戰報頁卻是空的很怪。
+      var unsavedNote = '';
+      if (d.savedToReport === false && d.reportCount > 0) {
+        unsavedNote = '<div class="error-box" style="margin-top:8px;">⚠️ 這是即時查詢結果：目前資料實際上會產生 ' +
+          fmtNum(d.reportCount, 0) + ' 檔訊號，但這次「查看篩選漏斗明細」不會存檔——回到戰報頁按右上角🔄選' +
+          '「重新計算戰報」才會真的存成正式戰報，並顯示在戰報列表裡。</div>';
+      }
+      containerEl.innerHTML = '<div class="meta-bar">' + headerNote + '</div>' + unsavedNote +
         (rows ? '<table class="simple-table"><tbody>' + rows + '</tbody></table>' +
           '<div class="meta-bar" style="margin-top:8px;">如果「無法計算」的數字接近總股票數，通常代表資料有問題（常見於 BigQuery external 模式欄位順序對錯）；' +
           '如果數字都正常但某一關就是掉到 0，代表確實沒有股票同時符合這麼嚴格的條件，是策略設計上會發生的正常情況。</div>' : '');

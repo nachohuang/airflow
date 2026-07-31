@@ -338,4 +338,52 @@ function buildSyntheticHistory(days) {
   console.log('Test 11 (runAnalysis with zero scanRows still attaches diagnostics) passed.');
 }
 
+// --- 12. runAnalysis()：diagnostics.reportCount 必須跟 result.report.length 一致——這是
+//    getScreeningDiagnostics() 拿來標「即時查詢會產生幾檔訊號」用的數字，如果跟實際存進
+//    Reports 分頁的訊號數對不上，使用者會看到漏斗說有訊號、戰報頁卻是空的，無從判斷是不是
+//    bug（這正是這個修正要解決的真實案例）---
+{
+  const originalCompute = context.computeLatestDayRows_;
+  const originalPortfolio = context.getPortfolioMap_;
+  const originalApplied = context.getAppliedFactorModels;
+  const originalPredicted = context.computePredictedFactorScores_;
+  const originalSourceMode = context.getEffectiveDataSourceMode_;
+
+  const syntheticRows = [
+    { // 持股：一定會產生訊號（持股守護／止盈止損），但不算在篩選漏斗裡
+      '證券代號': '9999', '證券名稱': '持股測試', '日期': '2026-07-21',
+      '收盤價': 97, Adjusted_Peak: 100, Armor_Score: 50,
+      '成交金額': 10000000, Trend_Score: 0, Inst_Part_Rank: null, Vol_Ratio_Rank: null, IBF_20D_Rank: null
+    },
+    { // 非持股，同時符合流動性/多頭/法人參與度/量能四條件 -> 應該產生「🚀 趨勢啟動」訊號
+      '證券代號': '1101', '證券名稱': '趨勢啟動測試', '日期': '2026-07-21',
+      '收盤價': 50, Adjusted_Peak: 50, Armor_Score: 90,
+      '成交金額': 200000000, Trend_Score: 2, Inst_Part_Rank: 0.9, Vol_Ratio_Rank: 0.9, IBF_20D_Rank: 0.5
+    },
+    { // 非持股，流動性不足 -> 全部條件都不算數，應該是 Neutral（不產生訊號）
+      '證券代號': '1102', '證券名稱': '流動性不足測試', '日期': '2026-07-21',
+      '收盤價': 30, Adjusted_Peak: 30, Armor_Score: 20,
+      '成交金額': 1000000, Trend_Score: 2, Inst_Part_Rank: 0.9, Vol_Ratio_Rank: 0.9, IBF_20D_Rank: 0.9
+    }
+  ];
+  context.computeLatestDayRows_ = function () { return syntheticRows; };
+  context.getPortfolioMap_ = function () { return { '9999': { cost: 90, buyDate: '2026-01-01' } }; };
+  context.getAppliedFactorModels = function () { return {}; };
+  context.computePredictedFactorScores_ = function () { return { predictedReturn1M: null, predictedDownsideResistance: null }; };
+  context.getEffectiveDataSourceMode_ = function () { return 'native'; };
+
+  const result = context.runAnalysis();
+  assert.strictEqual(result.report.length, 2, '持股 9999 + 趨勢啟動 1101 都應該產生訊號，1102 流動性不足應該是 Neutral');
+  assert.strictEqual(result.diagnostics.reportCount, result.report.length, 'diagnostics.reportCount 必須跟 report.length 一致');
+  assert.strictEqual(result.diagnostics.breakoutMatches, 1, '只有 1101 符合「趨勢啟動」三條件，持股 9999 不算在漏斗內');
+  assert.strictEqual(result.diagnostics.holdingCount, 1);
+
+  context.computeLatestDayRows_ = originalCompute;
+  context.getPortfolioMap_ = originalPortfolio;
+  context.getAppliedFactorModels = originalApplied;
+  context.computePredictedFactorScores_ = originalPredicted;
+  context.getEffectiveDataSourceMode_ = originalSourceMode;
+  console.log('Test 12 (runAnalysis diagnostics.reportCount matches report.length) passed.');
+}
+
 console.log('All Analysis.gs tests passed.');
