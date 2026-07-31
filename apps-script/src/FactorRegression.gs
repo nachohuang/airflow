@@ -246,6 +246,73 @@ function runFactorRegression(l1Reg) {
   return { timestamp: timestamp, results: results };
 }
 
+// ============================================================
+// 「執行因子迴歸」背景 job（機制跟 DataFetch.gs 的補抓 job／Analysis.gs 的重新計算 job 相同）。
+// BQML 訓練 + 評估 + 取權重要對兩個 label 各跑一輪，實測常常超過一般瀏覽器/行動網路能穩定
+// 撐住的連線時間，手機切到背景更容易直接把連線中斷、前端 success handler 永遠等不到，才會
+// 看到「NetworkError: 連線失敗，原因 HTTP 0」——即使 BigQuery 那邊其實還在跑或已經跑完。
+// 改用時間觸發器在背景做，前端只需要輪詢 getFactorRegressionJobStatus() 顯示進度。
+// ============================================================
+
+function getFactorRegressionJobState_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.FACTOR_REGRESSION_JOB_STATE);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveFactorRegressionJobState_(state) {
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.FACTOR_REGRESSION_JOB_STATE, JSON.stringify(state));
+}
+
+function deleteFactorRegressionJobTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'processFactorRegressionJobTick_') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/** 前端「執行因子迴歸」按鈕呼叫：排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，
+ *  實際訓練在另一次獨立觸發的執行裡進行，不受這次瀏覽器連線影響。 */
+function startFactorRegressionJob(l1Reg) {
+  deleteFactorRegressionJobTriggers_();
+  saveFactorRegressionJobState_({
+    status: 'running', l1Reg: l1Reg || CONFIG.FACTOR_MODEL_L1_REG_DEFAULT, updatedAt: Date.now()
+  });
+  ScriptApp.newTrigger('processFactorRegressionJobTick_').timeBased().after(1000).create();
+  return { status: 'running' };
+}
+
+/** 前端輪詢用：狀態存在 Script Properties，任何時候打開頁面呼叫都看得到最新進度或結果。 */
+function getFactorRegressionJobStatus() {
+  return getFactorRegressionJobState_() || { status: 'idle' };
+}
+
+/** 真正做事的地方，由時間觸發器呼叫，完全不受瀏覽器分頁影響。跟 processAnalysisJobTick_
+ *  一樣是單一批次（對兩個 label 各跑一次），沒有像補抓 job 那樣的時間預算/續跑機制。 */
+function processFactorRegressionJobTick_() {
+  deleteFactorRegressionJobTriggers_();
+  var state = getFactorRegressionJobState_();
+  if (!state || state.status !== 'running') return;
+
+  var startTime = Date.now();
+  try {
+    var res = runFactorRegression(state.l1Reg);
+    state.status = 'done';
+    state.timestamp = res.timestamp;
+    state.results = res.results;
+    state.updatedAt = Date.now();
+    saveFactorRegressionJobState_(state);
+    var okCount = res.results.filter(function (r) { return !r.error; }).length;
+    logRun_('因子迴歸', okCount === res.results.length ? '成功' : '部分失敗',
+      res.results.map(function (r) { return r.labelName + (r.error ? '：失敗' : '：R²=' + r.r2); }).join('、'),
+      Math.round((Date.now() - startTime) / 1000));
+  } catch (e) {
+    state.status = 'error';
+    state.errorMessage = String(e.message || e);
+    state.updatedAt = Date.now();
+    saveFactorRegressionJobState_(state);
+    logRun_('因子迴歸', '失敗', String(e.message || e), Math.round((Date.now() - startTime) / 1000));
+  }
+}
+
 /** 前端：取得歷史執行紀錄（新到舊）。 */
 function getFactorModelHistory(limit) {
   var rows = readSheetObjects_(getFactorModelHistorySheet_());

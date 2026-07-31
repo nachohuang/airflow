@@ -719,12 +719,13 @@
       loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
       loadHistoryFolderStatus_(),
       loadBqSettings_(), loadBqMaterializedStatus_(),
+      loadJobQueue_(),
       loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_()
     ]);
   }
 
   function loadResearchTab_() {
-    return loadFactorModelHistory_();
+    return Promise.all([loadFactorModelHistory_(), checkFactorRegressionJobOnLoad_()]);
   }
 
   // ---------- AI 深度診斷設定 ----------
@@ -895,22 +896,70 @@
     });
   }
 
+  /**
+   * 「執行因子迴歸」改成背景 job：BQML 對兩個 label 各跑一次訓練+評估+取權重，實測常常超過
+   * 手機瀏覽器能穩定撐住的連線時間，切到背景更容易連線直接中斷，變成「NetworkError: 連線
+   * 失敗，原因 HTTP 0」——即使 BigQuery 那邊其實還在跑或已經跑完。改成排背景 job 後，這次
+   * 呼叫只是「排工作」立刻回傳，前端改用輪詢 getFactorRegressionJobStatus() 顯示進度。
+   */
   document.getElementById('bqRegressionBtn').addEventListener('click', function () {
     var resultEl = document.getElementById('bqActionResult');
-    resultEl.innerHTML = '<div class="meta-bar">執行迴歸中，通常要一到兩分鐘...</div>';
-    withSpin(callServer('runFactorRegression', null)).then(function (res) {
-      var rows = res.results.map(function (r) {
-        if (r.error) return '<div class="meta-bar">' + escapeHtml(r.labelName || r.labelKey) + '：失敗（' + escapeHtml(r.error) + '）</div>';
-        var topFeatures = Object.keys(r.weights).slice(0, 5).map(function (k) {
-          return k + ': ' + fmtNum(r.weights[k], 4);
-        }).join('、');
-        return '<div class="meta-bar"><b>' + escapeHtml(r.labelName) + '</b>　R² = ' + fmtNum(r.r2, 4) +
-          '<br>權重最高的因子：' + escapeHtml(topFeatures) + '</div>';
-      }).join('');
-      resultEl.innerHTML = rows;
-      loadFactorModelHistory_();
+    resultEl.innerHTML = '<div class="loading">⏳ 背景執行因子迴歸中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，通常要一到兩分鐘...</div>';
+    withSpin(callServer('startFactorRegressionJob', null)).then(function () {
+      pollFactorRegressionJob_();
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
+
+  var factorRegressionPollTimer_ = null;
+  function stopFactorRegressionPoll_() {
+    if (factorRegressionPollTimer_) { clearInterval(factorRegressionPollTimer_); factorRegressionPollTimer_ = null; }
+  }
+
+  /** 背景工作是在獨立的時間觸發器裡跑的，這裡只是每隔幾秒讀一次目前狀態——就算這個分頁被
+   *  關掉、切到背景、輪詢中斷，工作本身完全不受影響。 */
+  function pollFactorRegressionJob_() {
+    stopFactorRegressionPoll_();
+    var poll = function () {
+      callServer('getFactorRegressionJobStatus').then(function (state) {
+        if (!state || state.status === 'running') return;
+        stopFactorRegressionPoll_();
+        renderFactorRegressionJobResult_(state);
+      }).catch(function () {
+        // 輪詢本身失敗（例如剛好網路不穩）不代表背景工作失敗，畫面維持現狀，下一次輪詢再試
+      });
+    };
+    poll();
+    factorRegressionPollTimer_ = setInterval(poll, 3000);
+  }
+
+  function renderFactorRegressionJobResult_(state) {
+    var resultEl = document.getElementById('bqActionResult');
+    if (state.status === 'error') { resultEl.innerHTML = errorBox('背景執行因子迴歸失敗：' + state.errorMessage); return; }
+    var rows = (state.results || []).map(function (r) {
+      if (r.error) return '<div class="meta-bar">' + escapeHtml(r.labelName || r.labelKey) + '：失敗（' + escapeHtml(r.error) + '）</div>';
+      var topFeatures = Object.keys(r.weights).slice(0, 5).map(function (k) {
+        return k + ': ' + fmtNum(r.weights[k], 4);
+      }).join('、');
+      return '<div class="meta-bar"><b>' + escapeHtml(r.labelName) + '</b>　R² = ' + fmtNum(r.r2, 4) +
+        '<br>權重最高的因子：' + escapeHtml(topFeatures) + '</div>';
+    }).join('');
+    resultEl.innerHTML = rows || '<div class="empty-hint">沒有結果</div>';
+    loadFactorModelHistory_();
+  }
+
+  /** 「策略研究」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後，完全不知道背景工作
+   *  跑到哪、甚至早就做完了。只有真的有 job（狀態是 running）時才顯示/開始輪詢。 */
+  function checkFactorRegressionJobOnLoad_() {
+    return callServer('getFactorRegressionJobStatus').then(function (state) {
+      if (state && state.status === 'running') {
+        document.getElementById('bqActionResult').innerHTML =
+          '<div class="loading">⏳ 背景執行因子迴歸中，可以切到別的畫面或關掉螢幕，不會中斷這個工作...</div>';
+        pollFactorRegressionJob_();
+        return;
+      }
+      if (state && (state.status === 'done' || state.status === 'error')) renderFactorRegressionJobResult_(state);
+    }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
+  }
 
   function loadFactorModelHistory_() {
     return callServer('getFactorModelHistory', 20).then(function (rows) {
@@ -933,6 +982,60 @@
       });
     });
   }
+
+  // ---------- 排程佇列（彙整三個背景 job 的狀態，見 JobQueue.gs） ----------
+  var JOB_STATUS_LABEL = { idle: '閒置', running: '⏳ 執行中', done: '✅ 完成', error: '⚠️ 錯誤', cancelled: '已取消' };
+  var JOB_STATUS_COLOR = {
+    idle: 'var(--text-muted)', running: 'var(--accent)', done: 'var(--green)',
+    error: 'var(--red)', cancelled: 'var(--amber)'
+  };
+  var jobQueuePollTimer_ = null;
+
+  function stopJobQueuePoll_() {
+    if (jobQueuePollTimer_) { clearInterval(jobQueuePollTimer_); jobQueuePollTimer_ = null; }
+  }
+
+  function loadJobQueue_() {
+    var listEl = document.getElementById('jobQueueList');
+    return callServer('getJobQueueOverview').then(renderJobQueue_).catch(function (err) { listEl.innerHTML = errorBox(err); });
+  }
+
+  function renderJobQueue_(jobs) {
+    var listEl = document.getElementById('jobQueueList');
+    listEl.innerHTML = jobs.map(function (j) {
+      var statusLabel = JOB_STATUS_LABEL[j.status] || j.status;
+      var color = JOB_STATUS_COLOR[j.status] || 'var(--text)';
+      var updatedLabel = j.updatedAt ? new Date(j.updatedAt).toLocaleString('zh-TW') : '';
+      return '<div class="stock-card">' +
+        '<div class="stock-card-head"><span class="stock-card-code">' + escapeHtml(j.label) + '</span>' +
+        '<span style="color:' + color + '; font-weight:700;">' + escapeHtml(statusLabel) + '</span></div>' +
+        (updatedLabel ? '<div class="stock-card-note">更新時間：' + escapeHtml(updatedLabel) + '</div>' : '') +
+        (j.detail ? '<div class="stock-card-note">' + escapeHtml(j.detail) + '</div>' : '') +
+        (j.errorMessage ? '<div class="error-box" style="margin-top:6px;">' + escapeHtml(j.errorMessage) + '</div>' : '') +
+        (j.canRestart ? '<div class="form-actions"><button type="button" class="btn-secondary job-restart-btn" data-key="' + escapeHtml(j.key) + '">重新啟動</button></div>' : '') +
+        '</div>';
+    }).join('');
+    listEl.querySelectorAll('.job-restart-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-key');
+        withSpin(callServer('restartJob', key)).then(function () {
+          loadJobQueue_();
+          // 順便接上該 job 自己頁籤上的進度輪詢，不用切過去該頁籤才看得到即時進度。
+          if (key === 'analysis') pollAnalysisJob_();
+          else if (key === 'backfill') pollBackfillStatus_();
+          else if (key === 'factorRegression') pollFactorRegressionJob_();
+        }).catch(function (err) { alert(err.message || err); });
+      });
+    });
+    // 只要還有工作在跑，就每隔幾秒自動重新整理這個區塊；全部結束就停止輪詢，避免無意義的背景請求。
+    if (jobs.some(function (j) { return j.status === 'running'; })) {
+      if (!jobQueuePollTimer_) jobQueuePollTimer_ = setInterval(loadJobQueue_, 4000);
+    } else {
+      stopJobQueuePoll_();
+    }
+  }
+
+  document.getElementById('jobQueueRefreshBtn').addEventListener('click', function () { withSpin(loadJobQueue_()); });
 
   function loadScheduleSettings() {
     return callServer('getScheduleSettings').then(function (s) {

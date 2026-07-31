@@ -156,6 +156,19 @@
         </div>
 
         <div class="admin-section">
+          <h3>排程佇列</h3>
+          <div class="meta-bar">
+            這裡的三種背景工作（重新計算戰報／資料範圍重新彙整／因子迴歸模型）都是排時間觸發器
+            在背景執行，不管在哪個分頁、哪台裝置觸發的都看得到目前狀態；卡在「執行中」太久或
+            變成「錯誤」，可以直接在這裡重新啟動，不用回到各自的頁籤重新操作一次。
+          </div>
+          <div class="form-actions">
+            <button type="button" id="jobQueueRefreshBtn" class="btn-secondary">重新整理</button>
+          </div>
+          <div id="jobQueueList" class="card-list"></div>
+        </div>
+
+        <div class="admin-section">
           <h3>資料總覽</h3>
           <div class="meta-bar">目前資料來源模式下的歷史資料範圍。</div>
           <div class="form-actions">
