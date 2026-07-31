@@ -1475,7 +1475,17 @@
         if (!confirm('確定要刪除這 ' + r.count + ' 列格式錯誤的資料嗎？刪除後要另外重新抓取那幾天，這個動作無法復原。')) return;
         el.innerHTML = '<div class="loading">刪除中...</div>';
         withSpin(callServer('cleanupMalformedDateRows')).then(function (res) {
-          el.innerHTML = '<div class="meta-bar">✅ 已刪除 ' + fmtNum(res.deletedCount, 0) + ' 列，記得到「手動抓取/重新彙整區間」重新抓那幾天的資料。</div>';
+          var dates = res.affectedDates || [];
+          var rangeNote = dates.length ? ('，受影響日期：' + dates[0] + ' ~ ' + dates[dates.length - 1] + '（共 ' + dates.length + ' 天）') : '';
+          el.innerHTML = '<div class="meta-bar">✅ 已刪除 ' + fmtNum(res.deletedCount, 0) + ' 列' + rangeNote + '。</div>' +
+            (dates.length ? '<div class="form-actions"><button type="button" class="btn-primary" id="malformedDateFillRemergeBtn">填入下面「手動抓取/重新彙整區間」表單</button></div>' : '');
+          if (dates.length) {
+            document.getElementById('malformedDateFillRemergeBtn').addEventListener('click', function () {
+              document.getElementById('remergeStart').value = dates[0];
+              document.getElementById('remergeEnd').value = dates[dates.length - 1];
+              document.getElementById('remergeStart').scrollIntoView({ behavior: 'smooth', block: 'center' });
+            });
+          }
         }).catch(function (err) { el.innerHTML = errorBox(err); });
       });
     }).catch(function (err) { el.innerHTML = errorBox(err); });

@@ -92,7 +92,11 @@ loadIntoContext('FactorRegression.gs');
   const deleteSql = context.buildDeleteMalformedDateRowsSql_('proj.ds.history_raw');
   assert.ok(deleteSql.indexOf('DELETE FROM `proj.ds.history_raw`') === 0);
   assert.ok(deleteSql.indexOf("NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')") !== -1);
-  console.log('Test buildMalformedDateCountSql_ / buildDeleteMalformedDateRowsSql_ passed.');
+
+  const distinctSql = context.buildMalformedDateDistinctSql_('proj.ds.history_raw');
+  assert.ok(distinctSql.indexOf('SELECT DISTINCT date_str FROM `proj.ds.history_raw`') === 0);
+  assert.ok(distinctSql.indexOf("NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')") !== -1);
+  console.log('Test buildMalformedDateCountSql_ / buildDeleteMalformedDateRowsSql_ / buildMalformedDateDistinctSql_ passed.');
 }
 
 // --- normalizeRowsDateField_：寫進 history_raw 前把 formatSlashDate_ 的 'yyyy/MM/dd' 轉成

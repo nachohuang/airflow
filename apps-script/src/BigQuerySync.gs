@@ -74,6 +74,12 @@ function buildDeleteMalformedDateRowsSql_(fullTableRef) {
   return "DELETE FROM `" + fullTableRef + "` WHERE NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')";
 }
 
+/** 刪除前先查一次「格式錯誤的列實際上是哪幾天」的相異 date_str 清單——不查的話刪完就不知道
+ *  要重新抓哪幾天，使用者只能用猜的（正是這次要解決的問題：刪完不知道怎麼重跑）。 */
+function buildMalformedDateDistinctSql_(fullTableRef) {
+  return "SELECT DISTINCT date_str FROM `" + fullTableRef + "` WHERE NOT REGEXP_CONTAINS(date_str, r'^\\d{4}-\\d{2}-\\d{2}$')";
+}
+
 /** BigQuery 外部資料表（讀 Google Drive 檔案）要求的 URI 格式。 */
 function buildDriveFileUri_(fileId) {
   return 'https://drive.google.com/open?id=' + fileId;
@@ -1264,15 +1270,21 @@ function getMalformedDateRowCount() {
 
 /** 前端「清理格式錯誤的日期資料」按鈕：刪掉 history_raw 裡 date_str 格式不對的列。
  *  清掉之後那幾天就沒有資料了，要另外用「手動抓取/重新彙整區間」把那幾天重新抓一次
- *  （這次寫入時 upsertHistoryRowsToBigQuery_ 已經會正規化成 yyyy-MM-dd，不會再壞掉）。 */
+ *  （這次寫入時 upsertHistoryRowsToBigQuery_ 已經會正規化成 yyyy-MM-dd，不會再壞掉）。
+ *  刪除前先查一次實際受影響的日期清單（用 normalizeDateStr 轉成正常格式），一起回傳給前端，
+ *  不然使用者刪完只知道「刪了幾列」，不知道要重新抓哪幾天。 */
 function cleanupMalformedDateRows() {
   var settings = requireBigQueryProjectId_();
-  var before = getMalformedDateRowCount().count;
+  var distinctRows = runBqQuery_(buildMalformedDateDistinctSql_(bqRawTableRef_(settings)), 'malformed_date_check');
+  var affectedDates = distinctRows.map(function (r) { return normalizeDateStr(r.date_str); }).sort();
+  var before = distinctRows.length ? getMalformedDateRowCount().count : 0;
   if (before > 0) {
     runBqQuery_(buildDeleteMalformedDateRowsSql_(bqRawTableRef_(settings)), 'cleanup_malformed_dates');
   }
-  logRun_('清理日期格式錯誤資料', '成功', '刪除 ' + before + ' 列 history_raw 裡 date_str 格式不是 yyyy-MM-dd 的資料', 0);
-  return { deletedCount: before };
+  logRun_('清理日期格式錯誤資料', '成功',
+    '刪除 ' + before + ' 列 history_raw 裡 date_str 格式不是 yyyy-MM-dd 的資料（受影響日期：' +
+    (affectedDates.length ? affectedDates.join(', ') : '無') + '）', 0);
+  return { deletedCount: before, affectedDates: affectedDates };
 }
 
 /** 前端「立即重新整理」按鈕（materialized 模式）：強制重新整理，不管多久前才整理過。 */
