@@ -119,8 +119,11 @@ function getAiSettings() {
   };
 }
 
+/** topN 上限是 3：每日自動選股改成跟 runAiTopPicks() 共用同一套 AI 橫向比較 prompt
+ *  （AI_TOP_PICKS_SYSTEM_PROMPT 固定要求輸出正好前三檔），不再是單純依 Armor_Score 排序
+ *  取前 N 檔，所以 topN 超過 3 也不會有更多檔數可選。 */
 function setAiDailySettings(enabled, topN) {
-  var n = Math.max(1, Math.min(10, parseInt(topN, 10) || CONFIG.AI_DAILY_TOP_N_DEFAULT));
+  var n = Math.max(1, Math.min(3, parseInt(topN, 10) || CONFIG.AI_DAILY_TOP_N_DEFAULT));
   var props = PropertiesService.getScriptProperties();
   props.setProperty(CONFIG.PROP_KEYS.AI_DAILY_ENABLED, enabled ? 'true' : 'false');
   props.setProperty(CONFIG.PROP_KEYS.AI_DAILY_TOP_N, String(n));
@@ -471,27 +474,55 @@ function runAiDiagnosis(codes) {
   return results;
 }
 
-/** 每日排程呼叫：如果有開啟「每日自動 AI 診斷」，對當天 Armor_Score 前 N 名非 Neutral 訊號自動跑一次。 */
+/**
+ * 每日排程呼叫：如果有開啟「每日自動 AI 診斷」，選股方式跟手動的「🧠 AI 掃描全部候選，
+ * 推薦前三檔」按鈕（runAiTopPicks()）共用同一套邏輯——不是單純依 Armor_Score 高低排序取前
+ * 幾名，而是先讓 AI 用 AI_TOP_PICKS_SYSTEM_PROMPT 的橫向比較 prompt 看過當天全部候選的
+ * 量化資料選出最值得優先投入的幾檔，取出 AI 選出的代號後，才對這幾檔各自執行「AI 深度診斷」
+ * （runAiDiagnosis，會另外抓 Goodinfo 財報/籌碼資料做完整查核）——兩層診斷缺一不可：
+ * 第一層負責「從一整批候選裡挑出誰值得看」，第二層才是真正深入查核個股。
+ */
 function runDailyAiDiagnosisForTopPicks() {
   var settings = getAiSettings();
   if (!settings.dailyEnabled) return { skipped: true, reason: '每日自動 AI 診斷未開啟' };
   var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
   if (!hasKey) return { skipped: true, reason: '尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰' };
 
-  var reportRows = readSheetObjects_(getReportsSheet_());
-  var latestDate = null;
-  reportRows.forEach(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    if (!latestDate || d > latestDate) latestDate = d;
+  var topPicks;
+  try {
+    topPicks = runAiTopPicks();
+  } catch (e) {
+    return { skipped: true, reason: String(e.message || e) };
+  }
+
+  var topCodes = extractTopPickCodes_(topPicks.text, Math.min(settings.topN || 3, 3));
+  if (topCodes.length === 0) return { skipped: true, reason: '無法從 AI 橫向比較結果中取出股票代號' };
+
+  return {
+    skipped: false,
+    topPicksText: topPicks.text,
+    topPicksCost: topPicks.cost,
+    results: runAiDiagnosis(topCodes)
+  };
+}
+
+/**
+ * 從 runAiTopPicks() 回傳的 markdown 文字裡取出前幾名的股票代號，供每日排程接著餵給
+ * runAiDiagnosis() 做深度診斷。AI_TOP_PICKS_SYSTEM_PROMPT 規定的輸出格式固定是
+ * 「### 🥇/🥈/🥉 [代號 名稱]（Armor_Score: xx）」，代號一定緊接在獎牌 emoji 後面、
+ * 以空白分隔，用逐行比對行首格式取出即可，不需要完整的 markdown parser。
+ */
+function extractTopPickCodes_(text, maxCount) {
+  if (!text) return [];
+  // 獎牌 emoji 是 astral 字元（UTF-16 surrogate pair），字元類別 [🥇🥈🥉] 在沒有 /u 旗標時
+  // 會被拆成兩個 code unit 誤判，必須用 (?:a|b|c) 交替寫法 + /u 旗標才能正確比對。
+  var re = /^###\s*(?:🥇|🥈|🥉)\s*(\d{3,6})/u;
+  var codes = [];
+  String(text).split('\n').forEach(function (line) {
+    var m = re.exec(line.trim());
+    if (m) codes.push(zfill4(m[1]));
   });
-  if (!latestDate) return { skipped: true, reason: '目前沒有戰報資料' };
-
-  var todayRows = reportRows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDate; });
-  todayRows.sort(function (a, b) { return toNumber(b['Armor_Score']) - toNumber(a['Armor_Score']); });
-  var topCodes = todayRows.slice(0, settings.topN).map(function (r) { return r['證券代號']; });
-
-  if (topCodes.length === 0) return { skipped: true, reason: '今天沒有非 Neutral 的訊號' };
-  return { skipped: false, results: runAiDiagnosis(topCodes) };
+  return maxCount ? codes.slice(0, maxCount) : codes;
 }
 
 // ---------------- AI 掃描全部候選、推薦前三檔 ----------------

@@ -23,6 +23,7 @@ function loadIntoContext(relPath) {
   vm.runInContext(code, context, { filename: relPath });
 }
 loadIntoContext('Config.gs');
+loadIntoContext('Utils.gs');
 loadIntoContext('AiDiagnosis.gs');
 
 function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < eps; }
@@ -80,6 +81,40 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   assert.ok(prompt.indexOf('2890 永豐金') !== -1);
   assert.ok(prompt.indexOf('台股監控 2026-07-31 10:00') !== -1);
   console.log('Test 5 (buildTopPicksPrompt_) passed.');
+}
+
+// --- 6. extractTopPickCodes_：從 AI_TOP_PICKS_SYSTEM_PROMPT 規定的 markdown 輸出格式
+//    （### 🥇/🥈/🥉 [代號 名稱]（Armor_Score: xx）開頭）取出股票代號，供每日排程接著餵給
+//    runAiDiagnosis() 做深度診斷 ---
+{
+  const text = [
+    '## 🏆 戰報候選橫向比較：Top 3 推薦',
+    '> **候選檔數：** 42 檔　**比較基準時間：** 台股監控 2026-07-31 10:00',
+    '',
+    '### 🥇 2603 長榮（Armor_Score: 105.5）',
+    '- **入選理由：** blah',
+    '',
+    '### 🥈 2890 永豐金（Armor_Score: 103.2）',
+    '- **入選理由：** blah',
+    '',
+    '### 🥉 330 某某（Armor_Score: 99.1）',
+    '- **入選理由：** blah',
+    '',
+    '### 👀 分數亮眼但暫不推薦',
+    '（2317 鴻海：集中度風險）'
+  ].join('\n');
+
+  // vm context 產生的陣列跟外層 Node realm 的 Array 建構子不同（跟本檔案其他測試碰過的
+  // cross-realm 問題一樣），deepStrictEqual 對建構子比對很嚴格，用 spread 複製成外層陣列再比對。
+  const codes = [...context.extractTopPickCodes_(text)];
+  assert.deepStrictEqual(codes, ['2603', '2890', '0330'], '要依序取出三檔代號，不足 4 碼要補零，且不能誤抓「分數亮眼但暫不推薦」段落裡的代號');
+
+  const capped = [...context.extractTopPickCodes_(text, 2)];
+  assert.deepStrictEqual(capped, ['2603', '2890'], 'maxCount 要能限制取出的檔數');
+
+  assert.deepStrictEqual([...context.extractTopPickCodes_('')], [], '空字串要回傳空陣列，不能拋例外');
+  assert.deepStrictEqual([...context.extractTopPickCodes_('沒有任何符合格式的內容')], [], '格式不符時要回傳空陣列');
+  console.log('Test 6 (extractTopPickCodes_) passed.');
 }
 
 console.log('All AiDiagnosis.gs tests passed.');

@@ -414,7 +414,18 @@ function runManualFetchToday() {
   }
 }
 
-/** 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。 */
+/**
+ * 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。
+ * 執行順序：
+ *   1. 檢查大表目前最新資料日期（getHistoryOverview().max）
+ *   2. 從「最新日期的隔天」逐天抓到「執行當日」——不是只抓今天一天，這樣就算排程曾經
+ *      中斷過幾天（某次執行失敗、機器沒開機…），下次執行也會自動把中間漏掉的每一天補齊。
+ *   3. 完成後，materialized 模式下重新整理進 BigQuery 原生表
+ *   4. 完成後，重新計算戰報（runAnalysisAndSave 本來就會自動用歷史資料裡最新的一天）
+ *   5. 完成後，跑每日自動 AI 診斷（選股邏輯見 runDailyAiDiagnosisForTopPicks 的說明）
+ * 即使第 2 步有某幾天抓取失敗，仍然照常往下跑 3~5 步、沿用目前既有的歷史資料——理由跟
+ * runManualFullUpdate() 一樣：不該因為某一天抓不到就完全沒有戰報可看。
+ */
 function scheduledDailyFetch() {
   var startTime = Date.now();
   var today = new Date();
@@ -423,35 +434,73 @@ function scheduledDailyFetch() {
     logRun_('每日排程', '略過', skip.reason, 0);
     return;
   }
-  var ymd = formatYmd_(today);
-  var slash = formatSlashDate_(today);
+
+  var settings = getScheduleSettings();
+  var todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  // 1. 檢查大表目前最新資料日期，決定要從哪一天開始補抓；抓不到既有最新日期時
+  //    （例如全新安裝、或查詢本身失敗）退回只抓「今天」，維持排程不中斷。
+  var cursor = null;
   try {
-    var rows = fetchAndMergeOneDay_(ymd, slash);
-    upsertHistoryRows_(rows);
-    try {
-      // materialized 模式下，today 剛寫進 Drive 的新資料要先重新整理進 BigQuery 原生表，
-      // 不然 runAnalysisAndSave() 可能讀到「重新整理間隔還沒到」的舊版本，漏掉今天這筆。
-      var bqSettings = getBigQuerySettings();
-      if (bqSettings.projectId && bqSettings.sourceMode === 'materialized') {
-        materializeHistoryTableIfStale_(0);
-      }
-    } catch (materializeErr) {
-      logRun_('每日排程-BigQuery整理', '失敗', String(materializeErr.message || materializeErr), 0);
+    var overview = getHistoryOverview();
+    if (overview && overview.max) {
+      var next = new Date(overview.max + 'T00:00:00');
+      next.setDate(next.getDate() + 1);
+      cursor = new Date(next.getFullYear(), next.getMonth(), next.getDate());
     }
-    try {
-      runAnalysisAndSave();
-    } catch (analysisErr) {
-      logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);
-    }
-    try {
-      runDailyAiDiagnosisForTopPicks();
-    } catch (aiErr) {
-      logRun_('每日排程-AI診斷', '失敗', String(aiErr.message || aiErr), 0);
-    }
-    var dur = Math.round((Date.now() - startTime) / 1000);
-    logRun_('每日排程', '成功', '已更新 ' + ymd + '，' + rows.length + ' 檔股票', dur);
-  } catch (e) {
-    var dur2 = Math.round((Date.now() - startTime) / 1000);
-    logRun_('每日排程', '失敗', String(e.message || e), dur2);
+  } catch (overviewErr) {
+    logRun_('每日排程-檢查最新日期', '失敗', String(overviewErr.message || overviewErr), 0);
   }
+  if (!cursor || cursor > todayOnly) cursor = todayOnly;
+
+  // 2. 逐天抓到今天為止（含）。單次執行最多補 MAX_CATCHUP_DAYS 天，避免缺口太大時
+  //    觸發器執行時間超過上限；缺口更大時請改用「資料總覽」的「重新抓取/合併此區間」
+  //    背景 job（分批續跑、不受單次執行時間限制）。
+  var MAX_CATCHUP_DAYS = 14;
+  var succeeded = [], skipped = [], failed = [], truncated = false, processedDays = 0;
+  while (cursor <= todayOnly) {
+    if (processedDays >= MAX_CATCHUP_DAYS) { truncated = true; break; }
+    var dayResult = backfillOneDay_(cursor, settings);
+    if (dayResult.kind === 'succeeded') succeeded.push(dayResult.date);
+    else if (dayResult.kind === 'skipped') skipped.push(dayResult.date);
+    else failed.push(dayResult.date + '：' + dayResult.error);
+    processedDays++;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  if (truncated) {
+    logRun_('每日排程-補抓資料', '失敗',
+      '資料缺口超過 ' + MAX_CATCHUP_DAYS + ' 天，本次只補到 ' + (succeeded[succeeded.length - 1] || skipped[skipped.length - 1] || '（無）') +
+      '，剩餘天數請用「資料總覽」的「重新抓取/合併此區間」補齊', 0);
+  }
+
+  // 3. materialized 模式下，剛寫進去的新資料要先重新整理進 BigQuery 原生表，不然下一步的
+  //    分析可能讀到「重新整理間隔還沒到」的舊版本，漏掉剛補上的資料。
+  try {
+    var bqSettings = getBigQuerySettings();
+    if (bqSettings.projectId && bqSettings.sourceMode === 'materialized') {
+      materializeHistoryTableIfStale_(0);
+    }
+  } catch (materializeErr) {
+    logRun_('每日排程-BigQuery整理', '失敗', String(materializeErr.message || materializeErr), 0);
+  }
+
+  // 4. 重新計算戰報
+  try {
+    runAnalysisAndSave();
+  } catch (analysisErr) {
+    logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);
+  }
+
+  // 5. 每日自動 AI 診斷
+  try {
+    runDailyAiDiagnosisForTopPicks();
+  } catch (aiErr) {
+    logRun_('每日排程-AI診斷', '失敗', String(aiErr.message || aiErr), 0);
+  }
+
+  var dur = Math.round((Date.now() - startTime) / 1000);
+  var summary = '成功 ' + succeeded.length + ' 天' + (succeeded.length ? '（' + succeeded.join(', ') + '）' : '');
+  if (skipped.length) summary += '、略過 ' + skipped.length + ' 天';
+  if (failed.length) summary += '、失敗 ' + failed.length + ' 天（' + failed.join('; ') + '）';
+  logRun_('每日排程', (succeeded.length === 0 && failed.length > 0) ? '失敗' : '成功', summary, dur);
 }
