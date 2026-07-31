@@ -92,7 +92,7 @@ var CONFIG = {
   GEMINI_PRICE_INPUT_PER_M_DEFAULT: 0.3,
   GEMINI_PRICE_OUTPUT_PER_M_DEFAULT: 2.5,
 
-  AI_DAILY_TOP_N_DEFAULT: 3,
+  AI_DAILY_TOP_N_DEFAULT: 5,
 
   // BigQuery 因子回歸模型設定（選用進階功能，見 README「因子回歸模型」章節）。
   // Apps Script 專案本身沒有 GCP 專案的概念，要使用者自己在 Apps Script 編輯器把

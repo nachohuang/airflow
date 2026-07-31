@@ -808,7 +808,7 @@
   document.getElementById('aiDailyForm').addEventListener('submit', function (e) {
     e.preventDefault();
     var enabled = document.getElementById('aiDailyEnabled').checked;
-    var topN = parseInt(document.getElementById('aiDailyTopN').value, 10) || 3;
+    var topN = parseInt(document.getElementById('aiDailyTopN').value, 10) || 5;
     withSpin(callServer('setAiDailySettings', enabled, topN)).then(function () {
       loadAiSettings();
       alert('✅ 已儲存 AI 診斷排程設定');

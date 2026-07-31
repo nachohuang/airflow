@@ -119,11 +119,11 @@ function getAiSettings() {
   };
 }
 
-/** topN 上限是 3：每日自動選股改成跟 runAiTopPicks() 共用同一套 AI 橫向比較 prompt
- *  （AI_TOP_PICKS_SYSTEM_PROMPT 固定要求輸出正好前三檔），不再是單純依 Armor_Score 排序
- *  取前 N 檔，所以 topN 超過 3 也不會有更多檔數可選。 */
+/** topN 現在代表「AI 先橫向比較篩出的候選名單大小」，這份名單會全部送進深度診斷（含
+ *  Goodinfo 基本面查核）——不是最終只診斷這幾檔裡的「前幾名」，是全部都要查。名單太窄
+ *  （例如只有 1~2 檔）就失去「先擴大候選、再讓基本面篩選」的意義，所以下限訂在 3。 */
 function setAiDailySettings(enabled, topN) {
-  var n = Math.max(1, Math.min(3, parseInt(topN, 10) || CONFIG.AI_DAILY_TOP_N_DEFAULT));
+  var n = Math.max(3, Math.min(10, parseInt(topN, 10) || CONFIG.AI_DAILY_TOP_N_DEFAULT));
   var props = PropertiesService.getScriptProperties();
   props.setProperty(CONFIG.PROP_KEYS.AI_DAILY_ENABLED, enabled ? 'true' : 'false');
   props.setProperty(CONFIG.PROP_KEYS.AI_DAILY_TOP_N, String(n));
@@ -475,12 +475,14 @@ function runAiDiagnosis(codes) {
 }
 
 /**
- * 每日排程呼叫：如果有開啟「每日自動 AI 診斷」，選股方式跟手動的「🧠 AI 掃描全部候選，
- * 推薦前三檔」按鈕（runAiTopPicks()）共用同一套邏輯——不是單純依 Armor_Score 高低排序取前
- * 幾名，而是先讓 AI 用 AI_TOP_PICKS_SYSTEM_PROMPT 的橫向比較 prompt 看過當天全部候選的
- * 量化資料選出最值得優先投入的幾檔，取出 AI 選出的代號後，才對這幾檔各自執行「AI 深度診斷」
- * （runAiDiagnosis，會另外抓 Goodinfo 財報/籌碼資料做完整查核）——兩層診斷缺一不可：
- * 第一層負責「從一整批候選裡挑出誰值得看」，第二層才是真正深入查核個股。
+ * 每日排程呼叫：如果有開啟「每日自動 AI 診斷」，選股分兩層——先用 AI 橫向比較（見
+ * AI_SHORTLIST_SYSTEM_PROMPT）從當天全部候選裡篩出一份較寬的候選名單（不查財報，
+ * 純量化因子比較，維持低成本），名單大小就是 settings.topN；接著把這份名單「全部」
+ * 送進「AI 深度診斷」（runAiDiagnosis，會另外抓 Goodinfo 財報/籌碼資料做完整查核）。
+ * 刻意不做「橫向比較選 3 檔、深度診斷再驗證同一批 3 檔」這種兩階段都各自拍板的設計——
+ * 橫向比較分數再高的候選，基本面查核仍有可能不合格，所以「值不值得投入」完全交給
+ * 深度診斷的最終建議（強力買入/分批布局/觀望不追/立刻退出）決定，不會出現「初篩推薦
+ * 的標的」跟「深度診斷結論」互相矛盾、還要使用者自己來回對照兩份報告的情況。
  */
 function runDailyAiDiagnosisForTopPicks() {
   var settings = getAiSettings();
@@ -488,35 +490,130 @@ function runDailyAiDiagnosisForTopPicks() {
   var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
   if (!hasKey) return { skipped: true, reason: '尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰' };
 
-  var topPicks;
+  var shortlist;
   try {
-    topPicks = runAiTopPicks();
+    shortlist = runAiShortlist_(settings.topN);
   } catch (e) {
     return { skipped: true, reason: String(e.message || e) };
   }
 
-  var topCodes = extractTopPickCodes_(topPicks.text, Math.min(settings.topN || 3, 3));
-  if (topCodes.length === 0) return { skipped: true, reason: '無法從 AI 橫向比較結果中取出股票代號' };
+  var codes = extractShortlistCodes_(shortlist.text, settings.topN);
+  if (codes.length === 0) return { skipped: true, reason: '無法從 AI 候選名單中取出股票代號' };
 
   return {
     skipped: false,
-    topPicksText: topPicks.text,
-    topPicksCost: topPicks.cost,
-    results: runAiDiagnosis(topCodes)
+    shortlistText: shortlist.text,
+    shortlistCost: shortlist.cost,
+    results: runAiDiagnosis(codes)
   };
 }
 
 /**
- * 從 runAiTopPicks() 回傳的 markdown 文字裡取出前幾名的股票代號，供每日排程接著餵給
- * runAiDiagnosis() 做深度診斷。AI_TOP_PICKS_SYSTEM_PROMPT 規定的輸出格式固定是
- * 「### 🥇/🥈/🥉 [代號 名稱]（Armor_Score: xx）」，代號一定緊接在獎牌 emoji 後面、
- * 以空白分隔，用逐行比對行首格式取出即可，不需要完整的 markdown parser。
+ * 橫向比較用的候選名單 prompt：跟 AI_TOP_PICKS_SYSTEM_PROMPT（手動「推薦前三檔」按鈕用）
+ * 是類似的初篩邏輯，但這裡輸出的是一份「全部都要送進深度診斷」的候選名單，不是最終建議，
+ * 所以不用獎牌排名的敘事格式，改成固定行數的編號清單，方便程式解析、名單大小也可以由
+ * count 參數控制（每日自動診斷的 settings.topN），不像 AI_TOP_PICKS_SYSTEM_PROMPT 綁死 3 檔。
  */
-function extractTopPickCodes_(text, maxCount) {
+var AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE = `# Role & Expertise
+你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師，同時精通【價值護城河大師】、
+【籌碼追蹤專家】、【技術型態首席】三個流派。
+
+# 本次任務
+我會給你「台股量化選股策略 (v17.0) 趨勢共鳴戰報」這次篩選出來的**全部候選股票清單**
+（每檔都附上 Armor_Score 與各項量化因子排名，沒有個別的財報/Goodinfo 原始資料）。
+請你橫向比較這整份清單，挑出你認為最值得優先送進「AI 深度診斷」（會另外查核個別財報與
+即時籌碼）的 __COUNT__ 檔候選名單。這份名單只是複查對象、不是最終投資建議，真正
+「值不值得投入」要等深度診斷查完基本面才拍板。
+
+# 決策原則
+1. 不是單純照 Armor_Score 高低取前幾名——分數只是量化因子的加權結果，你要在候選之間
+   做橫向比較，找出「因子純度最高、訊號最一致」的組合。
+2. 如果分數最高的幾檔彼此高度相關（同產業/同族群齊漲），要主動用產業分散的角度調整
+   名單，避免整份名單都集中在同一個籃子裡、放大集中度風險。
+3. 這是初篩層級的橫向比較，沒有個股財報與即時籌碼細節佐證，絕對不要假裝有查證過財報，
+   只能根據提供的量化欄位做判斷。
+4. 語氣口吻：使用繁體中文，字字精煉。
+
+# Output Format（請嚴格使用以下結構，正好 __COUNT__ 行，不要多也不要少，不要加其他文字）
+1. 代號 名稱 - 入選理由（一句話）
+2. 代號 名稱 - 入選理由（一句話）
+（依此類推，共 __COUNT__ 行）`;
+
+function buildShortlistPrompt_(candidates, timestampLabel, count) {
+  var lines = [];
+  lines.push('比較基準時間戳記：' + timestampLabel);
+  lines.push('');
+  lines.push('【本次戰報全部候選清單，共 ' + candidates.length + ' 檔，依 Armor_Score 高到低排序】');
+  candidates.forEach(function (r, i) {
+    lines.push(
+      (i + 1) + '. ' + r['證券代號'] + ' ' + r['證券名稱'] +
+      '｜Armor_Score=' + r['Armor_Score'] +
+      '｜操作策略=' + r['操作策略'] +
+      '｜Trend_Score=' + r['Trend_Score'] +
+      '｜法人參與密度排名=' + r['Inst_Part_Rank'] +
+      '｜下跌接手率排名=' + r['IBF_20D_Rank'] +
+      '｜實相解讀=' + r['實相解讀']
+    );
+  });
+  lines.push('');
+  lines.push('請依照系統設定的規則與輸出格式，從這份清單挑出 ' + count + ' 檔送進深度診斷的候選名單。');
+  return lines.join('\n');
+}
+
+/** 每日排程用：橫向比較選出一份大小為 count 的候選名單（給 runDailyAiDiagnosisForTopPicks 用）。 */
+function runAiShortlist_(count) {
+  var settings = getAiSettings();
+  var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
+  if (!hasKey) throw new Error('尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰，請先到後台管理輸入。');
+
+  var reportRows = readSheetObjects_(getReportsSheet_());
+  if (reportRows.length === 0) throw new Error('目前沒有任何戰報資料，請先產生一次戰報。');
+  var latestDate = null;
+  reportRows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!latestDate || d > latestDate) latestDate = d;
+  });
+  var candidates = reportRows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDate; });
+  if (candidates.length === 0) throw new Error('最新一次戰報沒有任何候選股票可以比較。');
+  candidates.sort(function (a, b) { return toNumber(b['Armor_Score']) - toNumber(a['Armor_Score']); });
+
+  var timestampLabel = '台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm');
+  var startTime = Date.now();
+  try {
+    var systemPrompt = AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE.replace(/__COUNT__/g, String(count));
+    var userPrompt = buildShortlistPrompt_(candidates, timestampLabel, count);
+    var llmResult = callLlm_(systemPrompt, userPrompt);
+    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+
+    logAiUsage_({
+      '日期': normalizeDateStr(new Date()),
+      '時間戳記': timestampLabel,
+      '供應商': llmResult.provider,
+      '模型': llmResult.model,
+      '證券代號': 'SHORTLIST_SCAN',
+      '輸入Tokens': llmResult.inputTokens,
+      '輸出Tokens': llmResult.outputTokens,
+      '預估費用(USD)': round_(cost, 6)
+    });
+
+    var dur = Math.round((Date.now() - startTime) / 1000);
+    logRun_('AI每日候選名單', '成功', '掃描 ' + candidates.length + ' 檔候選（' + latestDate + '），篩出 ' + count + ' 檔，約 $' + round_(cost, 4), dur);
+    return { ok: true, date: latestDate, candidateCount: candidates.length, text: llmResult.text, cost: round_(cost, 4) };
+  } catch (e) {
+    var dur2 = Math.round((Date.now() - startTime) / 1000);
+    logRun_('AI每日候選名單', '失敗', String(e.message || e), dur2);
+    throw e;
+  }
+}
+
+/**
+ * 從 runAiShortlist_() 回傳的編號清單文字裡取出股票代號，供每日排程接著餵給 runAiDiagnosis()
+ * 做深度診斷。AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE 規定的輸出格式固定是「N. 代號 名稱 - 理由」，
+ * 代號一定緊接在編號句點後面、以空白分隔，用逐行比對行首格式取出即可。
+ */
+function extractShortlistCodes_(text, maxCount) {
   if (!text) return [];
-  // 獎牌 emoji 是 astral 字元（UTF-16 surrogate pair），字元類別 [🥇🥈🥉] 在沒有 /u 旗標時
-  // 會被拆成兩個 code unit 誤判，必須用 (?:a|b|c) 交替寫法 + /u 旗標才能正確比對。
-  var re = /^###\s*(?:🥇|🥈|🥉)\s*(\d{3,6})/u;
+  var re = /^\d+\.\s*(\d{3,6})/;
   var codes = [];
   String(text).split('\n').forEach(function (line) {
     var m = re.exec(line.trim());
