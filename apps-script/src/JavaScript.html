@@ -229,6 +229,14 @@
     var metaEl = document.getElementById('dashboardMeta');
     listEl.innerHTML = '<div class="loading">載入中...</div>';
     return callServer('getCachedDashboardReport').then(function (result) {
+      if (result && result.error) {
+        // getCachedDashboardReport 自己接住例外、把錯誤內容放進回傳值，而不是讓整次 RPC
+        // 失敗——這樣才看得出「真的沒有戰報」跟「讀取途中出錯」是兩件不同的事，不會只看到
+        // 一句「目前還沒有任何戰報」卻不知道背後其實是壞掉了。
+        metaEl.textContent = '';
+        listEl.innerHTML = errorBox('讀取戰報時發生錯誤：' + result.error);
+        return;
+      }
       if (!result || !result.latestDate) {
         metaEl.textContent = '目前還沒有任何戰報，按右上角🔄選「重新計算戰報」產生一次。';
         listEl.innerHTML = '<div class="form-actions"><button type="button" class="btn-secondary" id="screeningFunnelBtn">🔍 查看篩選漏斗明細</button></div>';
@@ -1155,22 +1163,20 @@
 
   /** 「檢查 Reports 分頁實際內容」：跟「戰報與個股」讀的是完全同一個 sheet 物件
    *  （getReportsSheetDebugInfo 內部呼叫 getReportsSheet_()，跟 getCachedDashboardReport 一樣），
-   *  同時直接呼叫 getCachedDashboardReport() 本身、把它的實際回傳值也顯示出來——兩份資料放在
+   *  再另外呼叫 getCachedDashboardReport() 本身、把它的實際回傳值也顯示出來——兩份資料放在
    *  一起比對，才能明確分辨到底是「寫入沒成功」「getCachedDashboardReport 的邏輯」還是
-   *  「戰報頁前端渲染」哪一段出問題，不用再靠猜的。 */
+   *  「戰報頁前端渲染」哪一段出問題。兩個呼叫刻意分開處理（不是 Promise.all 一次等兩個）：
+   *  如果 getCachedDashboardReport() 本身出錯，還是能看到上半部的 Reports 分頁原始內容，
+   *  不會被 Promise.all「其中一個失敗、兩個都看不到結果」的行為擋住，錯誤訊息也能明確
+   *  歸屬到是哪一個函式丟出來的。 */
   document.getElementById('reportsDebugBtn').addEventListener('click', function () {
     var el = document.getElementById('reportsDebugResult');
     el.innerHTML = '<div class="loading">讀取中...</div>';
-    withSpin(Promise.all([
-      callServer('getReportsSheetDebugInfo'),
-      callServer('getCachedDashboardReport')
-    ])).then(function (results) {
-      var info = results[0];
-      var cached = results[1];
+    withSpin(callServer('getReportsSheetDebugInfo')).then(function (info) {
       var dateRows = info.distinctDates.map(function (d) {
         return '<tr><td>' + escapeHtml(d) + '</td><td>' + fmtNum(info.rowsPerDate[d], 0) + '</td></tr>';
       }).join('');
-      el.innerHTML =
+      var sheetHtml =
         '<table class="simple-table"><tbody>' +
         '<tr><td>試算表</td><td><a href="' + escapeHtml(info.spreadsheetUrl) + '" target="_blank" rel="noopener">開啟</a>（' + escapeHtml(info.spreadsheetId) + '）</td></tr>' +
         '<tr><td>分頁名稱</td><td>' + escapeHtml(info.sheetName) + '</td></tr>' +
@@ -1180,16 +1186,28 @@
         (info.distinctDates.length
           ? '<div class="meta-bar" style="margin-top:8px;">現有的日期跟各自列數：</div>' +
             '<table class="simple-table"><thead><tr><td>日期</td><td>列數</td></tr></thead><tbody>' + dateRows + '</tbody></table>'
-          : '<div class="meta-bar" style="margin-top:8px;">⚠️ 目前完全沒有資料——問題出在「重新計算戰報」寫入這一段，不是前端顯示。</div>') +
-        '<div class="meta-bar" style="margin-top:10px;">getCachedDashboardReport() 實際回傳（「戰報與個股」頁面用的就是這個函式）：</div>' +
-        '<table class="simple-table"><tbody>' +
-        '<tr><td>latestDate</td><td>' + escapeHtml(cached.latestDate || '(null)') + '</td></tr>' +
-        '<tr><td>report.length</td><td>' + fmtNum(cached.report ? cached.report.length : 0, 0) + '</td></tr>' +
-        '<tr><td>dataSourceMode</td><td>' + escapeHtml(cached.dataSourceMode || '(無)') + '</td></tr>' +
-        '</tbody></table>' +
-        (cached.latestDate
-          ? '<div class="meta-bar" style="margin-top:6px;">⚠️ 這裡有值，如果「戰報與個股」頁面還是顯示「沒有戰報」，問題 100% 在前端渲染，不是資料或這個函式本身——把這個結果截圖給我。</div>'
-          : '');
+          : '<div class="meta-bar" style="margin-top:8px;">⚠️ 目前完全沒有資料——問題出在「重新計算戰報」寫入這一段，不是前端顯示。</div>');
+      el.innerHTML = sheetHtml + '<div class="loading" style="margin-top:10px;">讀取 getCachedDashboardReport() 中...</div>';
+      return callServer('getCachedDashboardReport').then(function (cached) {
+        var cachedHtml = '<div class="meta-bar" style="margin-top:10px;">getCachedDashboardReport() 實際回傳（「戰報與個股」頁面用的就是這個函式）：</div>';
+        if (!cached) {
+          cachedHtml += '<div class="error-box">⚠️ 這個函式回傳了 null／undefined（不是預期的物件）——伺服器端的程式碼可能跟預期的不一樣，' +
+            '麻煩直接到 Apps Script 編輯器打開 Analysis.gs 確認 getCachedDashboardReport 這個函式目前實際的內容。</div>';
+        } else {
+          cachedHtml += '<table class="simple-table"><tbody>' +
+            '<tr><td>latestDate</td><td>' + escapeHtml(cached.latestDate || '(null)') + '</td></tr>' +
+            '<tr><td>report.length</td><td>' + fmtNum(cached.report ? cached.report.length : 0, 0) + '</td></tr>' +
+            '<tr><td>dataSourceMode</td><td>' + escapeHtml(cached.dataSourceMode || '(無)') + '</td></tr>' +
+            '</tbody></table>' +
+            (cached.latestDate
+              ? '<div class="meta-bar" style="margin-top:6px;">⚠️ 這裡有值，如果「戰報與個股」頁面還是顯示「沒有戰報」，問題 100% 在前端渲染，不是資料或這個函式本身——把這個結果截圖給我。</div>'
+              : '');
+        }
+        el.innerHTML = sheetHtml + cachedHtml;
+      }).catch(function (err) {
+        el.innerHTML = sheetHtml + '<div class="meta-bar" style="margin-top:10px;">呼叫 getCachedDashboardReport() 時發生錯誤：</div>' +
+          errorBox(err);
+      });
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   });
 

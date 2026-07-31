@@ -432,24 +432,33 @@ function getDashboardReport() {
  * 「重新計算戰報」（呼叫 startAnalysisJob 背景 job）另外手動觸發。
  */
 function getCachedDashboardReport() {
-  var rows = readSheetObjects_(getReportsSheet_());
-  if (rows.length === 0) return { latestDate: null, report: [], cached: true };
+  // 包一層 try/catch：這是純讀取、理論上不該出錯的函式，但如果環境裡有任何意外狀況
+  // （例如某一列的日期欄位格式壞到連 normalizeDateStr 都處理不了），與其讓例外整個丟到
+  // google.script.run 變成前端一個不透明的 RPC 失敗訊息、看不出到底哪裡出錯，不如接住
+  // 它、把錯誤內容原封不動放進回傳值裡——前端「戰報與個股」跟除錯工具都看得懂 error 欄位，
+  // 至少能顯示出具體是什麼錯，不會只看到一句「目前還沒有任何戰報」卻不知道背後發生了什麼事。
+  try {
+    var rows = readSheetObjects_(getReportsSheet_());
+    if (rows.length === 0) return { latestDate: null, report: [], cached: true };
 
-  var latestDateStr = null;
-  rows.forEach(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    if (!latestDateStr || d > latestDateStr) latestDateStr = d;
-  });
-  var latestRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
-  latestRows.sort(function (a, b) { return (toNumberOrNull(b['Armor_Score']) || 0) - (toNumberOrNull(a['Armor_Score']) || 0); });
-  return {
-    latestDate: latestDateStr,
-    lookbackStart: computeLookbackStartStr_(latestDateStr),
-    dataSourceMode: getEffectiveDataSourceMode_(),
-    report: latestRows,
-    cached: true,
-    isToday: latestDateStr === normalizeDateStr(new Date())
-  };
+    var latestDateStr = null;
+    rows.forEach(function (r) {
+      var d = normalizeDateStr(r['日期']);
+      if (!latestDateStr || d > latestDateStr) latestDateStr = d;
+    });
+    var latestRows = rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
+    latestRows.sort(function (a, b) { return (toNumberOrNull(b['Armor_Score']) || 0) - (toNumberOrNull(a['Armor_Score']) || 0); });
+    return {
+      latestDate: latestDateStr,
+      lookbackStart: computeLookbackStartStr_(latestDateStr),
+      dataSourceMode: getEffectiveDataSourceMode_(),
+      report: latestRows,
+      cached: true,
+      isToday: latestDateStr === normalizeDateStr(new Date())
+    };
+  } catch (e) {
+    return { latestDate: null, report: [], cached: true, error: String(e.message || e) };
+  }
 }
 
 /**
