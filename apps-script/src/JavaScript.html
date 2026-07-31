@@ -36,8 +36,8 @@
 
   // ---------- Tab 切換 ----------
   var TAB_TITLES = {
-    dashboard: '最新戰報', portfolio: '持股管理', stock: '個股分析',
-    research: '研究', data: '資料總覽', admin: '後台管理'
+    dashboard: '戰報與個股', portfolio: '持股庫存',
+    research: '策略研究', admin: '系統與資料後台'
   };
   var loadedTabs = {};
 
@@ -56,7 +56,6 @@
     if (tab === 'dashboard') loadDashboard();
     if (tab === 'portfolio') loadPortfolio();
     if (tab === 'admin') loadAdmin();
-    if (tab === 'data') loadDataTab_();
     if (tab === 'research') loadResearchTab_();
   }
 
@@ -72,8 +71,6 @@
     if (activeTab === 'dashboard') { showRefreshActionSheet_(); return; }
     if (activeTab === 'portfolio') withSpin(loadPortfolio());
     else if (activeTab === 'admin') withSpin(loadAdmin());
-    else if (activeTab === 'data') withSpin(loadDataTab_());
-    else if (activeTab === 'stock' && currentStockCode) withSpin(loadStock(currentStockCode));
   });
 
   /** 通用 bottom sheet 開關（action sheet 跟個股詳情 modal 共用同一套顯示/隱藏邏輯）。 */
@@ -247,7 +244,7 @@
     }).catch(function (err) { containerEl.innerHTML = errorBox(err); });
   }
 
-  /** 供 Dashboard 卡片與個股分析頁共用：跑一次 AI 診斷並把結果渲染進指定容器。 */
+  /** 供戰報卡片與股票詳情 modal 共用：跑一次 AI 診斷並把結果渲染進指定容器。 */
   function runAiDiagnosisForButton_(code, containerEl) {
     var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
     containerEl.innerHTML = '<div class="loading">AI 診斷中，會需要一點時間（要呼叫 ' + providerLabel + ' + 抓 Goodinfo）...</div>';
@@ -307,7 +304,7 @@
     return out.join('\n');
   }
 
-  // ---------- 持股管理 ----------
+  // ---------- 持股庫存 ----------
   var pfForm = document.getElementById('portfolioForm');
   var pfClearBtn = document.getElementById('pfClearBtn');
 
@@ -324,6 +321,13 @@
         var profitHtml = profit === null ? '' :
           '<div class="stock-card-strategy" style="color:' + (profit >= 0 ? 'var(--green)' : 'var(--red)') + '">' +
           '現價 ' + fmtNum(it.latestClose) + '　損益 ' + (profit >= 0 ? '+' : '') + fmtNum(profit, 1) + '%</div>';
+        var signalHtml = '';
+        if (it.signal && it.signal.strategy) {
+          var color = STRATEGY_HINT[it.signal.strategy] || 'var(--text)';
+          signalHtml = '<div class="stock-card-strategy" style="color:' + color + '">' +
+            escapeHtml(it.signal.strategy) + (it.signal.action ? ' · ' + escapeHtml(it.signal.action) : '') +
+            '<span class="stock-card-action">（' + escapeHtml(it.signal.date) + ' 戰報）</span></div>';
+        }
         return '<div class="stock-card">' +
           '<div class="stock-card-head stock-card-open" data-code="' + escapeHtml(it.code) + '" style="cursor:pointer;">' +
           '<span><span class="stock-card-code">' + escapeHtml(it.code) + '</span>' +
@@ -331,6 +335,7 @@
           '</div>' +
           '<div class="stock-card-note">成本 ' + fmtNum(it.cost) + '　買進日 ' + escapeHtml(it.buyDate || '-') + '</div>' +
           profitHtml +
+          signalHtml +
           (it.note ? '<div class="stock-card-note">備註：' + escapeHtml(it.note) + '</div>' : '') +
           '<div class="form-actions">' +
           '<button type="button" class="btn-secondary pf-edit" data-code="' + escapeHtml(it.code) + '">編輯</button>' +
@@ -390,10 +395,9 @@
     }).catch(function (err) { alert(err.message || err); });
   });
 
-  // ---------- 個股分析 ----------
+  // ---------- 個股搜尋（開啟股票詳情 modal） ----------
   var stockSearchInput = document.getElementById('stockSearchInput');
   var stockSearchResults = document.getElementById('stockSearchResults');
-  var currentStockCode = null;
   var searchDebounceTimer = null;
 
   stockSearchInput.addEventListener('input', function () {
@@ -409,9 +413,9 @@
         }).join('');
         stockSearchResults.querySelectorAll('.search-result-item[data-code]').forEach(function (el) {
           el.addEventListener('click', function () {
-            stockSearchInput.value = el.getAttribute('data-code') + ' ' + el.textContent.replace(el.getAttribute('data-code'), '').trim();
             stockSearchResults.innerHTML = '';
-            loadStock(el.getAttribute('data-code'));
+            stockSearchInput.value = '';
+            openStockDetailModal_(el.getAttribute('data-code'));
           });
         });
       });
@@ -421,20 +425,10 @@
     if (!stockSearchResults.contains(e.target) && e.target !== stockSearchInput) stockSearchResults.innerHTML = '';
   });
 
-  function loadStock(code) {
-    currentStockCode = code;
-    var detailEl = document.getElementById('stockDetail');
-    detailEl.innerHTML = '<div class="loading">載入走勢中...</div>';
-    return withSpin(callServer('getStockTimeSeries', code)).then(function (data) {
-      renderStockDetailInto_(detailEl, 'main', data);
-    }).catch(function (err) { detailEl.innerHTML = errorBox(err); });
-  }
-
   /**
-   * 個股詳情的完整畫面（走勢圖＋法人買賣超＋歷史 Armor_Score＋AI 診斷）現在是一個可重用的
-   * render 函式，「個股分析」頁籤跟「股票詳情 modal」（從最新戰報/持股管理的卡片點進來）
-   * 共用同一份邏輯，不用維護兩份重複的程式碼。prefix 用來區分兩邊各自的 canvas id / Chart.js
-   * 實例（同一頁面可能同時存在兩份圖表，id 不能撞名，實例也不能互相 destroy 到對方）。
+   * 個股詳情的完整畫面（走勢圖＋法人買賣超＋歷史 Armor_Score＋AI 診斷）是一個可重用的 render
+   * 函式，唯一的呈現位置是「股票詳情 modal」（從戰報搜尋／卡片、持股庫存卡片點進來）。
+   * prefix 保留給未來同頁同時開多個 modal 實例時區分 canvas id / Chart.js 實例用。
    */
   function renderStockDetailInto_(containerEl, prefix, data) {
     if (!data.series.length) {
@@ -540,7 +534,7 @@
     });
   }
 
-  // ---------- 股票詳情 modal（從最新戰報／持股管理的卡片點進來，跟「個股分析」共用 renderStockDetailInto_） ----------
+  // ---------- 股票詳情 modal（從戰報搜尋／卡片、持股庫存卡片點進來） ----------
   var stockDetailSheet = document.getElementById('stockDetailSheet');
   var stockDetailSheetBody = document.getElementById('stockDetailSheetBody');
   var stockDetailSheetTitle = document.getElementById('stockDetailSheetTitle');
@@ -557,7 +551,7 @@
   document.getElementById('stockDetailSheetCloseBtn').addEventListener('click', function () { closeSheet_(stockDetailSheet); });
   stockDetailSheet.addEventListener('click', function (e) { if (e.target === stockDetailSheet) closeSheet_(stockDetailSheet); });
 
-  /** modal 裡「+ 快捷加入持股」：帶著代號/名稱/現價/今天日期跳去持股管理表單，
+  /** modal 裡「+ 快捷加入持股」：帶著代號/名稱/現價/今天日期跳去持股庫存表單，
    *  使用者確認或調整成本/日期後還是要自己按「儲存」，不會沒經過確認就直接寫入。 */
   function openQuickAddPortfolio_(code, name, series) {
     var latestClose = series.length ? series[series.length - 1].close : null;
@@ -646,7 +640,7 @@
     }).catch(function (err) { alert(err.message || err); });
   });
 
-  // ---------- 後台管理 ----------
+  // ---------- 系統與資料後台 ----------
   function populateTimeSelects() {
     var hourSel = document.getElementById('schHour');
     var minSel = document.getElementById('schMinute');
@@ -662,12 +656,14 @@
     return Promise.all([
       loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder),
       loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
-      loadHistoryFolderStatus_()
+      loadHistoryFolderStatus_(),
+      loadBqSettings_(), loadBqMaterializedStatus_(),
+      loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_()
     ]);
   }
 
   function loadResearchTab_() {
-    return Promise.all([loadBqSettings_(), loadFactorModelHistory_(), loadBqMaterializedStatus_()]);
+    return loadFactorModelHistory_();
   }
 
   // ---------- AI 深度診斷設定 ----------
@@ -774,7 +770,7 @@
   });
 
   document.getElementById('bqRepointBtn').addEventListener('click', function () {
-    var resultEl = document.getElementById('bqActionResult');
+    var resultEl = document.getElementById('bqDbActionResult');
     resultEl.innerHTML = '<div class="loading">重新整理外部資料表中...</div>';
     withSpin(callServer('refreshExternalHistoryTable')).then(function (res) {
       resultEl.innerHTML = '<div class="meta-bar">✅ 外部資料表已重新整理，涵蓋 ' + res.fileCount + ' 個檔案</div>';
@@ -782,7 +778,7 @@
   });
 
   document.getElementById('bqMaterializeBtn').addEventListener('click', function () {
-    var resultEl = document.getElementById('bqActionResult');
+    var resultEl = document.getElementById('bqDbActionResult');
     resultEl.innerHTML = '<div class="loading">重新整理中，資料量大時可能要一兩分鐘...</div>';
     withSpin(callServer('refreshMaterializedHistoryTable')).then(function (res) {
       resultEl.innerHTML = '<div class="meta-bar">✅ 已重新整理，涵蓋 ' + res.fileCount + ' 個來源檔案</div>';
@@ -809,7 +805,7 @@
   });
 
   document.getElementById('bqSyncBtn').addEventListener('click', function () {
-    var resultEl = document.getElementById('bqActionResult');
+    var resultEl = document.getElementById('bqDbActionResult');
     resultEl.innerHTML = '<div class="loading">讀取可同步的月份清單中...</div>';
     withSpin(callServer('listSyncableMonths')).then(function (months) {
       if (!months.length) {
@@ -1130,7 +1126,7 @@
     }
   }
 
-  /** 「資料總覽」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後，完全不知道背景工作
+  /** 「系統與資料後台」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後，完全不知道背景工作
    *  跑到哪、甚至早就做完了。只有真的有 job（不是 idle）時才顯示/開始輪詢。 */
   function checkBackfillStatusOnLoad_() {
     return callServer('getBackfillJobStatus').then(function (state) {
@@ -1141,11 +1137,7 @@
     }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
   }
 
-  // ---------- 資料總覽 ----------
-  function loadDataTab_() {
-    return Promise.all([loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_()]);
-  }
-
+  // ---------- 資料總覽（現在併入「系統與資料後台」頁籤，由 loadAdmin() 統一載入） ----------
   function loadBqUsage_() {
     return callServer('getBigQueryUsageSummary', 30).then(function (s) {
       document.getElementById('bqUsageSummary').textContent =

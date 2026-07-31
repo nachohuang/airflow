@@ -7,13 +7,17 @@
 <body>
   <div id="app">
     <header class="topbar">
-      <div class="topbar-title" id="topbarTitle">最新戰報</div>
+      <div class="topbar-title" id="topbarTitle">戰報與個股</div>
       <button class="icon-btn" id="refreshBtn" title="重新整理">⟳</button>
     </header>
 
     <main id="content">
 
       <section id="tab-dashboard" class="tab-panel active">
+        <div class="search-bar">
+          <input id="stockSearchInput" placeholder="輸入股票代號或名稱搜尋（例如 2330 或 台積電），開啟個股詳情">
+          <div id="stockSearchResults" class="search-results"></div>
+        </div>
         <div id="dashboardMeta" class="meta-bar">載入中...</div>
         <div id="dashboardList" class="card-list"></div>
       </section>
@@ -43,16 +47,6 @@
           </div>
         </form>
         <div id="portfolioList" class="card-list"></div>
-      </section>
-
-      <section id="tab-stock" class="tab-panel">
-        <div class="search-bar">
-          <input id="stockSearchInput" placeholder="輸入股票代號或名稱搜尋（例如 2330 或 台積電）">
-          <div id="stockSearchResults" class="search-results"></div>
-        </div>
-        <div id="stockDetail">
-          <div class="empty-hint">搜尋並選擇一檔股票查看走勢</div>
-        </div>
       </section>
 
       <section id="tab-research" class="tab-panel">
@@ -99,10 +93,28 @@
           <div class="meta-bar">
             以大表所有欄位為基礎，用 BigQuery ML 找出目前最能預測「後續1個月報酬率」跟
             「相對大盤抗跌力」的因子組合（多因子 LASSO 迴歸，比左邊的單因子相關性更深入），
-            結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。這是選用的進階功能，
-            需要你自己有一個 GCP 專案（見 README「因子回歸模型」章節的設定步驟），
-            這裡的沙盒環境不能代為設定。套用某一版之後，最新戰報會多顯示一組「因子模型預測分數」
-            供對照，但不會改變 Armor_Score 本身的選股邏輯。
+            結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。套用某一版之後，最新戰報會多顯示
+            一組「因子模型預測分數」供對照，但不會改變 Armor_Score 本身的選股邏輯。
+            GCP 專案 ID 與資料來源模式設定移到「系統與資料後台」頁籤最上方的「資料庫狀態」，
+            這裡只留「執行因子迴歸」跟歷史執行紀錄。
+          </div>
+          <div class="form-actions">
+            <button type="button" id="bqRegressionBtn" class="btn-primary">執行因子迴歸</button>
+          </div>
+          <div id="bqActionResult"></div>
+
+          <h4 style="margin-top:14px;">執行紀錄</h4>
+          <div id="factorModelHistoryTable"></div>
+        </div>
+      </section>
+
+      <section id="tab-admin" class="tab-panel">
+        <div class="admin-section">
+          <h3>資料庫狀態</h3>
+          <div class="meta-bar">
+            GCP 專案 ID 與資料來源模式（native / external / materialized）：這一組設定同時影響
+            最新戰報、持股燈號、個股分析、回測研究、因子相關性掃描、因子回歸模型全部功能實際
+            從哪裡讀資料，是選用的進階功能，不設定的話維持讀 Drive 月份檔案（native 行為）。
           </div>
 
           <form id="bqSettingsForm" class="inline-form">
@@ -120,10 +132,6 @@
               <option value="materialized">自動整理進 BigQuery（materialized，推薦：免匯入＋查詢快＋用欄名比對）</option>
             </select>
           </label>
-          <div class="meta-bar">
-            三個模式選一個之後，最新戰報／個股分析／回測研究／因子相關性掃描都會跟著改變資料來源
-            （native 模式維持讀 Drive 月份檔案，另外兩個都會改成查 BigQuery）：
-          </div>
           <div class="meta-bar">
             <b>external（即時讀取）</b>：不用先匯入，執行任何一項查詢前都會自動把 BigQuery 外部資料表
             重新指向歷史資料夾裡「目前所有」CSV 檔案，Apps Script 完全不會讀取檔案內容。
@@ -143,21 +151,13 @@
             <button type="button" id="bqSyncBtn" class="btn-secondary">同步歷史資料到 BigQuery（native 模式用）</button>
             <button type="button" id="bqRepointBtn" class="btn-secondary">重新整理外部資料表（external 模式用）</button>
             <button type="button" id="bqMaterializeBtn" class="btn-secondary">立即重新整理（materialized 模式用）</button>
-            <button type="button" id="bqRegressionBtn" class="btn-primary">執行因子迴歸</button>
           </div>
-          <div id="bqActionResult"></div>
-
-          <h4 style="margin-top:14px;">執行紀錄</h4>
-          <div id="factorModelHistoryTable"></div>
+          <div id="bqDbActionResult"></div>
         </div>
-      </section>
 
-      <section id="tab-data" class="tab-panel">
         <div class="admin-section">
           <h3>資料總覽</h3>
-          <div class="meta-bar">
-            目前資料來源模式（跟「研究」頁籤「因子回歸模型」子分頁共用同一組設定）下的歷史資料範圍。
-          </div>
+          <div class="meta-bar">目前資料來源模式下的歷史資料範圍。</div>
           <div class="form-actions">
             <button type="button" id="overviewRefreshBtn" class="btn-secondary">重新整理統計</button>
             <button type="button" id="stockIdQualityBtn" class="btn-secondary">檢查股票代號格式</button>
@@ -202,9 +202,7 @@
           </form>
           <div id="remergeResult"></div>
         </div>
-      </section>
 
-      <section id="tab-admin" class="tab-panel">
         <div class="admin-section">
           <h3>每日自動排程</h3>
           <form id="scheduleForm" class="form-card" style="margin-bottom:0;">
@@ -365,12 +363,10 @@
     </main>
 
     <nav class="bottom-nav">
-      <button class="nav-btn active" data-tab="dashboard"><span class="nav-icon">📊</span><span>最新戰報</span></button>
-      <button class="nav-btn" data-tab="portfolio"><span class="nav-icon">💼</span><span>持股管理</span></button>
-      <button class="nav-btn" data-tab="stock"><span class="nav-icon">🔍</span><span>個股分析</span></button>
-      <button class="nav-btn" data-tab="research"><span class="nav-icon">🧪</span><span>研究</span></button>
-      <button class="nav-btn" data-tab="data"><span class="nav-icon">🗂️</span><span>資料總覽</span></button>
-      <button class="nav-btn" data-tab="admin"><span class="nav-icon">⚙️</span><span>後台管理</span></button>
+      <button class="nav-btn active" data-tab="dashboard"><span class="nav-icon">📊</span><span>戰報與個股</span></button>
+      <button class="nav-btn" data-tab="portfolio"><span class="nav-icon">💼</span><span>持股庫存</span></button>
+      <button class="nav-btn" data-tab="research"><span class="nav-icon">🧪</span><span>策略研究</span></button>
+      <button class="nav-btn" data-tab="admin"><span class="nav-icon">⚙️</span><span>系統與資料後台</span></button>
     </nav>
 
     <div id="refreshActionSheet" class="sheet-overlay hidden">

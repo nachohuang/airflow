@@ -27,7 +27,12 @@ function getPortfolioMap_() {
   return map;
 }
 
-/** 供「持股管理」頁面呼叫，回傳整理過的持股清單（含代號補零 + 最新收盤價）。 */
+/**
+ * 供「持股庫存」頁面呼叫，回傳整理過的持股清單（含代號補零、最新收盤價、最近一次戰報裡
+ * 這檔股票的燈號）。持股一定會出現在戰報裡（診斷邏輯對有持股的股票一律給「持股守護」或
+ * 「止盈/止損」，不會是 Neutral 被濾掉），所以直接讀 Reports 分頁最近一筆就能拿到，
+ * 純讀取、不會觸發任何計算，跟「最新戰報」頁面同一套「不自動觸發昂貴運算」原則。
+ */
 function getPortfolio() {
   var items = readPortfolio_().map(function (r) {
     return {
@@ -36,7 +41,8 @@ function getPortfolio() {
       cost: toNumber(r['成本']),
       buyDate: normalizeDateStr(r['買進日期']),
       note: r['備註'] || '',
-      latestClose: null
+      latestClose: null,
+      signal: null
     };
   }).filter(function (r) { return r.code; });
   if (items.length === 0) return items;
@@ -50,8 +56,19 @@ function getPortfolio() {
       latestByCode[code] = { date: d, close: toNumber(r['收盤價']) };
     }
   });
+
+  var signalByCode = {};
+  readSheetObjects_(getReportsSheet_()).forEach(function (r) {
+    var code = zfill4(String(r['證券代號'] || '').trim());
+    var d = normalizeDateStr(r['日期']);
+    if (!signalByCode[code] || d > signalByCode[code].date) {
+      signalByCode[code] = { date: d, strategy: r['操作策略'], action: r['建議動作'] };
+    }
+  });
+
   items.forEach(function (it) {
     if (latestByCode[it.code]) it.latestClose = latestByCode[it.code].close;
+    if (signalByCode[it.code]) it.signal = signalByCode[it.code];
   });
   return items;
 }
