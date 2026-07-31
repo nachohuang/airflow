@@ -1161,6 +1161,49 @@
 
   document.getElementById('jobQueueRefreshBtn').addEventListener('click', function () { withSpin(loadJobQueue_()); });
 
+  /** 「強制清空所有背景工作」：把四個 job 狀態都清回 idle，並刪掉任何殘留的相關時間觸發器
+   *  （不會動到「每日自動排程」本身）。給「感覺卡住了但排程佇列什麼都沒顯示執行中」的情況用。 */
+  document.getElementById('stopAllJobsBtn').addEventListener('click', function () {
+    if (!confirm('確定要強制清空所有背景工作嗎？這會把四個工作的狀態都重設成閒置，並刪除任何殘留的相關時間觸發器（不會影響「每日自動排程」）。如果有工作其實還在背景執行中，這個動作不會真的中斷它，只是不再追蹤/顯示。')) return;
+    var el = document.getElementById('stopAllJobsResult');
+    el.innerHTML = '<div class="loading">清空中...</div>';
+    withSpin(callServer('stopAllJobs')).then(function (res) {
+      el.innerHTML = '<div class="meta-bar">✅ 已清空所有背景工作狀態，額外刪除 ' + fmtNum(res.removedTriggerCount, 0) + ' 個殘留觸發器。</div>';
+      stopAnalysisJobPoll_(); stopBackfillPoll_(); stopFactorRegressionPoll_(); stopMaterializePoll_();
+      loadJobQueue_();
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
+
+  /** 「測試伺服器連線」：最單純的 google.script.run 往返測試，不碰任何試算表/BigQuery。
+   *  如果連這個都失敗/逾時，代表問題出在 RPC 或整個部署本身，不是任何特定功能函式的邏輯。 */
+  document.getElementById('pingServerBtn').addEventListener('click', function () {
+    var el = document.getElementById('pingServerResult');
+    var clientStart = Date.now();
+    el.innerHTML = '<div class="loading">呼叫中...</div>';
+    withSpin(callServer('pingServer')).then(function (res) {
+      var roundTripMs = Date.now() - clientStart;
+      if (!res) {
+        el.innerHTML = '<div class="error-box">⚠️ 連最單純的 ping 都回傳 null/undefined——問題在 google.script.run 或部署本身，不是任何特定功能函式的邏輯。</div>';
+        return;
+      }
+      el.innerHTML = '<div class="meta-bar">✅ 連線正常，來回花費約 ' + fmtNum(roundTripMs, 0) + ' ms（伺服器時間戳記：' + fmtNum(res.serverTimeMs, 0) + '）。</div>';
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
+
+  /** 「列出已註冊的觸發器」：確認有沒有預期外堆積的孤兒觸發器。 */
+  document.getElementById('listTriggersBtn').addEventListener('click', function () {
+    var el = document.getElementById('listTriggersResult');
+    el.innerHTML = '<div class="loading">讀取中...</div>';
+    withSpin(callServer('listAllRegisteredTriggers')).then(function (triggers) {
+      if (!triggers || !triggers.length) { el.innerHTML = '<div class="empty-hint">目前沒有任何已註冊的觸發器</div>'; return; }
+      var rows = triggers.map(function (t) {
+        return '<tr><td>' + escapeHtml(t.handlerFunction) + '</td><td>' + escapeHtml(t.eventType) + '</td><td>' + escapeHtml(t.triggerSource) + '</td></tr>';
+      }).join('');
+      el.innerHTML = '<table class="simple-table"><thead><tr><td>Handler 函式</td><td>事件類型</td><td>來源</td></tr></thead><tbody>' + rows + '</tbody></table>' +
+        '<div class="meta-bar" style="margin-top:6px;">正常情況下每個 handler 最多只會有 0 或 1 個；如果同一個 handler 出現兩次以上，或出現一個現在程式碼裡已經不存在的函式名稱，就是有問題。</div>';
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
+
   /** 「檢查 Reports 分頁實際內容」：跟「戰報與個股」讀的是完全同一個 sheet 物件
    *  （getReportsSheetDebugInfo 內部呼叫 getReportsSheet_()，跟 getCachedDashboardReport 一樣），
    *  再另外呼叫 getCachedDashboardReport() 本身、把它的實際回傳值也顯示出來——兩份資料放在

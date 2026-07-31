@@ -106,3 +106,54 @@ function deleteJob(key) {
   if (key === 'materialize') return clearMaterializeJob_();
   throw new Error('未知的工作類型：' + key);
 }
+
+/** 四種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
+ *  不會碰到「每日自動排程」（scheduledDailyFetch，見 Scheduler.gs，那是核心功能本身，
+ *  不是這裡管的「背景 job」）。 */
+function knownJobTickHandlers_() {
+  return ['processAnalysisJobTick_', 'processBackfillJobTick_', 'processFactorRegressionJobTick_', 'processMaterializeJobTick_'];
+}
+
+/**
+ * 排程佇列的「強制清空所有背景工作」按鈕：把四個 job 的狀態都清回 idle，同時直接掃過整個
+ * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這四種 tick 函式的觸發器。
+ * 不是只呼叫四個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
+ * 用「直接掃過觸發器列表」再確認一次，避免萬一有某個角落遺留、沒有被任何 job 狀態追蹤到
+ * 的孤兒觸發器——例如很久以前用過的 handler 名稱、或某次刪除呼叫剛好失敗——這種觸發器
+ * 不會出現在排程佇列的任何一張卡片裡，卻仍然會在排定的時間自己觸發、佔用執行配額，
+ * 從使用者的角度看就是「感覺卡住了但排程佇列什麼都沒顯示」。
+ */
+function stopAllJobs() {
+  clearAnalysisJob_();
+  clearBackfillJob_();
+  clearFactorRegressionJob_();
+  clearMaterializeJob_();
+  var handlers = knownJobTickHandlers_();
+  var removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (handlers.indexOf(t.getHandlerFunction()) !== -1) {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+  logRun_('強制清空背景工作', '成功', '已清空 4 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
+  return { removedTriggerCount: removed };
+}
+
+/**
+ * 除錯用：列出整個專案目前所有已註冊的時間觸發器（含「每日自動排程」），確認有沒有預期外
+ * 堆積的孤兒觸發器——正常情況下每種 job 同時最多只會有 0 或 1 個觸發器（每次 startXJob 都
+ * 會先刪除同 handler 的舊觸發器才建立新的），如果這裡看到同一個 handler 出現兩次以上，
+ * 或出現一個現在程式碼裡已經不存在的 handler 名稱，就是有問題（後者會導致該次觸發完全
+ * 靜默失敗，Apps Script 找不到對應函式，狀態永遠不會更新）。
+ */
+function listAllRegisteredTriggers() {
+  return ScriptApp.getProjectTriggers().map(function (t) {
+    return {
+      handlerFunction: t.getHandlerFunction(),
+      eventType: String(t.getEventType()),
+      triggerSource: String(t.getTriggerSource()),
+      uniqueId: t.getUniqueId()
+    };
+  });
+}

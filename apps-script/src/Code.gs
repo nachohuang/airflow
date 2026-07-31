@@ -33,3 +33,11 @@ function bootstrap() {
     aiProvider: getAiSettings().provider
   };
 }
+
+/** 除錯用：最單純的 google.script.run 往返測試，不碰任何試算表/BigQuery，純粹確認
+ *  「伺服器端程式碼有沒有在跑、RPC 往返本身正不正常」。如果連這個都回傳空值/逾時，代表
+ *  問題出在 google.script.run 或整個部署本身，不會是任何一個特定功能函式的邏輯問題；
+ *  如果這個正常、但某個特定功能函式回傳空值，問題就縮小到那個函式本身。 */
+function pingServer() {
+  return { ok: true, serverTimeMs: Date.now() };
+}

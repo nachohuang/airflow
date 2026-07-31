@@ -164,21 +164,29 @@
           </div>
           <div class="form-actions">
             <button type="button" id="jobQueueRefreshBtn" class="btn-secondary">重新整理</button>
+            <button type="button" id="stopAllJobsBtn" class="btn-danger">🛑 強制清空所有背景工作</button>
           </div>
+          <div id="stopAllJobsResult" style="margin-top:6px;"></div>
           <div id="jobQueueList" class="card-list"></div>
         </div>
 
         <div class="admin-section">
-          <h3>Reports 分頁除錯</h3>
+          <h3>疑難排解</h3>
           <div class="meta-bar">
-            「戰報與個股」頁面顯示的內容，就是直接讀這個分頁目前的實際內容——如果按下去這裡顯示
-            有資料，但戰報頁還是顯示「目前還沒有任何戰報」，代表問題在前端那一段；如果這裡也是
-            0 列，代表問題出在「重新計算戰報」寫入這一段。
+            「戰報與個股」頁面顯示的內容，就是直接讀 Reports 分頁目前的實際內容——如果按下去
+            顯示有資料，但戰報頁還是顯示「目前還沒有任何戰報」，代表問題在前端那一段；如果這裡
+            也是 0 列，代表問題出在「重新計算戰報」寫入這一段。「測試伺服器連線」是最單純的
+            google.script.run 往返測試，不碰任何試算表/BigQuery；「列出已註冊的觸發器」可以
+            看有沒有預期外堆積的孤兒觸發器（例如已經不存在的函式名稱、或同一個工作被重複註冊）。
           </div>
           <div class="form-actions">
             <button type="button" id="reportsDebugBtn" class="btn-secondary">檢查 Reports 分頁實際內容</button>
+            <button type="button" id="pingServerBtn" class="btn-secondary">測試伺服器連線</button>
+            <button type="button" id="listTriggersBtn" class="btn-secondary">列出已註冊的觸發器</button>
           </div>
           <div id="reportsDebugResult"></div>
+          <div id="pingServerResult" style="margin-top:10px;"></div>
+          <div id="listTriggersResult" style="margin-top:10px;"></div>
         </div>
 
         <div class="admin-section">
