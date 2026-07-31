@@ -174,19 +174,49 @@ function buildMaterializeSql_(groupTableRefs, materializedTableRef) {
  * history_raw 馬上查得到，不用等 history_materialized 重新整理，也完全不會再需要 Apps Script
  * 重新掃一次 Drive 檔案。
  */
+/**
+ * stock_id 正規化的 SQL 版本，語意要跟 Utils.gs 的 sanitizeStockId_ 對齊：先去頭尾空白，
+ * 再去掉 Excel/Sheets 把代號存成數字產生的小數點尾巴（"2330.0" -> "2330"），最後只留英數字。
+ * 分兩次 REGEXP_REPLACE 是刻意的——如果把「去小數點尾巴」跟「只留英數字」寫成同一個正則的
+ * 兩個分支一次做完，句點會被「只留英數字」那支直接吃掉，"2330.0" 會變成 "23300" 而不是
+ * "2330"，兩個規則必須分開、按順序套用。
+ */
+function bqCleanStockIdExpr_() {
+  return "REGEXP_REPLACE(REGEXP_REPLACE(TRIM(stock_id), r'\\.0+$', ''), r'[^0-9A-Za-z]', '')";
+}
+
+/**
+ * 「統一讀取 view」：把 history_raw（每天/補抓直接寫入，持續成長）跟 history_materialized
+ * （從舊的 Drive 大檔案一次性整理進來的歷史基準，之後很少再變動）UNION 起來，同一天同一檔
+ * 股票兩邊都有的話 history_raw 優先（它是比較新鮮的直接寫入結果，例如重新抓某一天覆蓋掉
+ * 舊資料的情況）。materialized 模式讀的是這個 view，不是單一份表——這樣「今天」的資料一寫進
+ * history_raw 馬上查得到，不用等 history_materialized 重新整理，也完全不會再需要 Apps Script
+ * 重新掃一次 Drive 檔案。
+ *
+ * stock_id 在這裡先正規化清洗過才拿去比對/輸出（見 bqCleanStockIdExpr_）：不同來源檔案
+ * 對同一檔股票的 stock_id 字串格式不一致（多空白、Excel 把代號存成數字產生的 ".0" 尾巴…），
+ * 不先清洗的話，UNION+去重會把「同一檔股票的不同格式」當成好幾檔不同股票——這是「股票數
+ * （去重後）」異常暴增的根本原因。清洗完仍然不像股票代號（長度不在 4~6 碼、含非英數字）的
+ * 直接排除，不會流進下游任何查詢。這個過濾只保證「像不像一個代號」，v17.0 策略本身只認
+ * 4 碼一般股票的規則（LENGTH(stock_id) = 4）維持在 buildLatestDayFactorsSql_ 裡單獨處理，
+ * 不動這裡（避免不小心排除掉合法的 5~6 碼 ETF/權證類代號，跟 computeFactors_ 的 Python
+ * 對照行為保持一致）。
+ */
 function buildUnifiedViewSql_(rawRef, materializedRef, viewRef) {
   var cols = bqColumnNames_().join(', ');
+  var otherCols = bqColumnNames_().filter(function (c) { return c !== 'stock_id'; }).join(', ');
+  var cleanExpr = bqCleanStockIdExpr_();
   return [
     'CREATE OR REPLACE VIEW `' + viewRef + '` AS',
     'SELECT ' + cols + ' FROM (',
     '  SELECT *, ROW_NUMBER() OVER (PARTITION BY stock_id, date_str ORDER BY src_priority ASC) AS rn',
     '  FROM (',
-    '    SELECT ' + cols + ', 0 AS src_priority FROM `' + rawRef + '`',
+    '    SELECT ' + cleanExpr + ' AS stock_id, ' + otherCols + ', 0 AS src_priority FROM `' + rawRef + '`',
     '    UNION ALL',
-    '    SELECT ' + cols + ', 1 AS src_priority FROM `' + materializedRef + '`',
+    '    SELECT ' + cleanExpr + ' AS stock_id, ' + otherCols + ', 1 AS src_priority FROM `' + materializedRef + '`',
     '  )',
     ')',
-    'WHERE rn = 1'
+    "WHERE rn = 1 AND REGEXP_CONTAINS(stock_id, r'^[0-9A-Za-z]{4,6}$')"
   ].join('\n');
 }
 

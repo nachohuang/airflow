@@ -96,6 +96,18 @@ loadIntoContext('FactorRegression.gs');
   context.CONFIG.BQ_COLUMN_MAP.forEach(function (m) {
     assert.ok(sql.indexOf(m.bq) !== -1, 'missing column in unified view: ' + m.bq);
   });
+
+  // stock_id 兩邊 UNION 之前都要先清洗過（跟 Utils.gs sanitizeStockId_ 對齊），不然不同來源
+  // 檔案對同一檔股票的格式差異會讓去重失效——這是「股票數（去重後）」異常暴增的根本原因。
+  const cleanExpr = context.bqCleanStockIdExpr_();
+  assert.ok(cleanExpr.indexOf("TRIM(stock_id)") !== -1);
+  assert.ok(cleanExpr.indexOf("\\.0+$") !== -1, '要先去掉 Excel 把代號存成數字產生的小數點尾巴');
+  assert.ok(sql.indexOf(cleanExpr + ' AS stock_id') !== -1, 'raw 跟 materialized 兩邊都要用同一個清洗表達式');
+  const cleanCount = sql.split(cleanExpr + ' AS stock_id').length - 1;
+  assert.strictEqual(cleanCount, 2, 'UNION 的兩邊（history_raw 跟 history_materialized）都要清洗，不能只洗一邊');
+
+  // 清洗完仍然不像股票代號（長度不在 4~6 碼、含非英數字）的要被排除，不能流進下游查詢
+  assert.ok(sql.indexOf("REGEXP_CONTAINS(stock_id, r'^[0-9A-Za-z]{4,6}$')") !== -1);
   console.log('Test buildUnifiedViewSql_ passed.');
 }
 

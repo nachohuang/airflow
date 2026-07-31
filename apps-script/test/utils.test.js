@@ -18,6 +18,21 @@ assert.strictEqual(U.zfill4('9'), '0009');
 assert.strictEqual(U.zfill4('9907'), '9907');
 assert.strictEqual(U.zfill4('00878'), '00878'); // 5-digit ETF stays 5 digits (gets filtered elsewhere)
 
+// sanitizeStockId_
+assert.strictEqual(U.sanitizeStockId_('2330'), '2330');
+assert.strictEqual(U.sanitizeStockId_(' 2330 '), '2330', '頭尾空白要去掉');
+assert.strictEqual(U.sanitizeStockId_('2330.0'), '2330', 'Excel/Sheets 把代號存成數字產生的小數點尾巴要去掉');
+assert.strictEqual(U.sanitizeStockId_('2,330'), '2330', '千分位逗號要去掉（雖然股票代號不該有逗號，防呆）');
+assert.strictEqual(U.sanitizeStockId_('\uFEFF2330'), '2330', 'BOM 要去掉');
+assert.strictEqual(U.sanitizeStockId_('\u200B2330\u200B'), '2330', '零寬字元要去掉');
+assert.strictEqual(U.sanitizeStockId_('00878'), '00878', '5 碼 ETF 代號要保留');
+assert.strictEqual(U.sanitizeStockId_('2330a'), '2330A', '英數字代號要轉大寫');
+assert.strictEqual(U.sanitizeStockId_('123'), '', '不足 4 碼視為無效');
+assert.strictEqual(U.sanitizeStockId_('1234567'), '', '超過 6 碼視為無效');
+assert.strictEqual(U.sanitizeStockId_(''), '', '空字串視為無效');
+assert.strictEqual(U.sanitizeStockId_(null), '', 'null 視為無效');
+assert.strictEqual(U.sanitizeStockId_('台積電'), '', '不是股票代號的文字要視為無效');
+
 // groupBy
 const rows = [{ k: 'a', v: 1 }, { k: 'b', v: 2 }, { k: 'a', v: 3 }];
 const g = U.groupBy(rows, r => r.k);

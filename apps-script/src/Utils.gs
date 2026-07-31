@@ -36,6 +36,33 @@ function zfill4(code) {
   return s;
 }
 
+/**
+ * 清洗＋驗證股票代號：不同來源檔案對同一檔股票的 stock_id 字串格式常常不一致——多空白、
+ * 零寬字元/BOM、Excel 或 Google Sheets 把代號當數字存產生的 ".0" 尾巴、千分位逗號殘留等，
+ * 這些格式差異會讓同一檔股票在 BigQuery 去重時被當成好幾檔不同的股票（這就是「股票數
+ * （去重後）」異常暴增到 5 萬多筆的根本原因）。這裡統一清洗成同一種表示法：
+ *   1. 去除零寬字元/BOM
+ *   2. 去頭尾空白
+ *   3. 去掉 Excel/Sheets 把代號存成數字產生的小數點尾巴（例如 "2330.0" -> "2330"）
+ *   4. 去除內部空白與千分位逗號
+ *   5. 只保留英數字
+ * 清洗後長度不在 4~6 碼範圍內（台股一般股票 4 碼，部分 ETF/權證類 5~6 碼）視為無效，
+ * 回傳空字串，呼叫端要自己決定怎麼處理無效值（通常是整列捨棄）。
+ * 這只負責「格式是否像一個代號」，不負責「補零到固定長度」——那是 zfill4 的責任，
+ * 兩個函式刻意分開，呼叫端依需要各自組合。
+ */
+function sanitizeStockId_(rawId) {
+  if (rawId === null || rawId === undefined) return '';
+  var s = String(rawId);
+  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  s = s.trim();
+  s = s.replace(/\.0+$/, '');
+  s = s.replace(/[,\s]/g, '');
+  s = s.replace(/[^0-9A-Za-z]/g, '');
+  if (s.length < 4 || s.length > 6) return '';
+  return s.toUpperCase();
+}
+
 /** 依 keyFn 分組，回傳 Map(key -> rows[])，保留原始相對順序。 */
 function groupBy(rows, keyFn) {
   var map = new Map();
@@ -268,6 +295,7 @@ if (typeof module !== 'undefined' && module.exports) {
     toNumber: toNumber,
     toNumberOrNull: toNumberOrNull,
     zfill4: zfill4,
+    sanitizeStockId_: sanitizeStockId_,
     groupBy: groupBy,
     sortRows: sortRows,
     rollingMean: rollingMean,

@@ -35,12 +35,16 @@ function indexHeaders_(headers) {
   return m;
 }
 
-/** 對應 pandas 清理 '證券代號' 欄位：去掉 ="..." 包裝與多餘引號/空白。 */
+/** 對應 pandas 清理 '證券代號' 欄位：去掉 ="..." 包裝與多餘引號/空白，
+ *  最後再過一次 sanitizeStockId_ 做格式驗證/正規化（去零寬字元、Excel 數字尾巴等），
+ *  格式明顯不對的股票代號在這裡就會變成空字串、被呼叫端的 `if (!code) continue;` 跳過，
+ *  不會讓髒資料一路流進歷史資料庫。 */
 function cleanCode_(v) {
   if (v === null || v === undefined) return '';
   var s = String(v).split('="').join('');
   s = s.replace(/^"+|"+$/g, '');
-  return s.trim();
+  s = s.trim();
+  return sanitizeStockId_(s);
 }
 
 function formatYmd_(date) {
@@ -125,8 +129,10 @@ function fetchMiIndex_(dateStr) {
   for (var r = 1; r < cleaned.length; r++) {
     var fields = parseCsvLine_(cleaned[r]);
     if (fields.length < headers.length - 2) continue;
-    var code = (fields[idx['證券代號']] || '').trim();
-    if (!code || code === '證券代號') continue;
+    var rawCode = (fields[idx['證券代號']] || '').trim();
+    if (!rawCode || rawCode === '證券代號') continue;
+    var code = sanitizeStockId_(rawCode);
+    if (!code) continue;
 
     rows.push({
       '證券代號': code,
