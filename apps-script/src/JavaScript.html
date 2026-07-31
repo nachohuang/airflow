@@ -1155,11 +1155,18 @@
 
   /** 「檢查 Reports 分頁實際內容」：跟「戰報與個股」讀的是完全同一個 sheet 物件
    *  （getReportsSheetDebugInfo 內部呼叫 getReportsSheet_()，跟 getCachedDashboardReport 一樣），
-   *  用來確認到底是「寫入沒成功」還是「前端顯示」的問題。 */
+   *  同時直接呼叫 getCachedDashboardReport() 本身、把它的實際回傳值也顯示出來——兩份資料放在
+   *  一起比對，才能明確分辨到底是「寫入沒成功」「getCachedDashboardReport 的邏輯」還是
+   *  「戰報頁前端渲染」哪一段出問題，不用再靠猜的。 */
   document.getElementById('reportsDebugBtn').addEventListener('click', function () {
     var el = document.getElementById('reportsDebugResult');
     el.innerHTML = '<div class="loading">讀取中...</div>';
-    withSpin(callServer('getReportsSheetDebugInfo')).then(function (info) {
+    withSpin(Promise.all([
+      callServer('getReportsSheetDebugInfo'),
+      callServer('getCachedDashboardReport')
+    ])).then(function (results) {
+      var info = results[0];
+      var cached = results[1];
       var dateRows = info.distinctDates.map(function (d) {
         return '<tr><td>' + escapeHtml(d) + '</td><td>' + fmtNum(info.rowsPerDate[d], 0) + '</td></tr>';
       }).join('');
@@ -1173,7 +1180,16 @@
         (info.distinctDates.length
           ? '<div class="meta-bar" style="margin-top:8px;">現有的日期跟各自列數：</div>' +
             '<table class="simple-table"><thead><tr><td>日期</td><td>列數</td></tr></thead><tbody>' + dateRows + '</tbody></table>'
-          : '<div class="meta-bar" style="margin-top:8px;">⚠️ 目前完全沒有資料——問題出在「重新計算戰報」寫入這一段，不是前端顯示。</div>');
+          : '<div class="meta-bar" style="margin-top:8px;">⚠️ 目前完全沒有資料——問題出在「重新計算戰報」寫入這一段，不是前端顯示。</div>') +
+        '<div class="meta-bar" style="margin-top:10px;">getCachedDashboardReport() 實際回傳（「戰報與個股」頁面用的就是這個函式）：</div>' +
+        '<table class="simple-table"><tbody>' +
+        '<tr><td>latestDate</td><td>' + escapeHtml(cached.latestDate || '(null)') + '</td></tr>' +
+        '<tr><td>report.length</td><td>' + fmtNum(cached.report ? cached.report.length : 0, 0) + '</td></tr>' +
+        '<tr><td>dataSourceMode</td><td>' + escapeHtml(cached.dataSourceMode || '(無)') + '</td></tr>' +
+        '</tbody></table>' +
+        (cached.latestDate
+          ? '<div class="meta-bar" style="margin-top:6px;">⚠️ 這裡有值，如果「戰報與個股」頁面還是顯示「沒有戰報」，問題 100% 在前端渲染，不是資料或這個函式本身——把這個結果截圖給我。</div>'
+          : '');
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   });
 
