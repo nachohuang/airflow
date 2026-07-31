@@ -141,9 +141,11 @@ function logRun_(type, status, message, durationSec) {
   }
 }
 
-/** 供前端「後台管理」頁面呼叫：取得最近的執行紀錄。 */
+/** 供前端「後台管理」頁面呼叫：取得最近的執行紀錄。「時間戳記」欄位是 'yyyy-MM-dd HH:mm:ss'
+ *  格式的字串寫進去的，但 Google Sheets 常把這種看起來像日期時間的字串自動存成 Date 物件，
+ *  讀回來直接回傳給前端有可能讓整包回傳值序列化失敗（見 sanitizeRowForRpc_ 的說明）。 */
 function getRecentRunLogs(limit) {
   var rows = readSheetObjects_(ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.RUN_LOG, CONFIG.RUN_LOG_COLUMNS));
   rows.reverse();
-  return rows.slice(0, limit || 50);
+  return rows.slice(0, limit || 50).map(sanitizeRowForRpc_);
 }

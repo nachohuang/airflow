@@ -289,6 +289,40 @@ function normalizeDateStr(v) {
   return s.slice(0, 10);
 }
 
+/** 把一個 Date 物件轉成字串——沒有時分秒（剛好是午夜 00:00:00）就當純日期只印 yyyy-MM-dd，
+ *  有時分秒（例如「執行時間」這種時間戳記欄位）就一併印出來，不會把時間資訊弄丟。純 JS
+ *  實作、不依賴 Apps Script 的 Utilities 服務，Node 測試環境也能直接測。 */
+function formatDateForRpc_(v) {
+  var y = v.getFullYear();
+  var m = String(v.getMonth() + 1).padStart(2, '0');
+  var d = String(v.getDate()).padStart(2, '0');
+  var dateStr = y + '-' + m + '-' + d;
+  var hasTime = v.getHours() !== 0 || v.getMinutes() !== 0 || v.getSeconds() !== 0;
+  if (!hasTime) return dateStr;
+  var hh = String(v.getHours()).padStart(2, '0');
+  var mi = String(v.getMinutes()).padStart(2, '0');
+  var ss = String(v.getSeconds()).padStart(2, '0');
+  return dateStr + ' ' + hh + ':' + mi + ':' + ss;
+}
+
+/**
+ * 把一列（readSheetObjects_ 讀出來的物件）轉成保證能安全跨 google.script.run 傳輸的純值
+ * 物件——Google Sheets 常把「日期」「時間戳記」這種欄位自動存成 Date 物件（不是字串），
+ * Date 物件包在「陣列裡的物件屬性值」這種巢狀結構裡，透過 google.script.run 傳輸偶爾會讓
+ * 整包回傳值序列化失敗、前端收到的是 null 而不是預期的物件，不會拋例外，很難從程式邏輯
+ * 本身看出問題（這是 getCachedDashboardReport() 曾經回傳 null 卻查不出原因的實際根因）。
+ * 任何一個 RPC 函式只要會把「一整批 readSheetObjects_ 讀出來的原始列」直接回傳給前端，
+ * 都應該先過這層。只轉 Date 型別的值，其餘欄位原樣保留。
+ */
+function sanitizeRowForRpc_(row) {
+  var out = {};
+  for (var k in row) {
+    var v = row[k];
+    out[k] = (v instanceof Date) ? formatDateForRpc_(v) : v;
+  }
+  return out;
+}
+
 // ---- Node.js 測試用的匯出（Apps Script 執行環境沒有 module，這段不會被執行到）----
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -296,6 +330,8 @@ if (typeof module !== 'undefined' && module.exports) {
     toNumberOrNull: toNumberOrNull,
     zfill4: zfill4,
     sanitizeStockId_: sanitizeStockId_,
+    formatDateForRpc_: formatDateForRpc_,
+    sanitizeRowForRpc_: sanitizeRowForRpc_,
     groupBy: groupBy,
     sortRows: sortRows,
     rollingMean: rollingMean,

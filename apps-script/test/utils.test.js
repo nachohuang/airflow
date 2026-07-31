@@ -146,4 +146,26 @@ assert.strictEqual(U.normalizeDateStr('2026/07/08'), '2026-07-08');
 assert.strictEqual(U.normalizeDateStr('20260708'), '2026-07-08');
 assert.strictEqual(U.normalizeDateStr(new Date(2026, 6, 8)), '2026-07-08');
 
+// sanitizeRowForRpc_：Date 型別欄位要轉成字串（Google Sheets 常把日期欄位自動存成 Date
+// 物件，Date 物件包在陣列裡的物件屬性值透過 google.script.run 傳輸偶爾會讓整包序列化失敗），
+// 其餘型別（字串/數字/null/布林）原樣保留不受影響
+{
+  const row = { '日期': new Date(2026, 6, 30), '證券代號': '2330', 'Armor_Score': 88.5, '參考最高價': null, isToday: false };
+  const sanitized = U.sanitizeRowForRpc_(row);
+  assert.strictEqual(sanitized['日期'], '2026-07-30');
+  assert.strictEqual(typeof sanitized['日期'], 'string');
+  assert.strictEqual(sanitized['證券代號'], '2330');
+  assert.strictEqual(sanitized['Armor_Score'], 88.5);
+  assert.strictEqual(sanitized['參考最高價'], null);
+  assert.strictEqual(sanitized.isToday, false);
+}
+
+// formatDateForRpc_：日期欄位（時分秒剛好是午夜）只印 yyyy-MM-dd；時間戳記欄位（例如「執行
+// 時間」這種有實際時分秒的 Date 物件，Google Sheets 對 'yyyy-MM-dd HH:mm:ss' 格式的字串也會
+// 自動轉成 Date 物件）要把時分秒一起印出來，不能因為套用同一層安全處理就把時間資訊弄丟
+{
+  assert.strictEqual(U.formatDateForRpc_(new Date(2026, 6, 30)), '2026-07-30');
+  assert.strictEqual(U.formatDateForRpc_(new Date(2026, 6, 31, 12, 45, 21)), '2026-07-31 12:45:21');
+}
+
 console.log('All Utils.gs tests passed.');

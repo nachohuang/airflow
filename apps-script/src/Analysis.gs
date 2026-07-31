@@ -425,20 +425,6 @@ function getDashboardReport() {
   return runAnalysisAndSave();
 }
 
-/** 把一列 Reports 分頁讀出來的物件轉成保證能安全跨 google.script.run 傳輸的純值物件——
- *  Google Sheets 常把「日期」這種欄位自動存成 Date 物件（不是字串），Date 物件包在「陣列裡的
- *  物件屬性值」這種巢狀結構裡，透過 google.script.run 傳輸偶爾會讓整包回傳值序列化失敗、
- *  前端收到的是 null 而不是預期的物件，不會拋例外，很難從程式邏輯本身看出問題。這裡把日期
- *  類欄位轉成字串，其餘保留原樣。 */
-function sanitizeRowForRpc_(row) {
-  var out = {};
-  for (var k in row) {
-    var v = row[k];
-    out[k] = (v instanceof Date) ? normalizeDateStr(v) : v;
-  }
-  return out;
-}
-
 /**
  * 純讀取版：只讀 Reports 分頁目前存的「最近一次」戰報，不管是不是今天，絕對不會觸發
  * 任何計算（不讀歷史、不查 BigQuery）。前端「今日戰報」頁面打開時改呼叫這個，避免單純

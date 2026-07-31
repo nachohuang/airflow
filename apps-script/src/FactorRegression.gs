@@ -322,20 +322,27 @@ function processFactorRegressionJobTick_() {
   }
 }
 
-/** 前端：取得歷史執行紀錄（新到舊）。 */
+/** 前端：取得歷史執行紀錄（新到舊）。「執行時間」欄位是 'yyyy-MM-dd HH:mm:ss' 格式的字串
+ *  寫進去的，但 Google Sheets 常把這種看起來像日期時間的字串自動存成 Date 物件，讀回來
+ *  直接回傳給前端有可能讓整包回傳值序列化失敗（見 sanitizeRowForRpc_ 的說明），要先過一層。 */
 function getFactorModelHistory(limit) {
   var rows = readSheetObjects_(getFactorModelHistorySheet_());
   rows.reverse();
-  return rows.slice(0, limit || 50);
+  return rows.slice(0, limit || 50).map(sanitizeRowForRpc_);
 }
 
-/** 前端：把某一筆歷史紀錄標記為「目前套用版本」（同一個 label 只會有一筆被標記）。 */
+/** 前端：把某一筆歷史紀錄標記為「目前套用版本」（同一個 label 只會有一筆被標記）。
+ *  timestamp 是前端從 getFactorModelHistory() 拿到、已經過 sanitizeRowForRpc_ 正規化的字串；
+ *  這裡讀回來的 r['執行時間'] 則可能是 Sheets 自動轉型出來的 Date 物件（要看那一列是不是
+ *  剛好碰上自動轉型），兩邊都要正規化成同樣格式才能正確比對，不能直接用 === 比字串跟
+ *  Date 物件。 */
 function applyFactorModel(timestamp, labelKey) {
   var sheet = getFactorModelHistorySheet_();
   var rows = readSheetObjects_(sheet);
   rows.forEach(function (r) {
     if (r['標的Label'] === labelKey) {
-      r['目前套用版本'] = (r['執行時間'] === timestamp) ? '✓ 套用中' : '';
+      var rowTimestamp = (r['執行時間'] instanceof Date) ? formatDateForRpc_(r['執行時間']) : r['執行時間'];
+      r['目前套用版本'] = (rowTimestamp === timestamp) ? '✓ 套用中' : '';
     }
   });
   writeSheetObjects_(sheet, CONFIG.FACTOR_MODEL_COLUMNS, rows);
