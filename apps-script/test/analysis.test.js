@@ -386,4 +386,24 @@ function buildSyntheticHistory(days) {
   console.log('Test 12 (runAnalysis diagnostics.reportCount matches report.length) passed.');
 }
 
+// --- 13. sanitizeRowForRpc_：Google Sheets 常把「日期」欄位自動存成 Date 物件，Date 物件包在
+//     陣列裡的物件屬性值透過 google.script.run 傳輸偶爾會讓整包回傳值序列化失敗（前端收到
+//     null 而不是預期的物件，不會拋例外）——這是 getCachedDashboardReport() 一直被回報回傳
+//     null、但程式邏輯逐行看都對的實際根因。這裡確保 Date 物件一律轉成字串，其餘欄位不動 ---
+{
+  // 用 vm context 自己的 Date 建構子產生實例（不是這個測試檔案所在 Node realm 的 Date）——
+  // sanitizeRowForRpc_ 用 instanceof Date 判斷，跨 realm 的 Date 實例 instanceof 檢查一定是
+  // false，用外層 Node 的 Date 會讓這個測試看起來失敗，但那只是 vm 測試環境本身的假象，
+  // 不是程式邏輯錯誤——實際 Apps Script 執行環境只有單一 realm，不會有這個問題。
+  const dateObj = vm.runInContext('new Date(2026, 6, 30)', context); // 月份是 0-based，7 月是 6
+  const row = { '日期': dateObj, '證券代號': '2330', 'Armor_Score': 88.5, '參考最高價': null };
+  const sanitized = context.sanitizeRowForRpc_(row);
+  assert.strictEqual(sanitized['日期'], '2026-07-30');
+  assert.strictEqual(typeof sanitized['日期'], 'string', 'Date 物件必須轉成字串，不能讓 Date 物件本身跨 RPC 傳輸');
+  assert.strictEqual(sanitized['證券代號'], '2330');
+  assert.strictEqual(sanitized['Armor_Score'], 88.5);
+  assert.strictEqual(sanitized['參考最高價'], null);
+  console.log('Test 13 (sanitizeRowForRpc_) passed.');
+}
+
 console.log('All Analysis.gs tests passed.');

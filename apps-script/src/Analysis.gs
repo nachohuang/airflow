@@ -425,6 +425,20 @@ function getDashboardReport() {
   return runAnalysisAndSave();
 }
 
+/** 把一列 Reports 分頁讀出來的物件轉成保證能安全跨 google.script.run 傳輸的純值物件——
+ *  Google Sheets 常把「日期」這種欄位自動存成 Date 物件（不是字串），Date 物件包在「陣列裡的
+ *  物件屬性值」這種巢狀結構裡，透過 google.script.run 傳輸偶爾會讓整包回傳值序列化失敗、
+ *  前端收到的是 null 而不是預期的物件，不會拋例外，很難從程式邏輯本身看出問題。這裡把日期
+ *  類欄位轉成字串，其餘保留原樣。 */
+function sanitizeRowForRpc_(row) {
+  var out = {};
+  for (var k in row) {
+    var v = row[k];
+    out[k] = (v instanceof Date) ? normalizeDateStr(v) : v;
+  }
+  return out;
+}
+
 /**
  * 純讀取版：只讀 Reports 分頁目前存的「最近一次」戰報，不管是不是今天，絕對不會觸發
  * 任何計算（不讀歷史、不查 BigQuery）。前端「今日戰報」頁面打開時改呼叫這個，避免單純
@@ -452,7 +466,13 @@ function getCachedDashboardReport() {
       latestDate: latestDateStr,
       lookbackStart: computeLookbackStartStr_(latestDateStr),
       dataSourceMode: getEffectiveDataSourceMode_(),
-      report: latestRows,
+      // sanitizeRowForRpc_：Google Sheets 常常把「日期」欄位自動存成 Date 物件（不是字串），
+      // 這裡送回前端的是「一整個陣列的列物件」，Date 物件包在陣列裡的物件屬性值，跨
+      // google.script.run 傳輸偶爾會讓整包回傳值序列化失敗、前端收到的是 null 而不是預期的
+      // 物件（不會拋例外，難以察覺）——之前 getCachedDashboardReport 一直被回報回傳 null，
+      // 但程式邏輯逐行看都對，很可能就是這個原因。這裡明確把每一列轉成保證是純值（字串/數字/
+      // 布林/null）的物件再回傳，不管原始儲存格內容是不是被 Sheets 自動轉成 Date 物件。
+      report: latestRows.map(sanitizeRowForRpc_),
       cached: true,
       isToday: latestDateStr === normalizeDateStr(new Date())
     };
