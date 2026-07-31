@@ -102,23 +102,29 @@
     '🔥 趨勢領航': 'var(--amber)'
   };
 
-  /** 篩選漏斗明細：不管是自動叫出來還是使用者按按鈕叫出來，畫面都一樣。 */
-  function loadScreeningDiagnostics_(listEl) {
+  /**
+   * 篩選漏斗明細：不管是「0 檔訊號」自動叫出來、還是使用者主動按按鈕叫出來（不管當次篩選結果
+   * 是 0 檔還是有訊號），畫面都一樣——不只在「沒訊號」時才看得到漏斗，平常也能拿來確認每一關
+   * 卡掉了多少檔股票，或用來對照不同篩選/因子版本之間漏斗人數的差異。
+   * d.stages 是一份有順序的關卡清單（見 Analysis.gs screeningFunnelStages_），之後如果換一套
+   * 不同的篩選/因子版本、關卡定義完全不同，伺服器端只要回傳同樣 {label, count, note} 形狀的
+   * 陣列，這裡完全不用改。
+   */
+  function loadScreeningDiagnostics_(containerEl) {
+    containerEl.innerHTML = '<div class="loading">讀取篩選漏斗明細中...</div>';
     callServer('getScreeningDiagnostics').then(function (d) {
-      if (!d.latestDate) { listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>'; return; }
-      listEl.innerHTML = '<div class="empty-hint">今天沒有符合條件的訊號</div>' +
-        '<div class="meta-bar" style="margin-top:10px;">篩選漏斗明細（' + escapeHtml(d.latestDate) + '，共 ' + d.totalStocks + ' 檔股票，其中 ' + d.holdingCount + ' 檔是持股不算在漏斗內）：</div>' +
-        '<table class="simple-table"><tbody>' +
-        '<tr><td>成交金額達門檻</td><td>' + d.liquidityPass + '</td></tr>' +
-        '<tr><td>多頭排列（Trend_Score=2）</td><td>' + d.upwardTrend + '</td></tr>' +
-        '<tr><td>法人參與度前20%</td><td>' + d.highInstParticipation + '（' + d.nullInstPartRank + ' 檔無法計算）</td></tr>' +
-        '<tr><td>量能前15%</td><td>' + d.volumeSpark + '（' + d.nullVolRatioRank + ' 檔無法計算）</td></tr>' +
-        '<tr><td>同時符合「趨勢啟動」三條件</td><td>' + d.breakoutMatches + '</td></tr>' +
-        '<tr><td>多頭+法人逢低承接前30%（「趨勢領航」）</td><td>' + d.ibfHighWithUpward + '（' + d.nullIbfRank + ' 檔無法計算）</td></tr>' +
-        '</tbody></table>' +
-        '<div class="meta-bar" style="margin-top:8px;">如果「無法計算」的數字接近總股票數，通常代表資料有問題（常見於 BigQuery external 模式欄位順序對錯）；' +
-        '如果數字都正常但某一關就是掉到 0，代表今天確實沒有股票同時符合這麼嚴格的條件，是策略設計上會發生的正常情況。</div>';
-    }).catch(function (err) { listEl.innerHTML = errorBox(err); });
+      var headerNote = d.latestDate
+        ? ('篩選漏斗明細（' + escapeHtml(d.latestDate) + '，共 ' + fmtNum(d.totalStocks, 0) + ' 檔股票，其中 ' + fmtNum(d.holdingCount, 0) + ' 檔是持股不算在漏斗內）：')
+        : ('⚠️ 掃描到 ' + fmtNum(d.totalStocks, 0) + ' 檔資料，沒有找到任何一天可用的戰報資料——不是篩選篩掉的，' +
+           '是根本沒讀到資料，請到「系統與資料後台」檢查資料來源設定／資料範圍是不是正常。');
+      var rows = (d.stages || []).map(function (s) {
+        return '<tr><td>' + escapeHtml(s.label) + '</td><td>' + fmtNum(s.count, 0) + (s.note ? '（' + escapeHtml(s.note) + '）' : '') + '</td></tr>';
+      }).join('');
+      containerEl.innerHTML = '<div class="meta-bar">' + headerNote + '</div>' +
+        (rows ? '<table class="simple-table"><tbody>' + rows + '</tbody></table>' +
+          '<div class="meta-bar" style="margin-top:8px;">如果「無法計算」的數字接近總股票數，通常代表資料有問題（常見於 BigQuery external 模式欄位順序對錯）；' +
+          '如果數字都正常但某一關就是掉到 0，代表確實沒有股票同時符合這麼嚴格的條件，是策略設計上會發生的正常情況。</div>' : '');
+    }).catch(function (err) { containerEl.innerHTML = errorBox(err); });
   }
 
   /**
@@ -206,7 +212,9 @@
   }
 
   /** 純讀取 Reports 分頁「最近一次」戰報並渲染，不觸發任何計算。autoShowDiagnostics 為 true
-   *  時（剛跑完一次背景重新計算），0 檔訊號會直接展開篩選漏斗明細，不用使用者多按一次。 */
+   *  時（剛跑完一次背景重新計算），會直接展開篩選漏斗明細，不用使用者多按一次——不管這次結果
+   *  是「掃描到資料但 0 檔訊號」還是「連掃描都掃到 0 筆」，都能立刻看到原因，不用像這次一樣
+   *  跑完背景 job 只看到「沒有戰報」四個字卻不知道到底是哪一段出問題。 */
   function renderCachedDashboard_(autoShowDiagnostics) {
     var listEl = document.getElementById('dashboardList');
     var metaEl = document.getElementById('dashboardMeta');
@@ -214,7 +222,7 @@
     return callServer('getCachedDashboardReport').then(function (result) {
       if (!result || !result.latestDate) {
         metaEl.textContent = '目前還沒有任何戰報，按右上角🔄選「重新計算戰報」產生一次。';
-        listEl.innerHTML = '';
+        loadScreeningDiagnostics_(listEl);
         return;
       }
       var isToday = result.latestDate === todayDateStr_();
@@ -226,25 +234,24 @@
       }
       metaEl.textContent = '戰報日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號' + rangeNote + sourceNote +
         (noteParts.length ? '　' + noteParts.join('；') : '');
+
+      var actionsHtml =
+        '<div class="form-actions" style="margin-bottom:10px;">' +
+        (result.report.length > 0 ? '<button type="button" class="btn-secondary" id="aiTopPicksBtn">🧠 AI 掃描全部候選，推薦前三檔</button>' : '') +
+        '<button type="button" class="btn-secondary" id="screeningFunnelBtn">🔍 查看篩選漏斗明細</button>' +
+        '</div>' +
+        (result.report.length > 0 ? '<div id="aiTopPicksResult" style="margin-bottom:10px;"></div>' : '') +
+        '<div id="screeningFunnelResult" style="margin-bottom:10px;"></div>';
+
       if (result.report.length === 0) {
-        if (autoShowDiagnostics) {
-          listEl.innerHTML = '<div class="loading">篩選出 0 檔，讀取篩選漏斗明細中...</div>';
-          loadScreeningDiagnostics_(listEl);
-        } else {
-          listEl.innerHTML = '<div class="empty-hint">這天沒有符合條件的訊號</div>' +
-            '<div class="form-actions"><button type="button" class="btn-secondary" id="viewDiagBtn">查看篩選漏斗明細</button></div>';
-          document.getElementById('viewDiagBtn').addEventListener('click', function () {
-            listEl.innerHTML = '<div class="loading">讀取篩選漏斗明細中...</div>';
-            loadScreeningDiagnostics_(listEl);
-          });
-        }
+        listEl.innerHTML = actionsHtml + '<div class="empty-hint">這天沒有符合條件的訊號</div>';
+        document.getElementById('screeningFunnelBtn').addEventListener('click', function () {
+          loadScreeningDiagnostics_(document.getElementById('screeningFunnelResult'));
+        });
+        if (autoShowDiagnostics) loadScreeningDiagnostics_(document.getElementById('screeningFunnelResult'));
         return;
       }
-      listEl.innerHTML =
-        '<div class="form-actions" style="margin-bottom:10px;">' +
-        '<button type="button" class="btn-secondary" id="aiTopPicksBtn">🧠 AI 掃描全部候選，推薦前三檔</button>' +
-        '</div>' +
-        '<div id="aiTopPicksResult" style="margin-bottom:10px;"></div>' +
+      listEl.innerHTML = actionsHtml +
         result.report.map(function (r) {
         var color = STRATEGY_HINT[r['操作策略']] || 'var(--text)';
         var code = r['證券代號'];
@@ -281,6 +288,9 @@
       });
       document.getElementById('aiTopPicksBtn').addEventListener('click', function () {
         runAiTopPicksForButton_(document.getElementById('aiTopPicksResult'));
+      });
+      document.getElementById('screeningFunnelBtn').addEventListener('click', function () {
+        loadScreeningDiagnostics_(document.getElementById('screeningFunnelResult'));
       });
     }).catch(function (err) {
       metaEl.textContent = '';

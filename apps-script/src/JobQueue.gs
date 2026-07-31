@@ -40,7 +40,12 @@ function jobQueueDetail_(key, state) {
   }
   if (key === 'analysis') {
     if (state.status !== 'done') return '';
-    return '已重新計算完成，戰報頁會顯示最新結果';
+    if (!state.latestDate) {
+      return '⚠️ 掃描到 ' + (state.scannedCount === null || state.scannedCount === undefined ? '0' : state.scannedCount) +
+        ' 檔資料、沒有找到任何一天可用的戰報資料，請到「戰報與個股」按「查看篩選漏斗明細」或檢查「資料總覽」的資料來源設定';
+    }
+    return '戰報日期 ' + state.latestDate + '，' + state.reportCount + ' 檔訊號' +
+      (state.scannedCount !== null && state.scannedCount !== undefined ? '（共掃描 ' + state.scannedCount + ' 檔）' : '');
   }
   return '';
 }

@@ -303,4 +303,39 @@ function buildSyntheticHistory(days) {
   console.log('Test 9 (computeLookbackStartStr_) passed:', start, '~ 2026-07-31');
 }
 
+// --- 10. screeningFunnelStages_：把具名欄位轉成通用的 {label, count, note} 關卡清單，
+//    給前端「查看篩選漏斗明細」跟排程佇列卡片共用渲染邏輯用 ---
+{
+  const stats = {
+    totalStocks: 100, holdingCount: 3, liquidityPass: 40, upwardTrend: 25,
+    highInstParticipation: 8, nullInstPartRank: 2, volumeSpark: 6, nullVolRatioRank: 1,
+    breakoutMatches: 0, ibfHighWithUpward: 4, nullIbfRank: 0
+  };
+  const stages = context.screeningFunnelStages_(stats);
+  assert.strictEqual(stages.length, 7);
+  assert.strictEqual(stages[0].count, 100);
+  assert.ok(stages[0].note.indexOf('3 檔') !== -1);
+  const instStage = stages.find(function (s) { return s.label.indexOf('法人參與度') !== -1; });
+  assert.strictEqual(instStage.count, 8);
+  assert.ok(instStage.note.indexOf('2 檔無法計算') !== -1);
+  const trendStage = stages.find(function (s) { return s.label.indexOf('多頭排列') !== -1; });
+  assert.strictEqual(trendStage.note, '', '沒有無法計算的關卡 note 應該是空字串，不是 undefined');
+  console.log('Test 10 (screeningFunnelStages_) passed.');
+}
+
+// --- 11. runAnalysis()：scanRows 是空陣列時（完全查無資料，不是篩選篩掉）仍要附上
+//    diagnostics（totalStocks=0），呼叫端才分得出「查無資料」跟「有資料但全被篩掉」---
+{
+  const original = context.computeLatestDayRows_;
+  context.computeLatestDayRows_ = function () { return []; };
+  context.getPortfolioMap_ = function () { return {}; };
+  const result = context.runAnalysis();
+  assert.strictEqual(result.latestDate, null);
+  assert.strictEqual(result.report.length, 0);
+  assert.ok(result.diagnostics, 'scanRows 空陣列時也要附上 diagnostics');
+  assert.strictEqual(result.diagnostics.totalStocks, 0);
+  context.computeLatestDayRows_ = original;
+  console.log('Test 11 (runAnalysis with zero scanRows still attaches diagnostics) passed.');
+}
+
 console.log('All Analysis.gs tests passed.');

@@ -198,7 +198,12 @@ function computeLookbackStartStr_(latestDateStr) {
 function runAnalysis() {
   var portfolioMap = getPortfolioMap_();
   var scanRows = computeLatestDayRows_(portfolioMap);
-  if (scanRows.length === 0) return { latestDate: null, report: [], fullReport: [] };
+  if (scanRows.length === 0) {
+    // scanRows 是空的代表連「最新一天」都讀不到任何一列資料——不是篩選篩掉，是資料來源
+    // 那一關就沒東西可以篩。仍然附上 diagnostics（totalStocks 會是 0），讓呼叫端一眼看出
+    // 「查無資料」跟「有資料但全部被篩掉」是兩件不同的事，不用另外猜。
+    return { latestDate: null, report: [], fullReport: [], diagnostics: computeScreeningStats_([], portfolioMap, null) };
+  }
 
   var latestDateStr = scanRows[0]['日期'];
   var appliedFactorModels = getAppliedFactorModels(); // 讀 FactorModelHistory 分頁，跟 BigQuery 無關，很快
@@ -231,17 +236,16 @@ function runAnalysis() {
   report.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
   fullReport.sort(function (a, b) { return (b.Armor_Score || 0) - (a.Armor_Score || 0); });
 
-  var result = {
+  return {
     latestDate: latestDateStr,
     lookbackStart: computeLookbackStartStr_(latestDateStr),
     dataSourceMode: getEffectiveDataSourceMode_(),
     report: report,
-    fullReport: fullReport
+    fullReport: fullReport,
+    // 一律附上篩選漏斗統計（不只 0 檔訊號才附），讓「查看篩選漏斗明細」隨時可用，也方便
+    // 之後換不同篩選/因子版本時比較漏斗人數的變化，不用等到剛好篩出 0 檔才看得到。
+    diagnostics: computeScreeningStats_(scanRows, portfolioMap, latestDateStr)
   };
-  if (report.length === 0) {
-    result.diagnostics = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
-  }
-  return result;
 }
 
 /** 組出跟原本 Colab v17.0 to_excel() 一致的完整欄位列（見 CONFIG.FULL_REPORT_COLUMNS）。 */
@@ -267,14 +271,13 @@ function buildFullReportRow_(r, diag) {
  */
 function runAnalysisAndSave() {
   var result = runAnalysis();
+  // 篩選漏斗一律快取，即使這次連 latestDate 都沒有（scanRows 是空的）——這樣「查看篩選漏斗
+  // 明細」在「完全查無資料」的情況下也能立刻顯示原因，不用另外重新讀一次歷史資料。
+  if (result.diagnostics) cacheScreeningDiagnostics_(result.diagnostics);
   if (!result.latestDate) return result;
 
   var sheet = getReportsSheet_();
   upsertRowsByDate_(sheet, CONFIG.REPORT_COLUMNS, result.report);
-
-  if (result.diagnostics) {
-    cacheScreeningDiagnostics_(result.diagnostics);
-  }
 
   try {
     exportReportToDrive_(result.fullReport, result.latestDate);
@@ -337,11 +340,17 @@ function processAnalysisJobTick_() {
   var startTime = Date.now();
   try {
     var result = runAnalysisAndSave();
+    var scannedCount = result.diagnostics ? result.diagnostics.totalStocks : null;
     state.status = 'done';
+    state.latestDate = result.latestDate;
+    state.reportCount = result.report ? result.report.length : 0;
+    state.scannedCount = scannedCount;
     state.updatedAt = Date.now();
     saveAnalysisJobState_(state);
     logRun_('手動重新計算戰報', '成功',
-      result.latestDate ? ('戰報日期 ' + result.latestDate + '，' + result.report.length + ' 檔訊號') : '沒有可用的歷史資料',
+      result.latestDate
+        ? ('戰報日期 ' + result.latestDate + '，' + result.report.length + ' 檔訊號（共掃描 ' + scannedCount + ' 檔）')
+        : ('沒有可用的歷史資料（掃描到 ' + scannedCount + ' 檔）'),
       Math.round((Date.now() - startTime) / 1000));
   } catch (e) {
     state.status = 'error';
@@ -352,22 +361,23 @@ function processAnalysisJobTick_() {
   }
 }
 
-/** 把「篩選漏斗明細」存進 Script Properties，key 內含日期，隔天會自動被新的一筆覆蓋。
- *  避免前端在同一天內每次遇到 0 檔訊號都要重新讀一次歷史資料（materialized/external 模式下最貴的一步）。 */
+/** 把「篩選漏斗明細」存進 Script Properties，隔天會自動被新的一筆覆蓋。快取 key 用「今天
+ *  執行的日期」而不是 stats.latestDate——這樣就算這次掃描完全查無資料（latestDate 是 null），
+ *  一樣能快取住「今天查過一次，結果是查無資料」這件事，不用每次打開頁面都重新查一次。 */
 function cacheScreeningDiagnostics_(stats) {
   PropertiesService.getScriptProperties().setProperty(
     CONFIG.PROP_KEYS.SCREENING_DIAGNOSTICS_CACHE,
-    JSON.stringify({ date: stats.latestDate, stats: stats })
+    JSON.stringify({ cachedAt: normalizeDateStr(new Date()), stats: stats })
   );
 }
 
-/** 讀取今天的篩選漏斗明細快取；不存在或不是今天的就回傳 null。 */
+/** 讀取今天的篩選漏斗明細快取；不存在或不是今天算的就回傳 null。 */
 function readCachedScreeningDiagnostics_(todayStr) {
   var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.SCREENING_DIAGNOSTICS_CACHE);
   if (!raw) return null;
   try {
     var parsed = JSON.parse(raw);
-    return parsed && parsed.date === todayStr ? parsed.stats : null;
+    return parsed && parsed.cachedAt === todayStr ? parsed.stats : null;
   } catch (e) {
     return null;
   }
@@ -472,17 +482,34 @@ function computeScreeningStats_(scanRows, portfolioMap, latestDateStr) {
  */
 function getScreeningDiagnostics() {
   var todayStr = normalizeDateStr(new Date());
-  var cached = readCachedScreeningDiagnostics_(todayStr);
-  if (cached) return cached;
-
-  var portfolioMap = getPortfolioMap_();
-  var scanRows = computeLatestDayRows_(portfolioMap);
-  if (scanRows.length === 0) return { latestDate: null, totalStocks: 0 };
-
-  var latestDateStr = scanRows[0]['日期'];
-  var stats = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
-  cacheScreeningDiagnostics_(stats);
+  var stats = readCachedScreeningDiagnostics_(todayStr);
+  if (!stats) {
+    var portfolioMap = getPortfolioMap_();
+    var scanRows = computeLatestDayRows_(portfolioMap);
+    var latestDateStr = scanRows.length > 0 ? scanRows[0]['日期'] : null;
+    stats = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
+    cacheScreeningDiagnostics_(stats);
+  }
+  stats.stages = screeningFunnelStages_(stats);
   return stats;
+}
+
+/**
+ * 把 computeScreeningStats_ 算出來的具名欄位轉成一份「有順序的關卡清單」，純粹給顯示用
+ * （前端「查看篩選漏斗明細」畫面、排程佇列卡片都吃這個 {label, count, note} 形狀）。
+ * 之後如果換一套不同的篩選/因子版本、關卡定義完全不同，只要另外寫一個回傳同樣形狀陣列的
+ * 函式（例如 screeningFunnelStagesV2_），前端渲染邏輯完全不用改。
+ */
+function screeningFunnelStages_(stats) {
+  return [
+    { label: '掃描到的股票數（含持股）', count: stats.totalStocks, note: stats.holdingCount ? stats.holdingCount + ' 檔是持股，不計入下面漏斗' : '' },
+    { label: '成交金額達門檻', count: stats.liquidityPass, note: '' },
+    { label: '多頭排列（Trend_Score=2）', count: stats.upwardTrend, note: '' },
+    { label: '法人參與度前20%', count: stats.highInstParticipation, note: stats.nullInstPartRank ? stats.nullInstPartRank + ' 檔無法計算' : '' },
+    { label: '量能前15%', count: stats.volumeSpark, note: stats.nullVolRatioRank ? stats.nullVolRatioRank + ' 檔無法計算' : '' },
+    { label: '同時符合「趨勢啟動」三條件', count: stats.breakoutMatches, note: '' },
+    { label: '多頭+法人逢低承接前30%（「趨勢領航」）', count: stats.ibfHighWithUpward, note: stats.nullIbfRank ? stats.nullIbfRank + ' 檔無法計算' : '' }
+  ];
 }
 
 /**

@@ -48,7 +48,16 @@ loadIntoContext('JobQueue.gs');
 // --- jobQueueDetail_: analysis ---
 {
   assert.strictEqual(context.jobQueueDetail_('analysis', { status: 'running' }), '');
-  assert.ok(context.jobQueueDetail_('analysis', { status: 'done' }).length > 0);
+
+  const noData = context.jobQueueDetail_('analysis', { status: 'done', latestDate: null, scannedCount: 0 });
+  assert.ok(noData.indexOf('掃描到 0 檔資料') !== -1, '完全查無資料時要明講「掃描到 0 檔」，不能只講「已完成」');
+
+  const withData = context.jobQueueDetail_('analysis', {
+    status: 'done', latestDate: '2026-07-30', reportCount: 12, scannedCount: 1980
+  });
+  assert.ok(withData.indexOf('2026-07-30') !== -1);
+  assert.ok(withData.indexOf('12 檔訊號') !== -1);
+  assert.ok(withData.indexOf('共掃描 1980 檔') !== -1);
   console.log('Test jobQueueDetail_ (analysis) passed.');
 }
 
