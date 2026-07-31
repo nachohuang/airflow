@@ -97,11 +97,17 @@ function calcBqCost_(bytesProcessed, pricePerTb) {
  * 日期範圍可能重疊，這裡依 (股票代號, 日期) 只留一筆，避免同一天的資料被算兩次。
  */
 function buildDedupedViewSql_(externalTableRef, viewRef) {
+  var otherCols = bqColumnNames_().filter(function (c) { return c !== 'date_str'; });
+  var cols = [normalizedDateStrSqlExpr_() + ' AS date_str'].concat(otherCols).join(', ');
   return [
     'CREATE OR REPLACE VIEW `' + viewRef + '` AS',
+    'WITH normalized AS (',
+    '  SELECT ' + cols,
+    '  FROM `' + externalTableRef + '`',
+    ')',
     'SELECT * EXCEPT(rn) FROM (',
     '  SELECT *, ROW_NUMBER() OVER (PARTITION BY stock_id, date_str ORDER BY date_str) AS rn',
-    '  FROM `' + externalTableRef + '`',
+    '  FROM normalized',
     ')',
     'WHERE rn = 1'
   ].join('\n');
@@ -164,12 +170,28 @@ function groupFileIdsByHeaderRow_(fileHeaderPairs) {
 }
 
 /**
+ * date_str 正規化成 yyyy-MM-dd 的 SQL 運算式。來源 Drive CSV（不管是曾經的 native 模式每日
+ * 寫入、或使用者手動上傳的既有彙整表）存的「日期」欄位其實是 formatSlashDate_ 產生的
+ * 'yyyy/MM/dd' 顯示格式，不是 ISO 格式——這個問題原本以為只在 history_raw（見
+ * normalizeRowsDateField_），後來發現 history_materialized 是直接從這些 CSV 的外部資料表
+ * SELECT * 複製過來的，同樣的斜線格式一直都在，只是被 SAFE_CAST 悄悄忽略沒被發現。
+ * 這裡在複製進原生表這一步統一轉成 ISO 格式：不只讓下游 SAFE_CAST(date_str AS DATE) 不再
+ * 解析失敗，也讓「同一天但格式不同」的列在下面 PARTITION BY stock_id, date_str 去重時能被
+ * 正確視為同一天——不然兩種格式的字串不相等，去重會誤判成兩篇不同日期的資料，各自留一筆，
+ * 也是股票數/總列數異常暴增的成因之一。
+ */
+function normalizedDateStrSqlExpr_() {
+  return "CASE WHEN REGEXP_CONTAINS(date_str, r'^\\d{4}/\\d{2}/\\d{2}$') THEN REPLACE(date_str, '/', '-') ELSE date_str END";
+}
+
+/**
  * materialized 模式的核心 SQL：把每組（欄位順序相同的一批檔案）各自的外部資料表
  * （schema 欄名都已經是我們自己的 ascii 名稱，見 resolveHeaderOrderMapping_）UNION ALL 起來，
  * 再依 (stock_id, date_str) 去重，複製進一份 BigQuery 原生表。
  */
 function buildMaterializeSql_(groupTableRefs, materializedTableRef) {
-  var cols = bqColumnNames_().join(', ');
+  var otherCols = bqColumnNames_().filter(function (c) { return c !== 'date_str'; });
+  var cols = [normalizedDateStrSqlExpr_() + ' AS date_str'].concat(otherCols).join(', ');
   var unionSql = groupTableRefs.map(function (ref) {
     return '  SELECT ' + cols + ' FROM `' + ref + '`';
   }).join('\n  UNION ALL\n');

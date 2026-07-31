@@ -256,8 +256,10 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('FROM `proj.ds.history_external_autodetect_g0`') !== -1);
   assert.ok(sql.indexOf('FROM `proj.ds.history_external_autodetect_g1`') !== -1);
   assert.ok(sql.indexOf('UNION ALL') !== -1);
-  // 每組都是用我們自己的 ascii 欄名（date_str, stock_id...），不是中文欄名
-  assert.ok(sql.indexOf('SELECT date_str,') !== -1 || sql.indexOf('SELECT date_str, stock_id') !== -1);
+  // 每組都是用我們自己的 ascii 欄名（date_str, stock_id...），不是中文欄名；date_str 這欄
+  // 用正規化運算式取代（見 normalizedDateStrSqlExpr_），不是原封不動的裸欄名
+  assert.ok(sql.indexOf('AS date_str, stock_id') !== -1, 'date_str 應該是正規化運算式的別名，且緊接著 stock_id');
+  assert.ok(sql.indexOf("REGEXP_CONTAINS(date_str, r'^\\d{4}/\\d{2}/\\d{2}$')") !== -1, '要把來源 CSV 可能的斜線格式日期正規化掉');
   // 去重邏輯
   assert.ok(sql.indexOf('PARTITION BY stock_id, date_str') !== -1);
   assert.ok(sql.indexOf('WHERE rn = 1') !== -1);
@@ -271,7 +273,16 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('FROM `proj.ds.history_external`') !== -1);
   assert.ok(sql.indexOf('PARTITION BY stock_id, date_str') !== -1);
   assert.ok(sql.indexOf('WHERE rn = 1') !== -1);
+  assert.ok(sql.indexOf('AS date_str, stock_id') !== -1, 'external 模式一樣要正規化 date_str，不然斜線格式的日期在 SAFE_CAST 那邊會悄悄消失');
   console.log('Test buildDedupedViewSql_ passed.');
+}
+
+// --- normalizedDateStrSqlExpr_ ---
+{
+  const expr = context.normalizedDateStrSqlExpr_();
+  assert.ok(expr.indexOf("REGEXP_CONTAINS(date_str, r'^\\d{4}/\\d{2}/\\d{2}$')") !== -1);
+  assert.ok(expr.indexOf("REPLACE(date_str, '/', '-')") !== -1);
+  console.log('Test normalizedDateStrSqlExpr_ passed.');
 }
 
 // --- buildHistoryRangeQuerySql_ ---
