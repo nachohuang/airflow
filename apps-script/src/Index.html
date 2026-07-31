@@ -51,20 +51,30 @@
 
       <section id="tab-research" class="tab-panel">
         <div class="sub-tabs">
-          <button class="sub-tab-btn active" data-subtab="backtest">回測</button>
-          <button class="sub-tab-btn" data-subtab="factorscan">因子相關性（秒級）</button>
-          <button class="sub-tab-btn" data-subtab="factorregression">因子回歸模型（BigQuery）</button>
+          <button class="sub-tab-btn active" data-subtab="backtest">📊 策略回測驗證</button>
+          <button class="sub-tab-btn" data-subtab="factorscan">🔥 因子健康度</button>
+          <button class="sub-tab-btn" data-subtab="factorregression">🧠 因子迴歸模型</button>
         </div>
 
         <div id="subtab-backtest" class="sub-tab-panel active">
           <form id="backtestForm" class="form-card">
-            <h3>v16.10 Alpha 回測</h3>
-            <label>進場日 <input id="btStart" type="date" required></label>
-            <label>結束日（追蹤到） <input id="btEnd" type="date" required></label>
-            <label>流動性門檻（成交金額，元） <input id="btLiquidity" type="number" value="20000000"></label>
-            <label>目標報酬（%） <input id="btTarget" type="number" value="5" step="0.1"></label>
+            <h3>📊 策略歷史回測（v17.0 趨勢共鳴版）</h3>
+            <div class="meta-bar" style="margin-bottom:0;">
+              進場條件沿用「戰報與個股」現在用的同一套 v17.0 篩選規則跟門檻，不用另外設定；
+              出場規則也跟持股一致（從高點回落 2.5% 觸發止損）。
+            </div>
+            <label>進場區間起始日 <input id="btStart" type="date" required></label>
+            <label>進場區間結束日 <input id="btEnd" type="date" required></label>
+            <label>目標報酬
+              <div class="chip-select-list" id="btTargetChips">
+                <button type="button" class="chip-select" data-value="3">輕鬆 3%</button>
+                <button type="button" class="chip-select active" data-value="5">標準 5%</button>
+                <button type="button" class="chip-select" data-value="10">積極 10%</button>
+              </div>
+              <input type="hidden" id="btTarget" value="5">
+            </label>
             <div class="form-actions">
-              <button type="submit" class="btn-primary">開始回測</button>
+              <button type="submit" class="btn-primary">🚀 開始回測歷史戰報</button>
               <button type="button" id="btSaveBtn" class="btn-secondary" disabled>存成檔案</button>
             </div>
           </form>
@@ -72,17 +82,12 @@
         </div>
 
         <div id="subtab-factorscan" class="sub-tab-panel">
-          <div class="meta-bar">
-            單一因子跟「未來5日報酬率」的 Pearson 相關係數，Apps Script 現場算，秒級出結果，
-            適合快速看某個因子最近有沒有還在有效。跟下面「因子回歸模型」的差別：這裡一次只看一個因子，
-            不用 BigQuery；因子回歸模型是同時考慮多個因子（LASSO 迴歸），還會挑出最佳組合、記錄歷史。
-          </div>
+          <div class="meta-bar">🔥 因子有效性熱力榜：預設分析近 30 天單一因子與股價漲跌的關聯度，Apps Script 現場算，秒級出結果。</div>
           <form id="factorScanForm" class="form-card">
-            <h3>因子相關性掃描</h3>
-            <label>起始日（選填，留空用全部資料） <input id="fsStart" type="date"></label>
-            <label>結束日（選填） <input id="fsEnd" type="date"></label>
+            <label>起始日 <input id="fsStart" type="date"></label>
+            <label>結束日 <input id="fsEnd" type="date"></label>
             <div class="form-actions">
-              <button type="submit" class="btn-primary">開始掃描</button>
+              <button type="submit" class="btn-primary">🔥 開始掃描</button>
               <button type="button" id="fsSaveBtn" class="btn-secondary" disabled>存成檔案</button>
             </div>
           </form>

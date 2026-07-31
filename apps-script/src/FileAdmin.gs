@@ -91,15 +91,15 @@ function rowsToCsv_(columns, rows) {
 }
 
 
-/** 把「回測研究」頁面跑出來的回測結果存成 CSV，放進 Regression 資料夾。 */
+/** 把「v17.0 策略回測」跑出來的逐筆訊號明細存成 CSV，放進 Regression 資料夾。 */
 function saveBacktestToDrive(backtestResult) {
-  if (!backtestResult || !backtestResult.results || backtestResult.results.length === 0) {
+  if (!backtestResult || !backtestResult.trades || backtestResult.trades.length === 0) {
     throw new Error('沒有回測結果可以存檔');
   }
-  var columns = ['證券代號', '證券名稱', '進場IBF_Rank', 'WIP_穩定度(STD)', 'Depth_MA5',
-    'Market_Trend_Entry', 'Peak_Return%', 'Final_Return%', 'Days_to_Peak', 'Win_Label'];
-  var csv = '\uFEFF' + rowsToCsv_(columns, backtestResult.results);
-  var fileName = backtestResult.startDay.replace(/-/g, '') + '_' + backtestResult.endDay.replace(/-/g, '') + '_v16.10_回測結果.csv';
+  var columns = ['證券代號', '證券名稱', '進場日', '進場策略', '出場日', '出場結果',
+    '持有天數', '最終報酬%', '最高報酬%', '最大回落%'];
+  var csv = '\uFEFF' + rowsToCsv_(columns, backtestResult.trades);
+  var fileName = backtestResult.startDay.replace(/-/g, '') + '_' + backtestResult.endDay.replace(/-/g, '') + '_v17.0_回測結果.csv';
   var blob = Utilities.newBlob(csv, 'text/csv', fileName);
   var file = getRegressionFolder_().createFile(blob);
   logRun_('回測研究', '成功', '已匯出回測結果：' + fileName, 0);

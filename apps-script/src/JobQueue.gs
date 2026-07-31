@@ -16,7 +16,8 @@ function jobQueueDefs_() {
     { key: 'analysis', label: '重新計算戰報', getStatus: getAnalysisJobStatus },
     { key: 'backfill', label: '資料範圍重新彙整', getStatus: getBackfillJobStatus },
     { key: 'factorRegression', label: '因子迴歸模型', getStatus: getFactorRegressionJobStatus },
-    { key: 'materialize', label: '立即重新整理（materialized）', getStatus: getMaterializeJobStatus }
+    { key: 'materialize', label: '立即重新整理（materialized）', getStatus: getMaterializeJobStatus },
+    { key: 'backtest', label: 'v17.0 策略回測', getStatus: getBacktestV17JobStatus }
   ];
 }
 
@@ -53,6 +54,12 @@ function jobQueueDetail_(key, state) {
     var names = state.fileNames || [];
     return '涵蓋 ' + (state.fileCount === null || state.fileCount === undefined ? names.length : state.fileCount) +
       ' 個來源檔案' + (names.length ? '：' + names.join('、') : '');
+  }
+  if (key === 'backtest') {
+    if (state.status !== 'done') return '';
+    var res = state.result;
+    if (!res || !res.summary) return res && res.warning ? res.warning : '';
+    return state.startStr + '~' + state.endStr + '　' + res.summary.signalCount + ' 筆訊號、勝率 ' + res.summary.winRate + '%';
   }
   return '';
 }
@@ -95,6 +102,11 @@ function restartJob(key) {
     return startFactorRegressionJob(regressionState && regressionState.l1Reg);
   }
   if (key === 'materialize') return startMaterializeJob();
+  if (key === 'backtest') {
+    var backtestState = getBacktestV17JobStatus();
+    if (!backtestState || !backtestState.startStr) throw new Error('沒有可重新啟動的回測工作');
+    return startBacktestV17Job(backtestState.startStr, backtestState.endStr, backtestState.targetProfit);
+  }
   throw new Error('未知的工作類型：' + key);
 }
 
@@ -104,20 +116,22 @@ function deleteJob(key) {
   if (key === 'backfill') return clearBackfillJob_();
   if (key === 'factorRegression') return clearFactorRegressionJob_();
   if (key === 'materialize') return clearMaterializeJob_();
+  if (key === 'backtest') return clearBacktestV17Job_();
   throw new Error('未知的工作類型：' + key);
 }
 
-/** 四種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
+/** 五種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
  *  不會碰到「每日自動排程」（scheduledDailyFetch，見 Scheduler.gs，那是核心功能本身，
  *  不是這裡管的「背景 job」）。 */
 function knownJobTickHandlers_() {
-  return ['processAnalysisJobTick_', 'processBackfillJobTick_', 'processFactorRegressionJobTick_', 'processMaterializeJobTick_'];
+  return ['processAnalysisJobTick_', 'processBackfillJobTick_', 'processFactorRegressionJobTick_',
+    'processMaterializeJobTick_', 'processBacktestV17JobTick_'];
 }
 
 /**
- * 排程佇列的「強制清空所有背景工作」按鈕：把四個 job 的狀態都清回 idle，同時直接掃過整個
- * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這四種 tick 函式的觸發器。
- * 不是只呼叫四個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
+ * 排程佇列的「強制清空所有背景工作」按鈕：把五個 job 的狀態都清回 idle，同時直接掃過整個
+ * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這五種 tick 函式的觸發器。
+ * 不是只呼叫五個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
  * 用「直接掃過觸發器列表」再確認一次，避免萬一有某個角落遺留、沒有被任何 job 狀態追蹤到
  * 的孤兒觸發器——例如很久以前用過的 handler 名稱、或某次刪除呼叫剛好失敗——這種觸發器
  * 不會出現在排程佇列的任何一張卡片裡，卻仍然會在排定的時間自己觸發、佔用執行配額，
@@ -128,6 +142,7 @@ function stopAllJobs() {
   clearBackfillJob_();
   clearFactorRegressionJob_();
   clearMaterializeJob_();
+  clearBacktestV17Job_();
   var handlers = knownJobTickHandlers_();
   var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
@@ -136,7 +151,7 @@ function stopAllJobs() {
       removed++;
     }
   });
-  logRun_('強制清空背景工作', '成功', '已清空 4 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
+  logRun_('強制清空背景工作', '成功', '已清空 5 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
   return { removedTriggerCount: removed };
 }
 

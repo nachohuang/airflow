@@ -15,6 +15,15 @@ function toNumber(v) {
   return isNaN(n) ? 0 : n;
 }
 
+/** 四捨五入到指定小數位數，null/NaN 一律回傳 null（不硬塞成 0，避免看起來像真的算出 0）。
+ *  多個檔案共用（AiDiagnosis.gs 的費用估算、Backtest.gs 的回測數字…），放在 Utils.gs 這個
+ *  純運算共用層，不用每個檔案各自重複定義。 */
+function round_(v, digits) {
+  if (v === null || v === undefined || isNaN(v)) return null;
+  var f = Math.pow(10, digits);
+  return Math.round(v * f) / f;
+}
+
 /** 同 toNumber，但轉換失敗時回傳 null 而非 0（用於不該被硬塞 0 的欄位）。 */
 function toNumberOrNull(v) {
   if (v === null || v === undefined || v === '') return null;
@@ -328,6 +337,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     toNumber: toNumber,
     toNumberOrNull: toNumberOrNull,
+    round_: round_,
     zfill4: zfill4,
     sanitizeStockId_: sanitizeStockId_,
     formatDateForRpc_: formatDateForRpc_,

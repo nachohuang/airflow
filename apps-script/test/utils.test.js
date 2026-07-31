@@ -141,6 +141,14 @@ assert.strictEqual(g.get('b').length, 1);
   assert.ok(approxEqual(r, 1, 1e-9));
 }
 
+// round_
+assert.strictEqual(U.round_(1.23456, 2), 1.23);
+assert.strictEqual(U.round_(1.006, 2), 1.01);
+assert.strictEqual(U.round_(-1.006, 2), -1.01);
+assert.strictEqual(U.round_(null, 2), null);
+assert.strictEqual(U.round_(undefined, 2), null);
+assert.strictEqual(U.round_(NaN, 2), null);
+
 // normalizeDateStr
 assert.strictEqual(U.normalizeDateStr('2026/07/08'), '2026-07-08');
 assert.strictEqual(U.normalizeDateStr('20260708'), '2026-07-08');

@@ -19,7 +19,10 @@ Google Apps Script Web App。歷史資料以「每月一份 CSV」的形式存�
 3. **個股分析**：搜尋任一股票代號，看收盤價 + MA5/MA20/MA60 走勢圖、法人買賣超柱狀圖，
    以及這檔股票過去每天的 Armor_Score / 操作策略歷史（「簡單分析個股數據序時變化」）。
 4. **研究**：三個子分頁，都是回答「哪個因子有效」這個問題，深度跟花費不同：
-   - **回測**：對應 Colab Cell 5（v16.10 Alpha Backtest），指定日期區間跑一次進出場模擬。
+   - **回測**：v17.0 策略歷史驗證，直接重用「戰報與個股」用的同一套 v17.0 進場/出場邏輯
+     （見 `Analysis.gs` 的 `computeFactors_`/`diagnoseRow_`），對指定進場區間內每一天符合
+     條件的訊號各自模擬進出場，彙總成勝率／平均報酬／最大回落，前身是 Colab Cell 5
+     （v16.10 Alpha Backtest，用另一套跟戰報不一致的規則，已淘汰）。
    - **因子相關性**：對應 Colab Cell 4，單一因子跟未來 5 日報酬率的 Pearson 相關係數，
      Apps Script 現場算，秒級出結果，不用 BigQuery。
    - **因子回歸模型（BigQuery，選用進階功能）**：多因子 LASSO 迴歸，同時考慮所有候選因子，
@@ -94,7 +97,7 @@ Apps Script 讀取檔案內容這個動作本身就會直接失敗（讀不進�
 | Cell 1：抓 T86/MI_INDEX/BWIBBU_d、合併存檔 | `DataFetch.gs` + `SheetUtils.upsertHistoryRows_`（實作在 `HistoryFiles.gs`） |
 | Cell 2：v17.0 評分/診斷 | `Analysis.gs` |
 | Cell 4：因子相關性掃描 | `FactorScan.gs` |
-| Cell 5：v16.10 Alpha 回測 | `Backtest.gs` |
+| Cell 5：v16.10 Alpha 回測（已淘汰，見上方「回測」說明） | `Backtest.gs`（改重用 Cell 2 的 v17.0 邏輯） |
 | pandas groupby/rolling/rank | `Utils.gs`（純 JS 重寫，見下方「為什麼要重寫」） |
 | `google_drive_output_dir`（ALL_COMBINED.csv） | 歷史資料資料夾裡每月一份的 `YYYY-MM_ALL_COMBINED.csv`（`HistoryFiles.gs`） |
 | `google_drive_folder_output_report_dir`（Reports） | Sheets 的 `Reports` 分頁 + Drive `Reports` 資料夾（xlsx 快照） |

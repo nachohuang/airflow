@@ -294,4 +294,36 @@
   .compare-delta.up { color: var(--green); }
   .compare-delta.down { color: var(--red); }
   .compare-delta.flat { color: var(--text-muted); }
+
+  /* 因子相關性「因子有效性熱力榜」：橫條依相關係數絕對值排名，取代原本的純文字表格。 */
+  .heat-list { display: flex; flex-direction: column; gap: 10px; }
+  .heat-row { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .heat-row-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; margin-bottom: 6px; }
+  .heat-row-name { font-weight: 600; }
+  .heat-row-r { font-weight: 700; }
+  .heat-bar-track { background: var(--bg); border-radius: 999px; height: 8px; overflow: hidden; }
+  .heat-bar-fill { height: 100%; border-radius: 999px; }
+  .heat-bar-fill.hot { background: var(--green); }
+  .heat-bar-fill.mid { background: var(--amber); }
+  .heat-bar-fill.cold { background: var(--red); }
+
+  /* 目標報酬等可挑選的 chips（跟原本的 .chip 唯讀清單不同，這裡要能點選切換 active 狀態）。 */
+  .chip-select-list { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip-select {
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--text);
+    border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+  }
+  .chip-select.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* v17.0 策略回測「戰報勝率報告」核心指標卡片。 */
+  .backtest-summary { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+  .backtest-stat-row { display: flex; gap: 8px; }
+  .backtest-stat {
+    flex: 1; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 10px; text-align: center;
+  }
+  .backtest-stat .bs-label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+  .backtest-stat .bs-value { font-size: 18px; font-weight: 700; }
+  .backtest-stat .bs-value.up { color: var(--green); }
+  .backtest-stat .bs-value.down { color: var(--red); }
 </style>

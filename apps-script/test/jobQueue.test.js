@@ -73,4 +73,24 @@ loadIntoContext('JobQueue.gs');
   console.log('Test jobQueueDetail_ (materialize) passed.');
 }
 
+// --- jobQueueDetail_: backtest ---
+{
+  assert.strictEqual(context.jobQueueDetail_('backtest', { status: 'running' }), '');
+
+  const withWarning = context.jobQueueDetail_('backtest', {
+    status: 'done', startStr: '2026-07-01', endStr: '2026-07-31',
+    result: { warning: '這段區間內沒有符合 v17.0 進場條件的訊號。' }
+  });
+  assert.ok(withWarning.indexOf('沒有符合') !== -1);
+
+  const withResult = context.jobQueueDetail_('backtest', {
+    status: 'done', startStr: '2026-07-01', endStr: '2026-07-31',
+    result: { summary: { signalCount: 23, winRate: 68.5 } }
+  });
+  assert.ok(withResult.indexOf('2026-07-01~2026-07-31') !== -1);
+  assert.ok(withResult.indexOf('23 筆訊號') !== -1);
+  assert.ok(withResult.indexOf('勝率 68.5%') !== -1);
+  console.log('Test jobQueueDetail_ (backtest) passed.');
+}
+
 console.log('All JobQueue.gs tests passed.');

@@ -102,7 +102,9 @@ function runFactorCorrelationScan(startStr, endStr) {
     return { sampleSize: 0, correlations: [], warning: '數據量不足（可能是 MA60 暖機未完成），請放寬日期區間。' };
   }
 
-  var factors = ['Next_5D_Return', 'Inst_Streak', 'Inst_Participation', 'Trend_Score', 'IBF_20D', 'Safety_Rank'];
+  // Next_5D_Return 本身是相關係數的目標（比較基準），不能同時當候選因子跟自己比——那一項
+  // 永遠會算出 r=1.00，混進排行榜裡只會誤導使用者以為有一個「完美因子」。
+  var factors = ['Inst_Streak', 'Inst_Participation', 'Trend_Score', 'IBF_20D', 'Safety_Rank'];
   var target = validScan.map(function (r) { return r.Next_5D_Return; });
   var correlations = factors.map(function (f) {
     var series = validScan.map(function (r) { return r[f]; });

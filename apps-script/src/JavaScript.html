@@ -154,6 +154,19 @@
     var d = new Date();
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   }
+  /** N 天前的日期字串，給「策略研究」底下幾個表單的預設區間用（近 30 天），
+   *  避免使用者每次都要自己手動點日期選擇器才知道要填什麼。 */
+  function daysAgoDateStr_(n) {
+    var d = new Date();
+    d.setDate(d.getDate() - n);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+  // 「策略研究」底下的表單預設近 30 天區間，使用者一進來就有可以直接按下去的預設值，
+  // 不用自己先搞懂要填什麼日期才敢按按鈕。
+  document.getElementById('fsStart').value = daysAgoDateStr_(30);
+  document.getElementById('fsEnd').value = todayDateStr_();
+  document.getElementById('btStart').value = daysAgoDateStr_(30);
+  document.getElementById('btEnd').value = todayDateStr_();
 
   var DATA_SOURCE_LABEL = {
     native: 'Drive 月份檔案（native）',
@@ -674,33 +687,102 @@
     });
   });
 
+  document.querySelectorAll('#btTargetChips .chip-select').forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      document.querySelectorAll('#btTargetChips .chip-select').forEach(function (c) { c.classList.remove('active'); });
+      chip.classList.add('active');
+      document.getElementById('btTarget').value = chip.getAttribute('data-value');
+    });
+  });
+
   var lastBacktestResult = null;
+
+  /** 「戰報勝率報告」：核心指標 header（勝率/平均報酬/最大回落）+ 可摺疊的逐筆觸發明細，
+   *  取代原本只丟一份純文字表格、還要另外存檔去 Drive 看的做法。 */
+  function renderBacktestResult_(resultEl, res) {
+    if (!res || res.error) { resultEl.innerHTML = errorBox((res && res.error) || '沒有回測結果'); document.getElementById('btSaveBtn').disabled = true; return; }
+    lastBacktestResult = res;
+    document.getElementById('btSaveBtn').disabled = !(res.trades && res.trades.length);
+    if (res.warning) { resultEl.innerHTML = errorBox(res.warning); return; }
+
+    var s = res.summary;
+    var summaryHtml = '<div class="backtest-summary">' +
+      '<div class="meta-bar" style="margin-bottom:0;">' + escapeHtml(res.startDay) + ' ~ ' + escapeHtml(res.endDay) +
+      '　共 ' + s.signalCount + ' 筆 v17.0 進場訊號　目標報酬 ' + res.targetProfit + '%</div>' +
+      '<div class="backtest-stat-row">' +
+      '<div class="backtest-stat"><div class="bs-label">🏆 策略勝率</div><div class="bs-value ' + (s.winRate >= 50 ? 'up' : 'down') + '">' + fmtNum(s.winRate, 1) + '%</div></div>' +
+      '<div class="backtest-stat"><div class="bs-label">📈 平均報酬</div><div class="bs-value ' + (s.avgReturn >= 0 ? 'up' : 'down') + '">' + (s.avgReturn >= 0 ? '+' : '') + fmtNum(s.avgReturn, 1) + '%</div></div>' +
+      '<div class="backtest-stat"><div class="bs-label">📉 最大回落</div><div class="bs-value down">-' + fmtNum(s.maxDrawdown, 1) + '%</div></div>' +
+      '</div>' +
+      '<div class="meta-bar" style="margin-bottom:0;">🎯 目標達成率 ' + fmtNum(s.targetHitRate, 1) + '%　平均持有 ' + fmtNum(s.avgDaysHeld, 1) + ' 個交易日</div>' +
+      '</div>';
+
+    var rows = res.trades.map(function (t) {
+      var ret = t['最終報酬%'];
+      return '<tr><td>' + escapeHtml(t['證券代號']) + ' ' + escapeHtml(t['證券名稱']) + '</td>' +
+        '<td>' + escapeHtml(t['進場日']) + '</td><td>' + escapeHtml(t['出場日']) + '</td>' +
+        '<td>' + escapeHtml(t['出場結果']) + '</td>' +
+        '<td style="color:' + (ret >= 0 ? 'var(--green)' : 'var(--red)') + ';font-weight:600;">' + (ret >= 0 ? '+' : '') + fmtNum(ret, 1) + '%</td></tr>';
+    }).join('');
+    var detailHtml = '<details class="info-collapse"><summary>查看 ' + res.trades.length + ' 檔歷史觸發明細</summary>' +
+      '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
+      '<th>股票</th><th>進場日</th><th>出場日</th><th>出場結果</th><th>最終報酬</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '</details>';
+
+    resultEl.innerHTML = summaryHtml + detailHtml;
+  }
+
+  var backtestPollTimer_ = null;
+  function stopBacktestPoll_() {
+    if (backtestPollTimer_) { clearInterval(backtestPollTimer_); backtestPollTimer_ = null; }
+  }
+  function pollBacktestJob_() {
+    stopBacktestPoll_();
+    var poll = function () {
+      callServer('getBacktestV17JobStatus').then(function (state) {
+        if (!state || state.status === 'running') return;
+        stopBacktestPoll_();
+        renderBacktestJobResult_(state);
+      }).catch(function () {
+        // 輪詢本身失敗不代表背景工作失敗，畫面維持現狀，下一次輪詢再試
+      });
+    };
+    poll();
+    backtestPollTimer_ = setInterval(poll, 3000);
+  }
+  function renderBacktestJobResult_(state) {
+    var resultEl = document.getElementById('backtestResult');
+    if (state.status === 'error') { resultEl.innerHTML = errorBox('背景回測失敗：' + state.errorMessage); return; }
+    renderBacktestResult_(resultEl, state.result);
+  }
+  /** 「策略研究」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後不知道回測跑到哪。 */
+  function checkBacktestJobOnLoad_() {
+    return callServer('getBacktestV17JobStatus').then(function (state) {
+      if (state && state.status === 'running') {
+        document.getElementById('backtestResult').innerHTML =
+          '<div class="loading">⏳ 背景回測中，可以切到別的畫面或關掉螢幕，不會中斷這個工作...</div>';
+        pollBacktestJob_();
+        return;
+      }
+      if (state && (state.status === 'done' || state.status === 'error')) renderBacktestJobResult_(state);
+    }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
+  }
+
+  /**
+   * 「開始回測歷史戰報」改成背景 job：要對進場區間內每一天都跑一次完整的因子計算，
+   * 資料量比平常戰報大不少，手機瀏覽器容易連線中斷，改成排背景 job 後這次呼叫立刻回傳，
+   * 前端改用輪詢 getBacktestV17JobStatus() 顯示進度。
+   */
   document.getElementById('backtestForm').addEventListener('submit', function (e) {
     e.preventDefault();
     var start = document.getElementById('btStart').value;
     var end = document.getElementById('btEnd').value;
-    var liquidity = parseFloat(document.getElementById('btLiquidity').value) || 20000000;
     var target = parseFloat(document.getElementById('btTarget').value) || 5;
     var resultEl = document.getElementById('backtestResult');
-    resultEl.innerHTML = '<div class="loading">回測執行中...</div>';
+    resultEl.innerHTML = '<div class="loading">⏳ 背景回測中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，資料量大時可能要一兩分鐘...</div>';
     document.getElementById('btSaveBtn').disabled = true;
-    withSpin(callServer('runBacktest', start, end, liquidity, target)).then(function (res) {
-      if (res.error) { resultEl.innerHTML = errorBox(res.error); return; }
-      lastBacktestResult = res;
-      document.getElementById('btSaveBtn').disabled = !(res.results && res.results.length);
-      if (res.warning) { resultEl.innerHTML = errorBox(res.warning); return; }
-      var s = res.summary;
-      var summaryHtml = '<div class="meta-bar">樣本數 ' + s.sampleSize +
-        '　正報酬勝率 ' + s.winRate + '%　目標達成率 ' + s.targetHitRate + '%' +
-        (s.avgDaysToTarget !== null ? '　平均達標天數 ' + s.avgDaysToTarget : '') +
-        (s.topIbfAvgReturn !== null ? '　IBF前10平均報酬 ' + s.topIbfAvgReturn + '%' : '') + '</div>';
-      var rows = res.results.slice(0, 30).map(function (r) {
-        return '<tr><td>' + escapeHtml(r['證券代號']) + ' ' + escapeHtml(r['證券名稱']) + '</td>' +
-          '<td>' + fmtNum(r['Peak_Return%']) + '%</td><td>' + fmtNum(r['Final_Return%']) + '%</td>' +
-          '<td>' + fmtNum(r['進場IBF_Rank']) + '</td><td>' + r['Days_to_Peak'] + '</td></tr>';
-      }).join('');
-      resultEl.innerHTML = summaryHtml + '<div class="table-scroll"><table class="simple-table"><thead><tr>' +
-        '<th>股票</th><th>最高報酬</th><th>結束報酬</th><th>進場IBF</th><th>達峰天數</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    withSpin(callServer('startBacktestV17Job', start, end, target)).then(function () {
+      pollBacktestJob_();
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
   document.getElementById('btSaveBtn').addEventListener('click', function () {
@@ -709,6 +791,26 @@
       alert('已存檔：' + f.name);
     }).catch(function (err) { alert(err.message || err); });
   });
+
+  /** FactorScan.gs 候選因子代碼 -> 中文名詞（跟因子回歸模型的 FACTOR_CODE_CN 是不同來源的
+   *  兩組欄位，這裡是 computeFactorScanFields_ 算出來的研究用因子，不是 BQML 的候選欄位）。 */
+  var FACTOR_SCAN_CN = {
+    Inst_Streak: '法人連買天數',
+    Inst_Participation: '法人參與度',
+    Trend_Score: '趨勢動能',
+    IBF_20D: '下跌接手率',
+    Safety_Rank: '安全邊際分數'
+  };
+  function factorScanCn_(code) { return FACTOR_SCAN_CN[code] || code; }
+
+  /** 相關係數 r 的白話品質分級：跟因子回歸模型的 R² 燈號是不同量級的指標（這裡是單因子跟
+   *  未來5日報酬率的 Pearson r，不是迴歸模型的 R²），門檻分開訂。 */
+  function corrTier_(r) {
+    if (r === null || r === undefined || isNaN(r)) return { emoji: '⚪', text: '無法計算', cls: 'cold' };
+    if (r >= 0.3) return { emoji: '🟢🔥', text: '強正相關（熱門有效）', cls: 'hot' };
+    if (r >= 0.1) return { emoji: '🟡', text: '中度相關（中性）', cls: 'mid' };
+    return { emoji: '🔴❄️', text: '弱／負相關（近期失效或反向）', cls: 'cold' };
+  }
 
   var lastFactorScanResult = null;
   document.getElementById('factorScanForm').addEventListener('submit', function (e) {
@@ -723,11 +825,20 @@
       if (!res.correlations.length) { resultEl.innerHTML = '<div class="empty-hint">沒有可分析的資料</div>'; return; }
       lastFactorScanResult = res;
       document.getElementById('fsSaveBtn').disabled = false;
-      var rows = res.correlations.map(function (c) {
-        return '<tr><td>' + escapeHtml(c.factor) + '</td><td>' + (c.correlation === null ? '-' : fmtNum(c.correlation, 4)) + '</td></tr>';
+
+      var maxAbs = Math.max.apply(null, res.correlations.map(function (c) { return Math.abs(c.correlation || 0); })) || 1;
+      var rowsHtml = res.correlations.map(function (c) {
+        var tier = corrTier_(c.correlation);
+        var widthPct = Math.round(Math.abs(c.correlation || 0) / maxAbs * 100);
+        return '<div class="heat-row">' +
+          '<div class="heat-row-head"><span class="heat-row-name">' + tier.emoji + ' ' + escapeHtml(factorScanCn_(c.factor)) + '</span>' +
+          '<span class="heat-row-r">r = ' + (c.correlation === null ? '-' : (c.correlation >= 0 ? '+' : '') + fmtNum(c.correlation, 2)) + '</span></div>' +
+          '<div class="heat-bar-track"><div class="heat-bar-fill ' + tier.cls + '" style="width:' + widthPct + '%;"></div></div>' +
+          '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + tier.text + '</div>' +
+          '</div>';
       }).join('');
-      resultEl.innerHTML = '<div class="meta-bar">樣本數 ' + res.sampleSize + '</div>' +
-        '<table class="simple-table"><thead><tr><th>因子</th><th>與未來5日報酬相關係數</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      resultEl.innerHTML = '<div class="meta-bar">樣本數 ' + res.sampleSize + '　（跟「未來5日報酬率」的關聯度，愈上面代表近期愈有效）</div>' +
+        '<div class="heat-list">' + rowsHtml + '</div>';
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
   document.getElementById('fsSaveBtn').addEventListener('click', function () {
@@ -762,7 +873,10 @@
   }
 
   function loadResearchTab_() {
-    return Promise.all([loadActiveFactorModelCard_(), loadFactorModelHistory_(), checkFactorRegressionJobOnLoad_()]);
+    return Promise.all([
+      loadActiveFactorModelCard_(), loadFactorModelHistory_(), checkFactorRegressionJobOnLoad_(),
+      checkBacktestJobOnLoad_()
+    ]);
   }
 
   // ---------- 因子回歸模型：人性化中文對照表 / R² 品質燈號 ----------
@@ -792,13 +906,20 @@
     return fmtNum(n * 100, digits === undefined ? 2 : digits) + '%';
   }
 
-  /** 抗跌力／月報酬 R² 的白話品質燈號：>=8% 良好、4~8% 普通、<4% 偏弱（含負值）。 */
-  function r2Quality_(r2) {
+  /** 抗跌力／月報酬 R² 的白話品質燈號：>=8% 良好、4~8% 普通、<4% 偏弱（含負值）。
+   *  月報酬預測力（kind='return'）另外處理：短期股價漲跌本身雜訊就很高，R² 偏低是常態，
+   *  用紅色燈號反而會誤導使用者以為「這個模型壞了」，改用黃色 + 明確提醒僅供輔助。 */
+  function r2Quality_(r2, kind) {
     if (r2 === null || r2 === undefined || r2 === '' || isNaN(Number(r2))) return { emoji: '⚪', text: '尚無資料' };
     var pct = Number(r2) * 100;
-    if (pct >= 8) return { emoji: '🟢', text: '良好' };
-    if (pct >= 4) return { emoji: '🟡', text: '普通' };
-    return { emoji: '🔴', text: '偏弱' };
+    if (kind === 'return') {
+      if (pct >= 8) return { emoji: '🟢', text: '良好（相對少見，仍建議搭配其他指標）' };
+      if (pct >= 4) return { emoji: '🟡', text: '中等（僅供輔助，勿單靠此下單）' };
+      return { emoji: '🟡', text: '弱（金融短期漲跌雜訊高，僅供輔助，勿單靠此下單）' };
+    }
+    if (pct >= 8) return { emoji: '🟢', text: '強（適合大盤震盪時防禦）' };
+    if (pct >= 4) return { emoji: '🟡', text: '中等' };
+    return { emoji: '🔴', text: '弱' };
   }
 
   /** 「🌟 目前生效模型」卡片：白話呈現目前套用中的因子模型版本，見 FactorRegression.gs
@@ -820,7 +941,7 @@
     var versionLabel = summary.sameVersion ? (r1 ? r1.timestamp : dr.timestamp) :
       [r1 ? ('1個月報酬 ' + r1.timestamp) : null, dr ? ('抗跌力 ' + dr.timestamp) : null].filter(function (s) { return s; }).join('　');
 
-    var r1Q = r1 ? r2Quality_(r1.r2) : null;
+    var r1Q = r1 ? r2Quality_(r1.r2, 'return') : null;
     var drQ = dr ? r2Quality_(dr.r2) : null;
     var factorCodes = (dr && dr.topFeatures.length) ? dr.topFeatures : (r1 ? r1.topFeatures : []);
     var factorsHtml = factorCodes.length ? factorCodes.map(factorCodeCn_).join('、') : '（尚無權重資料）';
@@ -1248,6 +1369,7 @@
     else if (key === 'backfill') stopBackfillPoll_();
     else if (key === 'factorRegression') stopFactorRegressionPoll_();
     else if (key === 'materialize') stopMaterializePoll_();
+    else if (key === 'backtest') stopBacktestPoll_();
   }
 
   function renderJobQueue_(jobs) {
@@ -1289,6 +1411,7 @@
           else if (key === 'backfill') pollBackfillStatus_();
           else if (key === 'factorRegression') pollFactorRegressionJob_();
           else if (key === 'materialize') pollMaterializeJob_();
+          else if (key === 'backtest') pollBacktestJob_();
         }).catch(function (err) { alert(err.message || err); });
       });
     });
