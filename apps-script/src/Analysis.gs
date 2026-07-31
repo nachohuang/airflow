@@ -284,6 +284,74 @@ function runAnalysisAndSave() {
   return result;
 }
 
+// ============================================================
+// 「重新計算戰報」背景 job（機制跟 DataFetch.gs 的補抓/重新彙整 job 相同）。
+// 手機切到背景、螢幕關掉很容易讓瀏覽器中斷連線，這時如果是直接同步呼叫 runAnalysisAndSave，
+// google.script.run 的 success handler 永遠不會被觸發，畫面就卡死在「分析中」——即使 Apps
+// Script 那邊其實已經算完、也已經寫進 Reports 分頁了。改用時間觸發器在背景做，前端只需要
+// 輪詢 getAnalysisJobStatus() 顯示進度，不受連線中斷影響。
+// ============================================================
+
+function getAnalysisJobState_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.ANALYSIS_JOB_STATE);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveAnalysisJobState_(state) {
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.ANALYSIS_JOB_STATE, JSON.stringify(state));
+}
+
+function deleteAnalysisJobTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'processAnalysisJobTick_') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/** 「最新戰報」重新整理 action sheet 的「重新計算戰報」呼叫：排一個幾乎立刻觸發的一次性
+ *  時間觸發器就馬上回傳，實際分析在另一次獨立觸發的執行裡進行，這次 google.script.run
+ *  呼叫本身非常快，不會因為分析本身要跑數十秒而被瀏覽器分頁中斷影響。 */
+function startAnalysisJob() {
+  deleteAnalysisJobTriggers_();
+  saveAnalysisJobState_({ status: 'running', updatedAt: Date.now() });
+  ScriptApp.newTrigger('processAnalysisJobTick_').timeBased().after(1000).create();
+  return { status: 'running' };
+}
+
+/** 前端輪詢用：狀態存在 Script Properties，不是存在瀏覽器分頁的記憶體裡，任何時候打開頁面
+ *  呼叫這個都看得到最新進度（或是已經做完的結果）。 */
+function getAnalysisJobStatus() {
+  return getAnalysisJobState_() || { status: 'idle' };
+}
+
+/**
+ * 真正做事的地方，由時間觸發器呼叫（不是 google.script.run），完全不受瀏覽器分頁影響。
+ * 分析本身是單一批次運算（不像補抓區間要一天一天跑），正常情況下一次 tick 就會跑完，
+ * 這裡沒有像 processBackfillJobTick_ 那樣的時間預算/續跑機制；真的遇到未預期的例外
+ * 會被接住寫進 job 狀態變成 status:'error'，不會讓狀態就這樣默默停在 'running'。
+ */
+function processAnalysisJobTick_() {
+  deleteAnalysisJobTriggers_();
+  var state = getAnalysisJobState_();
+  if (!state || state.status !== 'running') return;
+
+  var startTime = Date.now();
+  try {
+    var result = runAnalysisAndSave();
+    state.status = 'done';
+    state.updatedAt = Date.now();
+    saveAnalysisJobState_(state);
+    logRun_('手動重新計算戰報', '成功',
+      result.latestDate ? ('戰報日期 ' + result.latestDate + '，' + result.report.length + ' 檔訊號') : '沒有可用的歷史資料',
+      Math.round((Date.now() - startTime) / 1000));
+  } catch (e) {
+    state.status = 'error';
+    state.errorMessage = String(e.message || e);
+    state.updatedAt = Date.now();
+    saveAnalysisJobState_(state);
+    logRun_('手動重新計算戰報', '失敗', String(e.message || e), Math.round((Date.now() - startTime) / 1000));
+  }
+}
+
 /** 把「篩選漏斗明細」存進 Script Properties，key 內含日期，隔天會自動被新的一筆覆蓋。
  *  避免前端在同一天內每次遇到 0 檔訊號都要重新讀一次歷史資料（materialized/external 模式下最貴的一步）。 */
 function cacheScreeningDiagnostics_(stats) {
@@ -309,8 +377,8 @@ function readCachedScreeningDiagnostics_(todayStr) {
  * 前端「今日戰報」頁面呼叫用。Reports 分頁如果已經有今天的資料，直接回傳快取結果，
  * 不重跑一次「讀歷史 -> 算因子」（external 模式下這一步要重新掃一次 BigQuery/Drive 檔案，
  * 是整個流程裡最慢的部分）；只有還沒有今天的資料時才會真的算一次。
- * 想強制重算（例如剛改了持股、想馬上看新的續抱/止損判斷），用「立即測試執行」按鈕
- * （呼叫 runManualFullUpdate，一定會真的重跑，不會被這裡的快取擋下來）。
+ * 想強制重算（例如剛改了持股、想馬上看新的續抱/止損判斷），用最新戰報頁「重新計算戰報」
+ * （呼叫 startAnalysisJob 背景 job，一定會真的重跑，不會被這裡的快取擋下來）。
  */
 function getDashboardReport() {
   var todayStr = normalizeDateStr(new Date());
@@ -327,8 +395,8 @@ function getDashboardReport() {
 /**
  * 純讀取版：只讀 Reports 分頁目前存的「最近一次」戰報，不管是不是今天，絕對不會觸發
  * 任何計算（不讀歷史、不查 BigQuery）。前端「今日戰報」頁面打開時改呼叫這個，避免單純
- * 打開頁面就意外觸發一次昂貴、可能失敗的即時計算；真的要重新產生，靠右上角重新整理
- * （呼叫 runManualFullUpdate）另外手動觸發。
+ * 打開頁面就意外觸發一次昂貴、可能失敗的即時計算；真的要重新產生，靠右上角重新整理選
+ * 「重新計算戰報」（呼叫 startAnalysisJob 背景 job）另外手動觸發。
  */
 function getCachedDashboardReport() {
   var rows = readSheetObjects_(getReportsSheet_());

@@ -89,7 +89,7 @@
     hideRefreshActionSheet_();
     withSpin(loadDashboard(false));
   });
-  document.getElementById('refreshSheetFetch').addEventListener('click', function () {
+  document.getElementById('refreshSheetRecompute').addEventListener('click', function () {
     hideRefreshActionSheet_();
     withSpin(loadDashboard(true));
   });
@@ -122,9 +122,18 @@
   }
 
   /**
-   * forceRefresh 為 false（頁面打開、切回這頁）：只讀 Reports 分頁上「最近一次」存的戰報，
-   * 純讀取、絕對不會觸發任何計算，就算 BigQuery 那邊有問題也不會在單純打開頁面時爆出來。
-   * forceRefresh 為 true（按右上角重新整理）：才會真的重新抓資料、重新跑一次完整分析。
+   * forceRefresh 為 false（頁面打開、切回這頁、或背景重新計算 job 剛做完）：只讀 Reports
+   * 分頁上「最近一次」存的戰報，純讀取、絕對不會觸發任何計算，就算 BigQuery 那邊有問題也
+   * 不會在單純打開頁面時爆出來；同時會先檢查一次有沒有背景 job 正在跑，有的話改顯示進度。
+   * forceRefresh 為 true（action sheet 選「重新計算戰報」）：排一個背景 job，根據目前已有的
+   * 歷史資料重新跑一次完整分析。向證交所抓新資料是另一件事，不在這裡做——要抓最新資料請到
+   * 「系統與資料後台」→「立即測試執行」，抓完之後再回這裡選「重新計算戰報」。
+   *
+   * 用背景 job（時間觸發器）而不是直接同步呼叫 runAnalysisAndSave，是因為手機切到背景／
+   * 螢幕關掉很容易讓瀏覽器中斷這次連線，google.script.run 的 success handler 永遠不會被
+   * 觸發，畫面就卡死在「分析中」——即使 Apps Script 那邊其實已經算完了。改成排背景 job 後，
+   * 這次呼叫只是「排工作」立刻回傳，實際運算在獨立觸發的執行裡進行，前端改用輪詢
+   * getAnalysisJobStatus() 顯示進度，不受連線中斷影響。
    */
   function todayDateStr_() {
     var d = new Date();
@@ -138,19 +147,73 @@
   };
 
   function loadDashboard(forceRefresh) {
+    if (forceRefresh) return startAnalysisRecomputeJob_();
+    var listEl = document.getElementById('dashboardList');
+    listEl.innerHTML = '<div class="loading">載入中...</div>';
+    return withSpin(callServer('getAnalysisJobStatus')).then(function (jobState) {
+      if (jobState && jobState.status === 'running') {
+        showAnalysisJobRunning_();
+        pollAnalysisJob_();
+        return;
+      }
+      return renderCachedDashboard_(false);
+    }).catch(function (err) {
+      document.getElementById('dashboardMeta').textContent = '';
+      listEl.innerHTML = errorBox(err);
+    });
+  }
+
+  function showAnalysisJobRunning_() {
+    document.getElementById('dashboardMeta').textContent = '';
+    document.getElementById('dashboardList').innerHTML =
+      '<div class="loading">⏳ 背景重新計算戰報中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，' +
+      '完成後回來就會看到最新戰報...</div>';
+  }
+
+  /** action sheet「重新計算戰報」呼叫：排一個背景 job 就立刻回傳，不用等分析真的跑完。 */
+  function startAnalysisRecomputeJob_() {
+    showAnalysisJobRunning_();
+    return withSpin(callServer('startAnalysisJob')).then(function () {
+      pollAnalysisJob_();
+    }).catch(function (err) { document.getElementById('dashboardList').innerHTML = errorBox(err); });
+  }
+
+  var analysisJobPollTimer_ = null;
+  function stopAnalysisJobPoll_() {
+    if (analysisJobPollTimer_) { clearInterval(analysisJobPollTimer_); analysisJobPollTimer_ = null; }
+  }
+
+  /** 背景工作是在獨立的時間觸發器裡跑的，這裡只是每隔幾秒讀一次目前狀態——就算這個分頁被
+   *  關掉、切到背景、輪詢中斷，工作本身完全不受影響，回來重新打開頁面（loadDashboard 一開始
+   *  就會檢查一次 job 狀態）就能看到最新（甚至已經做完的）結果，不需要靠這個分頁「撐著」。 */
+  function pollAnalysisJob_() {
+    stopAnalysisJobPoll_();
+    var poll = function () {
+      callServer('getAnalysisJobStatus').then(function (state) {
+        if (!state || state.status === 'running') return;
+        stopAnalysisJobPoll_();
+        if (state.status === 'error') {
+          document.getElementById('dashboardList').innerHTML = errorBox('背景重新計算失敗：' + state.errorMessage);
+          return;
+        }
+        renderCachedDashboard_(true);
+      }).catch(function () {
+        // 輪詢本身失敗（例如剛好網路不穩）不代表背景工作失敗，畫面維持現狀，下一次輪詢再試
+      });
+    };
+    poll();
+    analysisJobPollTimer_ = setInterval(poll, 3000);
+  }
+
+  /** 純讀取 Reports 分頁「最近一次」戰報並渲染，不觸發任何計算。autoShowDiagnostics 為 true
+   *  時（剛跑完一次背景重新計算），0 檔訊號會直接展開篩選漏斗明細，不用使用者多按一次。 */
+  function renderCachedDashboard_(autoShowDiagnostics) {
     var listEl = document.getElementById('dashboardList');
     var metaEl = document.getElementById('dashboardMeta');
-    listEl.innerHTML = '<div class="loading">' + (forceRefresh ? '分析中，可能需要一點時間…' : '載入中...') + '</div>';
-    var fn = forceRefresh ? 'runManualFullUpdate' : 'getCachedDashboardReport';
-    return withSpin(callServer(fn)).then(function (res) {
-      // 抓「今天」失敗（例如證交所 T86 還沒公布）不再擋住整個畫面——runManualFullUpdate
-      // 不管今天抓不抓得到都會回傳 analysis（自動退回目前最新的既有資料），這裡只是把
-      // 「今天抓取本身失敗」這件事誠實標註出來，不阻止顯示結果。
-      var result = forceRefresh ? res.analysis : res;
+    listEl.innerHTML = '<div class="loading">載入中...</div>';
+    return callServer('getCachedDashboardReport').then(function (result) {
       if (!result || !result.latestDate) {
-        metaEl.textContent = (forceRefresh && res.fetch && !res.fetch.ok) ?
-          '抓取最新資料失敗（' + res.fetch.error + '），且目前沒有任何歷史資料可用。' :
-          '目前還沒有任何戰報，按右上角🔄重新整理產生一次。';
+        metaEl.textContent = '目前還沒有任何戰報，按右上角🔄選「重新計算戰報」產生一次。';
         listEl.innerHTML = '';
         return;
       }
@@ -158,15 +221,13 @@
       var rangeNote = result.lookbackStart ? '　使用資料：' + result.lookbackStart + ' ~ ' + result.latestDate : '';
       var sourceNote = result.dataSourceMode ? '　資料來源：' + (DATA_SOURCE_LABEL[result.dataSourceMode] || result.dataSourceMode) : '';
       var noteParts = [];
-      if (forceRefresh && res.fetch && !res.fetch.ok) {
-        noteParts.push('⚠️ 今天最新資料還沒抓到（' + res.fetch.error + '），已改用目前最新的既有資料');
-      } else if (!isToday) {
-        noteParts.push('不是今天，按右上角🔄重新整理更新');
+      if (!isToday) {
+        noteParts.push('不是今天，若今天資料已公布，先到「系統與資料後台」按「立即測試執行」抓取，再回來選「重新計算戰報」');
       }
       metaEl.textContent = '戰報日期：' + result.latestDate + '　共 ' + result.report.length + ' 檔訊號' + rangeNote + sourceNote +
         (noteParts.length ? '　' + noteParts.join('；') : '');
       if (result.report.length === 0) {
-        if (forceRefresh) {
+        if (autoShowDiagnostics) {
           listEl.innerHTML = '<div class="loading">篩選出 0 檔，讀取篩選漏斗明細中...</div>';
           loadScreeningDiagnostics_(listEl);
         } else {

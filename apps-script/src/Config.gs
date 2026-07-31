@@ -31,7 +31,8 @@ var CONFIG = {
     BIGQUERY_PRICE_PER_TB: 'BIGQUERY_PRICE_PER_TB',
     BIGQUERY_MATERIALIZED_LAST_REFRESH: 'BIGQUERY_MATERIALIZED_LAST_REFRESH',
     SCREENING_DIAGNOSTICS_CACHE: 'SCREENING_DIAGNOSTICS_CACHE', // {date, stats} JSON，避免 0 檔訊號時前端再重跑一次昂貴的歷史查詢
-    BACKFILL_JOB_STATE: 'BACKFILL_JOB_STATE' // 「補抓/重新彙整區間」背景 job 的目前狀態（見 DataFetch.gs）
+    BACKFILL_JOB_STATE: 'BACKFILL_JOB_STATE', // 「補抓/重新彙整區間」背景 job 的目前狀態（見 DataFetch.gs）
+    ANALYSIS_JOB_STATE: 'ANALYSIS_JOB_STATE' // 「重新計算戰報」背景 job 的目前狀態（見 Analysis.gs）
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
