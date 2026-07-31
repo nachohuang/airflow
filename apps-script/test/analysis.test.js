@@ -21,6 +21,7 @@ function loadIntoContext(relPath) {
 
 loadIntoContext('Config.gs');
 loadIntoContext('Utils.gs');
+loadIntoContext('FactorRegression.gs'); // computePredictedResistanceRanks_ 用得到 computeWeightedFactorScore_
 loadIntoContext('Analysis.gs');
 
 function approxEqual(a, b, eps) {
@@ -348,6 +349,7 @@ function buildSyntheticHistory(days) {
   const originalApplied = context.getAppliedFactorModels;
   const originalPredicted = context.computePredictedFactorScores_;
   const originalSourceMode = context.getEffectiveDataSourceMode_;
+  const originalStrategy = context.getScreeningStrategy;
 
   const syntheticRows = [
     { // 持股：一定會產生訊號（持股守護／止盈止損），但不算在篩選漏斗裡
@@ -371,6 +373,9 @@ function buildSyntheticHistory(days) {
   context.getAppliedFactorModels = function () { return {}; };
   context.computePredictedFactorScores_ = function () { return { predictedReturn1M: null, predictedDownsideResistance: null }; };
   context.getEffectiveDataSourceMode_ = function () { return 'native'; };
+  // getScreeningStrategy() 要讀 PropertiesService，這個測試檔案沒有接 GAS 環境，
+  // 跟其他依賴外部服務的函式一樣直接 stub 掉，固定用預設的 rule_v17 版本跑這個測試。
+  context.getScreeningStrategy = function () { return 'rule_v17'; };
 
   const result = context.runAnalysis();
   assert.strictEqual(result.report.length, 2, '持股 9999 + 趨勢啟動 1101 都應該產生訊號，1102 流動性不足應該是 Neutral');
@@ -383,6 +388,7 @@ function buildSyntheticHistory(days) {
   context.getAppliedFactorModels = originalApplied;
   context.computePredictedFactorScores_ = originalPredicted;
   context.getEffectiveDataSourceMode_ = originalSourceMode;
+  context.getScreeningStrategy = originalStrategy;
   console.log('Test 12 (runAnalysis diagnostics.reportCount matches report.length) passed.');
 }
 
@@ -404,6 +410,97 @@ function buildSyntheticHistory(days) {
   assert.strictEqual(sanitized['Armor_Score'], 88.5);
   assert.strictEqual(sanitized['參考最高價'], null);
   console.log('Test 13 (sanitizeRowForRpc_) passed.');
+}
+
+// --- 14. classifyEntrySignal_：可切換的「新進場訊號」判斷邏輯（rule_v17／factor_model_rank／
+//     hybrid 三種版本），只驗證「新進場」分支，既有持股的止盈/止損不在這個函式的職責內 ---
+{
+  const baseRow = { '成交金額': 200000000, Trend_Score: 2, Inst_Part_Rank: 0.9, Vol_Ratio_Rank: 0.9, IBF_20D_Rank: 0.9 };
+  const lowLiquidityRow = Object.assign({}, baseRow, { '成交金額': 1000000 });
+
+  // rule_v17：流動性不足一律 Neutral，不管其他條件多漂亮
+  assert.strictEqual(context.classifyEntrySignal_(lowLiquidityRow, 'rule_v17').strategy, 'Neutral');
+  // rule_v17：符合三條件 -> 🚀 趨勢啟動
+  assert.strictEqual(context.classifyEntrySignal_(baseRow, 'rule_v17').strategy, '🚀 趨勢啟動');
+  // rule_v17：只符合 IBF 條件（法人參與度/量能不足）-> 🔥 趨勢領航
+  const ibfOnlyRow = Object.assign({}, baseRow, { Inst_Part_Rank: 0.5, Vol_Ratio_Rank: 0.5 });
+  assert.strictEqual(context.classifyEntrySignal_(ibfOnlyRow, 'rule_v17').strategy, '🔥 趨勢領航');
+  // rule_v17 完全不看 PredictedResistance_Rank
+  const highRankButRuleFail = Object.assign({}, baseRow, {
+    Inst_Part_Rank: 0.1, Vol_Ratio_Rank: 0.1, IBF_20D_Rank: 0.1, PredictedResistance_Rank: 0.99
+  });
+  assert.strictEqual(context.classifyEntrySignal_(highRankButRuleFail, 'rule_v17').strategy, 'Neutral');
+
+  // factor_model_rank：沒有排名資料（模型沒套用）-> 永遠 Neutral，即使規則式條件全部符合
+  assert.strictEqual(context.classifyEntrySignal_(baseRow, 'factor_model_rank').strategy, 'Neutral');
+  // factor_model_rank：排名夠高 -> 沿用 🚀 顏色，且不需要符合規則式條件
+  const highRankRow = Object.assign({}, baseRow, {
+    Trend_Score: 0, Inst_Part_Rank: 0.1, Vol_Ratio_Rank: 0.1, IBF_20D_Rank: 0.1, PredictedResistance_Rank: 0.95
+  });
+  const modelDiag = context.classifyEntrySignal_(highRankRow, 'factor_model_rank');
+  assert.strictEqual(modelDiag.strategy, '🚀 趨勢啟動');
+  assert.ok(modelDiag.interpretation.indexOf('模型精選') !== -1, modelDiag.interpretation);
+  // factor_model_rank：排名不夠高 -> Neutral
+  assert.strictEqual(context.classifyEntrySignal_(Object.assign({}, baseRow, { PredictedResistance_Rank: 0.5 }), 'factor_model_rank').strategy, 'Neutral');
+  // factor_model_rank：流動性不足，排名再高也是 Neutral
+  assert.strictEqual(context.classifyEntrySignal_(Object.assign({}, lowLiquidityRow, { PredictedResistance_Rank: 0.99 }), 'factor_model_rank').strategy, 'Neutral');
+
+  // hybrid：規則式條件符合 + 排名夠高 -> 觸發，說明文字要把兩邊都講清楚
+  const hybridDiag = context.classifyEntrySignal_(Object.assign({}, baseRow, { PredictedResistance_Rank: 0.8 }), 'hybrid');
+  assert.strictEqual(hybridDiag.strategy, '🚀 趨勢啟動');
+  assert.ok(hybridDiag.interpretation.indexOf('模型排名前') !== -1, hybridDiag.interpretation);
+  // hybrid：規則式條件符合，但排名不夠高 -> Neutral（兩邊都要過）
+  assert.strictEqual(context.classifyEntrySignal_(Object.assign({}, baseRow, { PredictedResistance_Rank: 0.5 }), 'hybrid').strategy, 'Neutral');
+  // hybrid：排名夠高但規則式條件不符合 -> Neutral
+  const hybridRankOnlyRow = Object.assign({}, baseRow, {
+    Inst_Part_Rank: 0.1, Vol_Ratio_Rank: 0.1, IBF_20D_Rank: 0.1, PredictedResistance_Rank: 0.99
+  });
+  assert.strictEqual(context.classifyEntrySignal_(hybridRankOnlyRow, 'hybrid').strategy, 'Neutral');
+
+  // 未知/未帶 strategyKey -> 退回 rule_v17 行為
+  assert.strictEqual(context.classifyEntrySignal_(baseRow, undefined).strategy, '🚀 趨勢啟動');
+  assert.strictEqual(context.classifyEntrySignal_(baseRow, 'not_a_real_strategy').strategy, '🚀 趨勢啟動');
+
+  console.log('Test 14 (classifyEntrySignal_) passed.');
+}
+
+// --- 15. computePredictedResistanceRanks_：factor_model_rank／hybrid 用的橫斷面排名，
+//     依日期分組各自排名，沒有套用中的抗跌力模型時兩個欄位全部是 null ---
+{
+  const rowsNoModel = [{ '日期': '2026-07-30', Inst_Participation: 0.5 }];
+  context.computePredictedResistanceRanks_(rowsNoModel, {});
+  assert.strictEqual(rowsNoModel[0].PredictedDownsideResistance, null);
+  assert.strictEqual(rowsNoModel[0].PredictedResistance_Rank, null);
+  // 只套用了另一個 label（1個月報酬），抗跌力還是沒套用，一樣要是 null
+  context.computePredictedResistanceRanks_(rowsNoModel, { return1m: { weights: {} } });
+  assert.strictEqual(rowsNoModel[0].PredictedResistance_Rank, null);
+
+  // 套用中的模型（單一因子 inst_participation，權重 1，等同直接對照 Inst_Participation 排序）
+  const rows = [
+    { '日期': '2026-07-30', '證券代號': 'A', Inst_Participation: 0.1 },
+    { '日期': '2026-07-30', '證券代號': 'B', Inst_Participation: 0.5 },
+    { '日期': '2026-07-30', '證券代號': 'C', Inst_Participation: 0.9 }
+  ];
+  const applied = { downsideResistance: { weights: { inst_participation: 1 } } };
+  context.computePredictedResistanceRanks_(rows, applied);
+  assert.ok(approxEqual(rows[0].PredictedDownsideResistance, 0.1));
+  assert.ok(approxEqual(rows[2].PredictedDownsideResistance, 0.9));
+  assert.ok(approxEqual(rows[0].PredictedResistance_Rank, 1 / 3));
+  assert.ok(approxEqual(rows[1].PredictedResistance_Rank, 2 / 3));
+  assert.ok(approxEqual(rows[2].PredictedResistance_Rank, 3 / 3));
+
+  // 不同天各自獨立排名，不會混在一起比較
+  const rowsMultiDay = [
+    { '日期': '2026-07-29', '證券代號': 'A', Inst_Participation: 100 },
+    { '日期': '2026-07-30', '證券代號': 'B', Inst_Participation: 0.1 },
+    { '日期': '2026-07-30', '證券代號': 'C', Inst_Participation: 0.9 }
+  ];
+  context.computePredictedResistanceRanks_(rowsMultiDay, applied);
+  assert.ok(approxEqual(rowsMultiDay[0].PredictedResistance_Rank, 1.0), '單獨一天只有一檔，排名必為 1.0，不受其他天分數更低的股票影響');
+  assert.ok(approxEqual(rowsMultiDay[1].PredictedResistance_Rank, 0.5));
+  assert.ok(approxEqual(rowsMultiDay[2].PredictedResistance_Rank, 1.0));
+
+  console.log('Test 15 (computePredictedResistanceRanks_) passed.');
 }
 
 console.log('All Analysis.gs tests passed.');

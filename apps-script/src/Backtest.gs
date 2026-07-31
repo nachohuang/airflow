@@ -59,11 +59,15 @@ function simulateTradeForward_(track, entryIdx, targetProfitPct, trailingStopPct
 
 /**
  * 前端「🚀 開始回測歷史戰報」呼叫（透過背景 job，見下方）：對 [startStr, endStr] 這段進場區間
- * 內每一天，用 v17.0 的進場條件（diagnoseRow_ 在沒有持股時的判斷：🚀 趨勢啟動／🔥 趨勢領航）
- * 找出所有訊號，各自模擬往後持有的結果，彙總成勝率／平均報酬／最大回落。
+ * 內每一天，用指定的篩選邏輯版本（見 Analysis.gs SCREENING_STRATEGIES，沒帶 strategyKey 就用
+ * 目前戰報生效中的版本）找出所有訊號，各自模擬往後持有的結果，彙總成勝率／平均報酬／最大回落。
+ * 這是「用回測實際比一比」不同篩選邏輯版本的入口——先用不同 strategyKey 各跑一次，比較
+ * summary 再決定要不要到「因子健康度＋迴歸模型」把某一版設成戰報生效版本。
  */
-function runBacktestV17_(startStr, endStr, targetProfit) {
+function runBacktestV17_(startStr, endStr, targetProfit, strategyKey) {
   targetProfit = targetProfit || BACKTEST_V17_TARGET_DEFAULT;
+  strategyKey = SCREENING_STRATEGIES[strategyKey] ? strategyKey : getScreeningStrategy();
+  var strategyDef = SCREENING_STRATEGIES[strategyKey];
 
   var startDt = new Date(startStr + 'T00:00:00');
   var endDt = new Date(endStr + 'T00:00:00');
@@ -71,6 +75,14 @@ function runBacktestV17_(startStr, endStr, targetProfit) {
   if (rangeDays < 0) return { error: '結束日不能早於進場區間起始日。' };
   if (rangeDays > BACKTEST_V17_MAX_RANGE_DAYS) {
     return { error: '進場區間最多 ' + BACKTEST_V17_MAX_RANGE_DAYS + ' 天，請縮小範圍（資料量太大，單次背景工作可能跑不完）。' };
+  }
+
+  var appliedFactorModels = null;
+  if (strategyDef.needsFactorModel) {
+    appliedFactorModels = getAppliedFactorModels();
+    if (!appliedFactorModels.downsideResistance) {
+      return { error: '篩選邏輯「' + strategyDef.label + '」需要先套用一版抗跌力因子迴歸模型，請先到「因子健康度＋迴歸模型」套用後再回測。' };
+    }
   }
 
   // 暖機：rolling 因子（MA60/IBF_20D 等）要跟正式戰報用同一套回看天數，算出來的訊號才會
@@ -94,6 +106,7 @@ function runBacktestV17_(startStr, endStr, targetProfit) {
   // Adjusted_Peak（既有持股用的欄位）這裡用不到——出場結果由 simulateTradeForward_ 自己
   // 針對每一筆訊號各自模擬，因為同一檔股票在回測區間內可能有好幾個不同的進場日。
   var rows = computeFactors_(rawRows, {});
+  if (strategyDef.needsFactorModel) computePredictedResistanceRanks_(rows, appliedFactorModels);
 
   var closesByCode = groupBy(rows, function (r) { return r['證券代號']; });
   closesByCode.forEach(function (group, code) {
@@ -107,7 +120,7 @@ function runBacktestV17_(startStr, endStr, targetProfit) {
 
   var trades = [];
   signalRows.forEach(function (r) {
-    var diag = diagnoseRow_(r, {});
+    var diag = diagnoseRow_(r, {}, strategyKey);
     if (diag.strategy === 'Neutral') return;
     var track = closesByCode.get(r['證券代號']);
     var entryDateStr = normalizeDateStr(r['日期']);
@@ -132,7 +145,8 @@ function runBacktestV17_(startStr, endStr, targetProfit) {
   if (trades.length === 0) {
     return {
       startDay: startStr, endDay: endStr, targetProfit: targetProfit,
-      trades: [], summary: null, warning: '這段區間內沒有符合 v17.0 進場條件的訊號。'
+      strategyKey: strategyKey, strategyLabel: strategyDef.label,
+      trades: [], summary: null, warning: '這段區間內沒有符合「' + strategyDef.label + '」進場條件的訊號。'
     };
   }
 
@@ -148,6 +162,8 @@ function runBacktestV17_(startStr, endStr, targetProfit) {
     startDay: startStr,
     endDay: endStr,
     targetProfit: targetProfit,
+    strategyKey: strategyKey,
+    strategyLabel: strategyDef.label,
     trades: trades,
     summary: {
       signalCount: trades.length,
@@ -183,11 +199,13 @@ function deleteBacktestV17JobTriggers_() {
 
 /** 前端「🚀 開始回測歷史戰報」送出表單時呼叫：存好 job 狀態、排一個幾乎立刻觸發的一次性
  *  時間觸發器就馬上回傳，實際運算在另一次獨立觸發的執行裡進行，不受這次瀏覽器連線影響。 */
-function startBacktestV17Job(startStr, endStr, targetProfit) {
+function startBacktestV17Job(startStr, endStr, targetProfit, strategyKey) {
   deleteBacktestV17JobTriggers_();
   saveBacktestV17JobState_({
     status: 'running', startStr: startStr, endStr: endStr,
-    targetProfit: targetProfit || BACKTEST_V17_TARGET_DEFAULT, updatedAt: Date.now()
+    targetProfit: targetProfit || BACKTEST_V17_TARGET_DEFAULT,
+    strategyKey: SCREENING_STRATEGIES[strategyKey] ? strategyKey : getScreeningStrategy(),
+    updatedAt: Date.now()
   });
   ScriptApp.newTrigger('processBacktestV17JobTick_').timeBased().after(1000).create();
   return { status: 'running' };
@@ -214,7 +232,7 @@ function processBacktestV17JobTick_() {
 
   var startTime = Date.now();
   try {
-    var res = runBacktestV17_(state.startStr, state.endStr, state.targetProfit);
+    var res = runBacktestV17_(state.startStr, state.endStr, state.targetProfit, state.strategyKey);
     var dur = Math.round((Date.now() - startTime) / 1000);
     if (res.error) {
       state.status = 'error';

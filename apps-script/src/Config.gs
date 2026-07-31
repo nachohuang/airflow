@@ -35,7 +35,8 @@ var CONFIG = {
     ANALYSIS_JOB_STATE: 'ANALYSIS_JOB_STATE', // 「重新計算戰報」背景 job 的目前狀態（見 Analysis.gs）
     FACTOR_REGRESSION_JOB_STATE: 'FACTOR_REGRESSION_JOB_STATE', // 「執行因子迴歸」背景 job 的目前狀態（見 FactorRegression.gs）
     MATERIALIZE_JOB_STATE: 'MATERIALIZE_JOB_STATE', // 「立即重新整理」（materialized 模式）背景 job 的目前狀態（見 BigQuerySync.gs）
-    BACKTEST_JOB_STATE: 'BACKTEST_JOB_STATE' // 「開始回測歷史戰報」背景 job 的目前狀態（見 Backtest.gs）
+    BACKTEST_JOB_STATE: 'BACKTEST_JOB_STATE', // 「開始回測歷史戰報」背景 job 的目前狀態（見 Backtest.gs）
+    SCREENING_STRATEGY: 'SCREENING_STRATEGY' // 目前生效的「新進場訊號」篩選邏輯版本（見 Analysis.gs SCREENING_STRATEGIES）
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，

@@ -9,20 +9,135 @@ function getReportsSheet_() {
   return ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.REPORTS, CONFIG.REPORT_COLUMNS);
 }
 
-function diagnoseRow_(row, portfolioMap) {
+/**
+ * 可切換的「新進場訊號」篩選邏輯版本（不影響既有持股的止盈/止損判斷，那段邏輯固定不變，
+ * 只有「要不要把某檔股票列為新訊號」這件事可以換邏輯）：
+ *   rule_v17：現行的規則式門檻——法人參與度排名、量能爆量排名、下跌接手率排名 + 趨勢分數，
+ *     完全不看因子迴歸模型，不需要先套用任何模型。
+ *   factor_model_rank：完全交給套用中的因子迴歸模型，用「預測抗跌力」在當天全部候選股票裡
+ *     的橫斷面排名（見 computePredictedResistanceRanks_）取前段班，不看規則式門檻。
+ *   hybrid：先過 rule_v17 的多頭排列 + 流動性門檻，再用模型排名做二次篩選，兩邊都要通過。
+ * 三種版本都可以直接餵進 runBacktestV17_() 用歷史資料互相比較勝率/平均報酬/最大回落，
+ * 覺得某一版比較好再到「因子健康度＋迴歸模型」頁面套用成戰報生效版本。
+ */
+var SCREENING_STRATEGIES = {
+  rule_v17: {
+    key: 'rule_v17', label: 'v17.0 規則式門檻（現行）', needsFactorModel: false,
+    description: '法人參與度、成交量爆量、下跌接手率排名 + 趨勢分數的規則式門檻，完全不依賴因子迴歸模型。'
+  },
+  factor_model_rank: {
+    key: 'factor_model_rank', label: '因子模型排名精選', needsFactorModel: true,
+    description: '不看規則式門檻，完全依套用中的因子迴歸模型（抗跌力）在當天全部候選裡的排名，取前 10%。'
+  },
+  hybrid: {
+    key: 'hybrid', label: '規則式門檻＋模型排名混合', needsFactorModel: true,
+    description: '先過 v17.0 規則式門檻，再用因子模型排名做二次篩選（前 30%），兩邊都要通過才算訊號。'
+  }
+};
+var SCREENING_STRATEGY_DEFAULT = 'rule_v17';
+var FACTOR_MODEL_RANK_TOP_PCT = 0.9; // factor_model_rank：預測抗跌力排名前 10%
+var HYBRID_RANK_MIN_PCT = 0.7; // hybrid：規則式門檻過關後，還要排名前 30%
+
+/** 目前生效的篩選邏輯版本（Script Properties 沒存過、或存的值已經不是合法版本時，退回預設值）。 */
+function getScreeningStrategy() {
+  var v = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.SCREENING_STRATEGY);
+  return SCREENING_STRATEGIES[v] ? v : SCREENING_STRATEGY_DEFAULT;
+}
+
+/** 前端「篩選邏輯」設定卡呼叫：切換戰報實際生效的篩選邏輯版本。 */
+function setScreeningStrategy(key) {
+  if (!SCREENING_STRATEGIES[key]) throw new Error('未知的篩選邏輯版本：' + key);
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.SCREENING_STRATEGY, key);
+  logRun_('篩選邏輯設定', '成功', '切換為：' + SCREENING_STRATEGIES[key].label, 0);
+  return listScreeningStrategies();
+}
+
+/** 前端：目前生效版本 + 全部可選版本（含說明文字），給設定卡的下拉選單用。 */
+function listScreeningStrategies() {
+  return {
+    current: getScreeningStrategy(),
+    options: Object.keys(SCREENING_STRATEGIES).map(function (k) { return SCREENING_STRATEGIES[k]; })
+  };
+}
+
+/**
+ * 幫 rows 補上「因子模型預測抗跌力」以及它在「同一天」全部候選股票裡的橫斷面排名
+ * （PredictedResistance_Rank，0~1，給 factor_model_rank／hybrid 兩種篩選邏輯用）。
+ * 沒有套用中的抗跌力模型時，兩個欄位全部是 null，呼叫端要自己檢查、不能假裝算得出來。
+ * 依日期分組分別排名（跟 computeFactors_ 算 Armor_Score 用的橫斷面排名是同一種手法），
+ * 這樣不管 rows 是「今天戰報用的一天」還是「回測用的一整段區間」都能正確處理，不會把
+ * 不同天的候選混在一起排名。
+ */
+function computePredictedResistanceRanks_(rows, appliedFactorModels) {
+  if (!appliedFactorModels || !appliedFactorModels.downsideResistance) {
+    rows.forEach(function (r) { r.PredictedDownsideResistance = null; r.PredictedResistance_Rank = null; });
+    return rows;
+  }
+  var weights = appliedFactorModels.downsideResistance.weights;
+  rows.forEach(function (r) { r.PredictedDownsideResistance = computeWeightedFactorScore_(r, weights); });
+  var byDate = groupBy(rows, function (r) { return normalizeDateStr(r['日期']); });
+  byDate.forEach(function (dayRows) {
+    var ranks = percentRank(dayRows, 'PredictedDownsideResistance');
+    for (var i = 0; i < dayRows.length; i++) dayRows[i].PredictedResistance_Rank = ranks[i];
+  });
+  return rows;
+}
+
+/**
+ * 「新進場訊號」判斷邏輯本身，依 strategyKey 選擇要套用哪一版（見 SCREENING_STRATEGIES
+ * 的說明）。strategyKey 沒帶或不合法時退回 rule_v17，維持這個函式在測試環境下的既有行為。
+ */
+function classifyEntrySignal_(row, strategyKey) {
+  var neutral = { strategy: 'Neutral', action: '觀望', interpretation: '盤整中' };
+  if (row['成交金額'] < CONFIG.STRATEGY.LIQUIDITY_MIN) return neutral;
+
   var isUpward = row.Trend_Score === 2;
   var isParticipationHigh = row.Inst_Part_Rank !== null && row.Inst_Part_Rank >= 0.8;
   var isVolSpark = row.Vol_Ratio_Rank !== null && row.Vol_Ratio_Rank >= 0.85;
 
-  var strategy = 'Neutral';
-  var action = '觀望';
-  var interpretation = '盤整中';
-  var url = 'https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=' + row['證券代號'];
+  var ruleHit = null;
+  if (isUpward && isParticipationHigh && isVolSpark) {
+    ruleHit = { strategy: '🚀 趨勢啟動', action: '建議：現價買入', interpretation: '法人密度極高且多頭慣性確立' };
+  } else if (isUpward && row.IBF_20D_Rank !== null && row.IBF_20D_Rank >= 0.7) {
+    ruleHit = { strategy: '🔥 趨勢領航', action: '建議：分批進場', interpretation: '多頭排列且法人支撐強勁' };
+  }
 
+  var key = SCREENING_STRATEGIES[strategyKey] ? strategyKey : SCREENING_STRATEGY_DEFAULT;
+  if (key === 'rule_v17') return ruleHit || neutral;
+
+  var rank = row.PredictedResistance_Rank;
+  var hasRank = rank !== null && rank !== undefined;
+
+  if (key === 'factor_model_rank') {
+    if (hasRank && rank >= FACTOR_MODEL_RANK_TOP_PCT) {
+      return {
+        strategy: '🚀 趨勢啟動', action: '建議：現價買入',
+        interpretation: '因子模型預測抗跌力排名前 ' + Math.round((1 - FACTOR_MODEL_RANK_TOP_PCT) * 100) + '%（模型精選，非規則式門檻）'
+      };
+    }
+    return neutral;
+  }
+
+  // hybrid：規則式門檻跟模型排名兩邊都要通過
+  if (ruleHit && hasRank && rank >= HYBRID_RANK_MIN_PCT) {
+    return {
+      strategy: ruleHit.strategy, action: ruleHit.action,
+      interpretation: ruleHit.interpretation + '，且因子模型排名前 ' + Math.round((1 - HYBRID_RANK_MIN_PCT) * 100) + '%'
+    };
+  }
+  return neutral;
+}
+
+/** strategyKey 沒帶時退回 SCREENING_STRATEGY_DEFAULT（rule_v17），維持既有呼叫端／測試不用
+ *  跟著改的相容性——只有既有持股（🛡️/🛑）的判斷固定不變，新進場訊號才走可切換的邏輯。 */
+function diagnoseRow_(row, portfolioMap, strategyKey) {
+  var url = 'https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=' + row['證券代號'];
   var holding = portfolioMap[row['證券代號']];
+
   if (holding) {
     var peak = row.Adjusted_Peak;
     var drawdown = peak ? (peak - row['收盤價']) / peak : 0;
+    var strategy, action, interpretation;
     if (drawdown >= CONFIG.STRATEGY.TRAILING_STOP_PERCENT) {
       strategy = '🛑 止盈/止損';
       action = '建議：賣出';
@@ -33,18 +148,11 @@ function diagnoseRow_(row, portfolioMap) {
       var profit = holding.cost ? (row['收盤價'] - holding.cost) / holding.cost : 0;
       interpretation = '趨勢持穩 | 損益: ' + (profit * 100).toFixed(1) + '%';
     }
-  } else if (row['成交金額'] >= CONFIG.STRATEGY.LIQUIDITY_MIN) {
-    if (isUpward && isParticipationHigh && isVolSpark) {
-      strategy = '🚀 趨勢啟動';
-      action = '建議：現價買入';
-      interpretation = '法人密度極高且多頭慣性確立';
-    } else if (isUpward && row.IBF_20D_Rank !== null && row.IBF_20D_Rank >= 0.7) {
-      strategy = '🔥 趨勢領航';
-      action = '建議：分批進場';
-      interpretation = '多頭排列且法人支撐強勁';
-    }
+    return { strategy: strategy, action: action, interpretation: interpretation, url: url, peak: row.Adjusted_Peak };
   }
-  return { strategy: strategy, action: action, interpretation: interpretation, url: url, peak: row.Adjusted_Peak };
+
+  var entry = classifyEntrySignal_(row, strategyKey);
+  return { strategy: entry.strategy, action: entry.action, interpretation: entry.interpretation, url: url, peak: row.Adjusted_Peak };
 }
 
 /**
@@ -209,10 +317,30 @@ function runAnalysis() {
 
   var latestDateStr = scanRows[0]['日期'];
   var appliedFactorModels = getAppliedFactorModels(); // 讀 FactorModelHistory 分頁，跟 BigQuery 無關，很快
+  var strategyKey = getScreeningStrategy();
+  var strategyDef = SCREENING_STRATEGIES[strategyKey];
+
+  if (strategyDef.needsFactorModel && !appliedFactorModels.downsideResistance) {
+    // factor_model_rank／hybrid 沒有套用中的抗跌力模型就完全無法運作——不能安靜地跑出
+    // 「0 檔訊號」讓使用者誤以為市場真的沒有標的，要明確告知原因跟該去哪裡處理。
+    var blockedDiagnostics = computeScreeningStats_(scanRows, portfolioMap, latestDateStr);
+    blockedDiagnostics.reportCount = 0;
+    return {
+      latestDate: latestDateStr,
+      lookbackStart: computeLookbackStartStr_(latestDateStr),
+      dataSourceMode: getEffectiveDataSourceMode_(),
+      report: [], fullReport: [], diagnostics: blockedDiagnostics,
+      screeningStrategy: strategyKey,
+      strategyError: '目前選用的篩選邏輯「' + strategyDef.label + '」需要先套用一版抗跌力因子迴歸模型，' +
+        '請到「策略研究 > 因子健康度＋迴歸模型」訓練並套用後，再重新計算戰報。'
+    };
+  }
+  if (strategyDef.needsFactorModel) computePredictedResistanceRanks_(scanRows, appliedFactorModels);
+
   var report = [];
   var fullReport = [];
   scanRows.forEach(function (r) {
-    var diag = diagnoseRow_(r, portfolioMap);
+    var diag = diagnoseRow_(r, portfolioMap, strategyKey);
     if (diag.strategy === 'Neutral') return;
     var predicted = computePredictedFactorScores_(r, appliedFactorModels);
     r['因子模型_預測1月報酬'] = predicted.predictedReturn1M;
@@ -251,7 +379,8 @@ function runAnalysis() {
     dataSourceMode: getEffectiveDataSourceMode_(),
     report: report,
     fullReport: fullReport,
-    diagnostics: diagnostics
+    diagnostics: diagnostics,
+    screeningStrategy: strategyKey
   };
 }
 
@@ -368,12 +497,15 @@ function processAnalysisJobTick_() {
     state.latestDate = result.latestDate;
     state.reportCount = result.report ? result.report.length : 0;
     state.scannedCount = scannedCount;
+    state.screeningStrategy = result.screeningStrategy || null;
+    state.strategyError = result.strategyError || null;
     state.updatedAt = Date.now();
     saveAnalysisJobState_(state);
     logRun_('手動重新計算戰報', '成功',
-      result.latestDate
-        ? ('戰報日期 ' + result.latestDate + '，' + result.report.length + ' 檔訊號（共掃描 ' + scannedCount + ' 檔）')
-        : ('沒有可用的歷史資料（掃描到 ' + scannedCount + ' 檔）'),
+      result.strategyError ? result.strategyError :
+        result.latestDate
+          ? ('戰報日期 ' + result.latestDate + '，' + result.report.length + ' 檔訊號（共掃描 ' + scannedCount + ' 檔）')
+          : ('沒有可用的歷史資料（掃描到 ' + scannedCount + ' 檔）'),
       Math.round((Date.now() - startTime) / 1000));
   } catch (e) {
     state.status = 'error';

@@ -59,9 +59,12 @@
           <form id="backtestForm" class="form-card">
             <h3>📊 策略歷史回測（v17.0 趨勢共鳴版）</h3>
             <div class="meta-bar" style="margin-bottom:0;">
-              進場條件沿用「戰報與個股」現在用的同一套 v17.0 篩選規則跟門檻，不用另外設定；
-              出場規則也跟持股一致（從高點回落 2.5% 觸發止損）。
+              出場規則固定：從高點回落 2.5% 觸發止損。進場邏輯可以切換版本，用同一段區間分別跑
+              幾種邏輯、比較勝率/平均報酬，決定要不要到上面「戰報篩選邏輯」套用成正式生效版本。
             </div>
+            <label>篩選邏輯版本
+              <select id="btStrategySelect"></select>
+            </label>
             <label>進場區間起始日 <input id="btStart" type="date" required></label>
             <label>進場區間結束日 <input id="btEnd" type="date" required></label>
             <label>目標報酬
@@ -101,13 +104,29 @@
 
           <div id="factorActiveModelCard"></div>
 
+          <div class="admin-section">
+            <h3>🎯 戰報篩選邏輯</h3>
+            <div class="meta-bar">
+              決定「最新戰報」實際用哪一套邏輯挑出新進場訊號（既有持股的止盈/止損判斷不受影響）。
+              建議先到下面「📊 策略回測驗證」用同一段歷史區間分別跑過幾種邏輯、比較勝率/平均報酬，
+              再回來套用表現比較好的一版。
+            </div>
+            <div id="screeningStrategyOptions"></div>
+            <div class="form-actions">
+              <button type="button" id="screeningStrategyApplyBtn" class="btn-primary">套用選取的篩選邏輯</button>
+            </div>
+            <div id="screeningStrategyResult"></div>
+          </div>
+
           <details class="info-collapse">
             <summary>ℹ️ 什麼是 BigQuery 因子回歸模型？</summary>
             <div class="info-body">
               以大表所有欄位為基礎，用 BigQuery ML 找出目前最能預測「後續1個月報酬率」跟
               「相對大盤抗跌力」的因子組合（多因子 LASSO 迴歸，比上面的單因子相關性更深入），
               結果記錄在下面，可以觀察因子有效性有沒有隨市場漂移。套用某一版之後，最新戰報會多顯示
-              一組「因子模型預測分數」供對照，但不會改變 Armor_Score 本身的選股邏輯。
+              一組「因子模型預測分數」供對照；如果上面「戰報篩選邏輯」選用的是「因子模型排名精選」
+              或「規則式門檻＋模型排名混合」，還會直接影響哪些股票被列為新進場訊號（見上面的說明），
+              選「v17.0 規則式門檻」則完全不受影響。
               GCP 專案 ID 與資料來源模式設定移到「系統與資料後台」頁籤最上方的「資料庫狀態」，
               這裡只留「執行因子迴歸」跟歷史執行紀錄。
             </div>

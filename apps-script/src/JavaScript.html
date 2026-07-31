@@ -224,6 +224,14 @@
           document.getElementById('dashboardList').innerHTML = errorBox('背景重新計算失敗：' + state.errorMessage);
           return;
         }
+        if (state.strategyError) {
+          // 目前選用的篩選邏輯（factor_model_rank／hybrid）需要先套用一版因子迴歸模型，
+          // 這不是例外/失敗，是明確的設定問題，直接把原因顯示出來，不要默默落到「沒有戰報」
+          // 卻不知道為什麼。
+          document.getElementById('dashboardMeta').textContent = '';
+          document.getElementById('dashboardList').innerHTML = errorBox(state.strategyError);
+          return;
+        }
         renderCachedDashboard_(true);
       }).catch(function () {
         // 輪詢本身失敗（例如剛好網路不穩）不代表背景工作失敗，畫面維持現狀，下一次輪詢再試
@@ -703,12 +711,13 @@
     if (!res || res.error) { resultEl.innerHTML = errorBox((res && res.error) || '沒有回測結果'); document.getElementById('btSaveBtn').disabled = true; return; }
     lastBacktestResult = res;
     document.getElementById('btSaveBtn').disabled = !(res.trades && res.trades.length);
-    if (res.warning) { resultEl.innerHTML = errorBox(res.warning); return; }
+    if (res.warning) { resultEl.innerHTML = errorBox((res.strategyLabel ? '［' + res.strategyLabel + '］' : '') + res.warning); return; }
 
     var s = res.summary;
     var summaryHtml = '<div class="backtest-summary">' +
-      '<div class="meta-bar" style="margin-bottom:0;">' + escapeHtml(res.startDay) + ' ~ ' + escapeHtml(res.endDay) +
-      '　共 ' + s.signalCount + ' 筆 v17.0 進場訊號　目標報酬 ' + res.targetProfit + '%</div>' +
+      '<div class="meta-bar" style="margin-bottom:0;">' + escapeHtml(res.strategyLabel || '') + '　' +
+      escapeHtml(res.startDay) + ' ~ ' + escapeHtml(res.endDay) +
+      '　共 ' + s.signalCount + ' 筆進場訊號　目標報酬 ' + res.targetProfit + '%</div>' +
       '<div class="backtest-stat-row">' +
       '<div class="backtest-stat"><div class="bs-label">🏆 策略勝率</div><div class="bs-value ' + (s.winRate >= 50 ? 'up' : 'down') + '">' + fmtNum(s.winRate, 1) + '%</div></div>' +
       '<div class="backtest-stat"><div class="bs-label">📈 平均報酬</div><div class="bs-value ' + (s.avgReturn >= 0 ? 'up' : 'down') + '">' + (s.avgReturn >= 0 ? '+' : '') + fmtNum(s.avgReturn, 1) + '%</div></div>' +
@@ -778,10 +787,11 @@
     var start = document.getElementById('btStart').value;
     var end = document.getElementById('btEnd').value;
     var target = parseFloat(document.getElementById('btTarget').value) || 5;
+    var strategyKey = document.getElementById('btStrategySelect').value;
     var resultEl = document.getElementById('backtestResult');
     resultEl.innerHTML = '<div class="loading">⏳ 背景回測中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，資料量大時可能要一兩分鐘...</div>';
     document.getElementById('btSaveBtn').disabled = true;
-    withSpin(callServer('startBacktestV17Job', start, end, target)).then(function () {
+    withSpin(callServer('startBacktestV17Job', start, end, target, strategyKey)).then(function () {
       pollBacktestJob_();
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
@@ -875,9 +885,53 @@
   function loadResearchTab_() {
     return Promise.all([
       loadActiveFactorModelCard_(), loadFactorModelHistory_(), checkFactorRegressionJobOnLoad_(),
-      checkBacktestJobOnLoad_()
+      checkBacktestJobOnLoad_(), loadScreeningStrategy_()
     ]);
   }
+
+  // ---------- 戰報篩選邏輯版本（可切換：規則式門檻 / 因子模型排名 / 混合） ----------
+
+  function renderScreeningStrategyOptions_(data) {
+    var el = document.getElementById('screeningStrategyOptions');
+    el.innerHTML = data.options.map(function (opt) {
+      var checked = opt.key === data.current ? ' checked' : '';
+      var currentTag = opt.key === data.current ? ' <span style="color:var(--green);">（目前生效）</span>' : '';
+      return '<label class="strategy-option">' +
+        '<input type="radio" name="screeningStrategyRadio" value="' + escapeHtml(opt.key) + '"' + checked + '>' +
+        '<span><b>' + escapeHtml(opt.label) + '</b>' + currentTag +
+        '<div style="color:var(--text-muted);margin-top:2px;">' + escapeHtml(opt.description) + '</div></span>' +
+        '</label>';
+    }).join('');
+  }
+
+  function populateBacktestStrategySelect_(data) {
+    var sel = document.getElementById('btStrategySelect');
+    var prevValue = sel.value;
+    sel.innerHTML = data.options.map(function (opt) {
+      return '<option value="' + escapeHtml(opt.key) + '">' + escapeHtml(opt.label) + '</option>';
+    }).join('');
+    sel.value = prevValue && data.options.some(function (o) { return o.key === prevValue; }) ? prevValue : data.current;
+  }
+
+  function loadScreeningStrategy_() {
+    return callServer('listScreeningStrategies').then(function (data) {
+      renderScreeningStrategyOptions_(data);
+      populateBacktestStrategySelect_(data);
+    }).catch(function (err) { document.getElementById('screeningStrategyOptions').innerHTML = errorBox(err); });
+  }
+
+  document.getElementById('screeningStrategyApplyBtn').addEventListener('click', function () {
+    var checked = document.querySelector('input[name="screeningStrategyRadio"]:checked');
+    if (!checked) { alert('請先選擇一種篩選邏輯'); return; }
+    var resultEl = document.getElementById('screeningStrategyResult');
+    withSpin(callServer('setScreeningStrategy', checked.value)).then(function (data) {
+      var applied = data.options.filter(function (o) { return o.key === data.current; })[0];
+      resultEl.innerHTML = '<div class="meta-bar">✅ 已套用：' + escapeHtml(applied ? applied.label : data.current) +
+        '　下次「重新計算戰報」就會用這一版邏輯。</div>';
+      renderScreeningStrategyOptions_(data);
+      populateBacktestStrategySelect_(data);
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
 
   // ---------- 因子回歸模型：人性化中文對照表 / R² 品質燈號 ----------
 
