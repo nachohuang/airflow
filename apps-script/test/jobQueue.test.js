@@ -90,6 +90,22 @@ loadIntoContext('JobQueue.gs');
   assert.ok(withResult.indexOf('2026-07-01~2026-07-31') !== -1);
   assert.ok(withResult.indexOf('23 筆訊號') !== -1);
   assert.ok(withResult.indexOf('勝率 68.5%') !== -1);
+
+  // mode='all'：三種策略各自的結果（含成功/無訊號/缺模型三種情況）都要並列顯示，
+  // 不能因為其中一版失敗就整條摘要都不見
+  const allModeResult = context.jobQueueDetail_('backtest', {
+    status: 'done', mode: 'all', startStr: '2026-07-01', endStr: '2026-07-31',
+    result: {
+      results: {
+        rule_v17: { strategyLabel: 'v17.0 規則式門檻（現行）', summary: { winRate: 68.5 } },
+        factor_model_rank: { strategyLabel: '因子模型排名精選', error: '需要先套用一版抗跌力因子迴歸模型' },
+        hybrid: { strategyLabel: '規則式門檻＋模型排名混合', warning: '這段區間內沒有符合條件的訊號。' }
+      }
+    }
+  });
+  assert.ok(allModeResult.indexOf('v17.0 規則式門檻（現行）：勝率 68.5%') !== -1);
+  assert.ok(allModeResult.indexOf('因子模型排名精選：需要先套用一版抗跌力因子迴歸模型') !== -1);
+  assert.ok(allModeResult.indexOf('規則式門檻＋模型排名混合：這段區間內沒有符合條件的訊號。') !== -1);
   console.log('Test jobQueueDetail_ (backtest) passed.');
 }
 

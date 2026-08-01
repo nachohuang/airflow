@@ -58,8 +58,15 @@ function jobQueueDetail_(key, state) {
   if (key === 'backtest') {
     if (state.status !== 'done') return '';
     var res = state.result;
-    var strategyPart = res && res.strategyLabel ? '［' + res.strategyLabel + '］' : '';
-    if (!res || !res.summary) return strategyPart + (res && res.warning ? res.warning : '');
+    if (!res) return '';
+    if (state.mode === 'all') {
+      return Object.keys(res.results || {}).map(function (k) {
+        var r = res.results[k];
+        return r.strategyLabel + '：' + (r.summary ? '勝率 ' + r.summary.winRate + '%' : (r.error || r.warning || '無結果'));
+      }).join('　');
+    }
+    var strategyPart = res.strategyLabel ? '［' + res.strategyLabel + '］' : '';
+    if (!res.summary) return strategyPart + (res.warning || '');
     return strategyPart + state.startStr + '~' + state.endStr + '　' + res.summary.signalCount + ' 筆訊號、勝率 ' + res.summary.winRate + '%';
   }
   return '';
@@ -106,6 +113,9 @@ function restartJob(key) {
   if (key === 'backtest') {
     var backtestState = getBacktestV17JobStatus();
     if (!backtestState || !backtestState.startStr) throw new Error('沒有可重新啟動的回測工作');
+    if (backtestState.mode === 'all') {
+      return startBacktestAllStrategiesJob(backtestState.startStr, backtestState.endStr, backtestState.targetProfit);
+    }
     return startBacktestV17Job(backtestState.startStr, backtestState.endStr, backtestState.targetProfit, backtestState.strategyKey);
   }
   throw new Error('未知的工作類型：' + key);

@@ -762,7 +762,43 @@
   function renderBacktestJobResult_(state) {
     var resultEl = document.getElementById('backtestResult');
     if (state.status === 'error') { resultEl.innerHTML = errorBox('背景回測失敗：' + state.errorMessage); return; }
+    if (state.mode === 'all') { renderBacktestAllResult_(resultEl, state.result); return; }
     renderBacktestResult_(resultEl, state.result);
+  }
+
+  /** 「一次跑全部版本比對」結果：每種篩選邏輯版本各一張卡片並排比較，重用跟單一策略回測
+   *  一樣的核心指標樣式（.backtest-stat-row），缺模型/沒有訊號的版本明確顯示原因，不會因為
+   *  某一版跑不出結果就讓整批比對失敗。 */
+  function renderBacktestAllResult_(resultEl, res) {
+    if (!res || res.error) { resultEl.innerHTML = errorBox((res && res.error) || '沒有回測結果'); return; }
+    document.getElementById('btSaveBtn').disabled = true; // 全部比對沒有單一份 trades 可以存檔
+    var order = ['rule_v17', 'factor_model_rank', 'hybrid'];
+    var html = '<div class="meta-bar">' + escapeHtml(res.startDay) + ' ~ ' + escapeHtml(res.endDay) +
+      '　目標報酬 ' + res.targetProfit + '%（三種篩選邏輯版本比對）</div>';
+    order.forEach(function (key) {
+      var r = (res.results || {})[key];
+      if (!r) return;
+      if (r.error) {
+        html += '<div class="compare-card"><h4>' + escapeHtml(r.strategyLabel) + '</h4>' +
+          '<div class="meta-bar" style="margin-bottom:0;">⚠️ ' + escapeHtml(r.error) + '</div></div>';
+        return;
+      }
+      if (!r.summary) {
+        html += '<div class="compare-card"><h4>' + escapeHtml(r.strategyLabel) + '</h4>' +
+          '<div class="meta-bar" style="margin-bottom:0;">' + escapeHtml(r.warning || '無結果') + '</div></div>';
+        return;
+      }
+      var s = r.summary;
+      html += '<div class="compare-card"><h4>' + escapeHtml(r.strategyLabel) + '</h4>' +
+        '<div class="backtest-stat-row">' +
+        '<div class="backtest-stat"><div class="bs-label">🏆 勝率</div><div class="bs-value ' + (s.winRate >= 50 ? 'up' : 'down') + '">' + fmtNum(s.winRate, 1) + '%</div></div>' +
+        '<div class="backtest-stat"><div class="bs-label">📈 平均報酬</div><div class="bs-value ' + (s.avgReturn >= 0 ? 'up' : 'down') + '">' + (s.avgReturn >= 0 ? '+' : '') + fmtNum(s.avgReturn, 1) + '%</div></div>' +
+        '<div class="backtest-stat"><div class="bs-label">📉 最大回落</div><div class="bs-value down">-' + fmtNum(s.maxDrawdown, 1) + '%</div></div>' +
+        '</div>' +
+        '<div class="meta-bar" style="margin-bottom:0;">共 ' + s.signalCount + ' 筆訊號　目標達成率 ' + fmtNum(s.targetHitRate, 1) + '%</div>' +
+        '</div>';
+    });
+    resultEl.innerHTML = html;
   }
   /** 「策略研究」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後不知道回測跑到哪。 */
   function checkBacktestJobOnLoad_() {
@@ -792,6 +828,19 @@
     resultEl.innerHTML = '<div class="loading">⏳ 背景回測中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，資料量大時可能要一兩分鐘...</div>';
     document.getElementById('btSaveBtn').disabled = true;
     withSpin(callServer('startBacktestV17Job', start, end, target, strategyKey)).then(function () {
+      pollBacktestJob_();
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+  });
+  /** 「🆚 一次跑全部版本比對」：只抓一次資料、對三種篩選邏輯版本各跑一次模擬（見
+   *  Backtest.gs runBacktestAllStrategies_），跟單一策略回測共用同一個背景 job/輪詢機制。 */
+  document.getElementById('btAllStrategiesBtn').addEventListener('click', function () {
+    var start = document.getElementById('btStart').value;
+    var end = document.getElementById('btEnd').value;
+    var target = parseFloat(document.getElementById('btTarget').value) || 5;
+    var resultEl = document.getElementById('backtestResult');
+    resultEl.innerHTML = '<div class="loading">⏳ 背景回測全部版本中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，資料量大時可能要一兩分鐘...</div>';
+    document.getElementById('btSaveBtn').disabled = true;
+    withSpin(callServer('startBacktestAllStrategiesJob', start, end, target)).then(function () {
       pollBacktestJob_();
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });

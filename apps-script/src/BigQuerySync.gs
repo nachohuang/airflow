@@ -510,6 +510,171 @@ function buildLatestDayFactorsSql_(sourceRef, cutoffStr) {
   ].join('\n');
 }
 
+/**
+ * v17.0 回測（Backtest.gs runBacktestV17_）BigQuery 模式專用：跟 buildLatestDayFactorsSql_
+ * 幾乎是同一套 pipeline（rolling 因子公式逐條相同，`base`/`win`/`step1`~`step5` 這幾層是
+ * 直接照抄），差別只在最後兩層：
+ *   1. 不是只留「最新一天」，是留 [rangeStartStr, rangeEndStr] 這整段區間（回測要看的是
+ *      「這段期間內每一天」有沒有觸發訊號，不是只看最新一天）。
+ *   2. 因為同時輸出多天的資料，橫斷面排名（inst_part_rank / ibf_20d_rank / vol_ratio_rank）
+ *      的 RANK()/COUNT() OVER 都要多加一層 `PARTITION BY dt`，確保每一天的排名只跟「同一天」
+ *      的其他候選互相比較，不會把不同天的分數混在一起排名（跟 Analysis.gs
+ *      computePredictedResistanceRanks_ 依日期分組排名是同一個原則）。
+ *
+ * 這是回測從「把整段區間原始資料整包讀進 Apps Script、用 JS 重新算一次 rolling 因子」
+ * 改成「跟今日戰報一樣把計算丟給 BigQuery，只搬回算好的結果」的關鍵——原本的做法在
+ * materialized/external 模式下，30 天回測區間 + 150 天暖機 + 60 幾天追蹤緩衝，換算下來要
+ * 搬十幾二十萬列原始資料進 Apps Script 逐一計算 rolling 因子，遠超過 Apps Script 單次執行
+ * 6 分鐘的上限，背景 job 執行到一半直接被平台砍斷、狀態永遠卡在「執行中」不會再更新
+ * （沒有任何錯誤處理程式碼有機會執行）。改成這裡之後，Apps Script 只需要接收「這段區間
+ * 每天每檔股票已經算好因子」的結果，資料量從「暖機天數 x 全市場」降到「(區間+追蹤緩衝)
+ * 天數 x 全市場」，而且完全不用在 Apps Script 裡重算任何 rolling 公式。
+ *
+ * warmupCutoffStr：rolling 因子（MA60 等）要看的暖機起點（通常是 rangeStartStr 往前推
+ * CONFIG.ANALYSIS_LOOKBACK_DAYS 天），跟 buildLatestDayFactorsSql_ 的 cutoffStr 是同一個角色。
+ */
+function buildRangeFactorsSql_(sourceRef, warmupCutoffStr, rangeStartStr, rangeEndStr) {
+  var byStockOrderDt = 'PARTITION BY stock_id ORDER BY dt';
+  var w5 = 'ROWS BETWEEN 4 PRECEDING AND CURRENT ROW';
+  var w20 = 'ROWS BETWEEN 19 PRECEDING AND CURRENT ROW';
+  var w60 = 'ROWS BETWEEN 59 PRECEDING AND CURRENT ROW';
+  return [
+    'WITH base AS (',
+    '  SELECT',
+    '    stock_id, stock_name, date_str, SAFE_CAST(date_str AS DATE) AS dt,',
+    '    IFNULL(SAFE_CAST(foreign_net AS FLOAT64), 0) AS foreign_v,',
+    '    IFNULL(SAFE_CAST(trust_net AS FLOAT64), 0) AS trust_v,',
+    '    IFNULL(SAFE_CAST(dealer_net AS FLOAT64), 0) AS dealer_v,',
+    '    IFNULL(SAFE_CAST(inst_net_shares AS FLOAT64), 0) AS inst_net_shares_v,',
+    '    IFNULL(SAFE_CAST(volume_shares AS FLOAT64), 0) AS vol,',
+    '    IFNULL(SAFE_CAST(trade_count AS FLOAT64), 0) AS trade_count_v,',
+    '    IFNULL(SAFE_CAST(turnover AS FLOAT64), 0) AS turnover_v,',
+    '    IFNULL(SAFE_CAST(open_price AS FLOAT64), 0) AS open_v,',
+    '    IFNULL(SAFE_CAST(high_price AS FLOAT64), 0) AS high_v,',
+    '    IFNULL(SAFE_CAST(low_price AS FLOAT64), 0) AS low_v,',
+    '    IFNULL(SAFE_CAST(close_price AS FLOAT64), 0) AS close,',
+    '    change_sign,',
+    '    IFNULL(SAFE_CAST(change_amount AS FLOAT64), 0) AS change_amount_v,',
+    '    IFNULL(SAFE_CAST(bid_price AS FLOAT64), 0) AS bid_price_v,',
+    '    IFNULL(SAFE_CAST(bid_vol AS FLOAT64), 0) AS bid_vol_v,',
+    '    IFNULL(SAFE_CAST(ask_price AS FLOAT64), 0) AS ask_price_v,',
+    '    IFNULL(SAFE_CAST(ask_vol AS FLOAT64), 0) AS ask_vol_v,',
+    '    IFNULL(SAFE_CAST(dividend_yield AS FLOAT64), 0) AS dividend_yield_v,',
+    '    IFNULL(SAFE_CAST(pe_ratio AS FLOAT64), 0) AS pe_ratio_v,',
+    '    IFNULL(SAFE_CAST(pb_ratio AS FLOAT64), 0) AS pb_ratio_v,',
+    '    fin_report_period',
+    '  FROM `' + sourceRef + '`',
+    "  WHERE LENGTH(stock_id) = 4 AND date_str >= '" + warmupCutoffStr + "'",
+    '),',
+    'win AS (',
+    '  SELECT *,',
+    '    (foreign_v + trust_v + dealer_v) AS inst_net,',
+    '    SAFE_DIVIDE(ABS(foreign_v) + ABS(trust_v) + ABS(dealer_v), vol) AS inst_participation,',
+    '    SAFE_DIVIDE(close, LAG(close) OVER (' + byStockOrderDt + ')) - 1 AS daily_return,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w20 + ') AS cnt20,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w60 + ') AS cnt60,',
+    '    AVG(close) OVER (' + byStockOrderDt + ' ' + w20 + ') AS ma20_raw,',
+    '    AVG(close) OVER (' + byStockOrderDt + ' ' + w60 + ') AS ma60_raw,',
+    '    AVG(vol) OVER (' + byStockOrderDt + ' ' + w20 + ') AS vol_ma20_raw,',
+    '    MAX(close) OVER (' + byStockOrderDt + ' ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS adjusted_peak_generic',
+    '  FROM base',
+    '),',
+    'step1 AS (',
+    '  SELECT *,',
+    '    IF(cnt20 = 20, ma20_raw, NULL) AS ma20,',
+    '    IF(cnt60 = 60, ma60_raw, NULL) AS ma60,',
+    '    IF(cnt20 = 20, vol_ma20_raw, NULL) AS vol_ma20',
+    '  FROM win',
+    '),',
+    'step2 AS (',
+    '  SELECT *,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w5 + ') AS cnt5,',
+    '    COUNT(inst_participation) OVER (' + byStockOrderDt + ' ' + w5 + ') AS cnt5_nonnull,',
+    '    AVG(inst_participation) OVER (' + byStockOrderDt + ' ' + w5 + ') AS inst_part_ma5_raw,',
+    '    CASE WHEN daily_return < 0 THEN 1 ELSE 0 END AS is_drop,',
+    '    CASE WHEN daily_return < 0 AND inst_net > 0 THEN 1 ELSE 0 END AS is_inst_buy_on_drop,',
+    '    SAFE_DIVIDE(vol, vol_ma20) AS vol_ratio,',
+    '    SAFE_DIVIDE(close - ma60, ma60) AS bias60,',
+    '    LAG(ma20, 3) OVER (' + byStockOrderDt + ') AS ma20_3ago',
+    '  FROM step1',
+    '),',
+    'step3 AS (',
+    '  SELECT *,',
+    '    IF(cnt5 = 5 AND cnt5_nonnull = 5, inst_part_ma5_raw, NULL) AS inst_part_ma5,',
+    '    (ma20 - ma20_3ago) AS ma20_slope,',
+    '    COUNT(*) OVER (' + byStockOrderDt + ' ' + w20 + ') AS cnt20b,',
+    '    SUM(is_drop) OVER (' + byStockOrderDt + ' ' + w20 + ') AS drop_count_20_raw,',
+    '    SUM(is_inst_buy_on_drop) OVER (' + byStockOrderDt + ' ' + w20 + ') AS buy_on_drop_20_raw',
+    '  FROM step2',
+    '),',
+    'step4 AS (',
+    '  SELECT *,',
+    '    IF(cnt20b = 20, drop_count_20_raw, NULL) AS drop_count_20,',
+    '    IF(cnt20b = 20, buy_on_drop_20_raw, NULL) AS buy_on_drop_20',
+    '  FROM step3',
+    '),',
+    'step5 AS (',
+    '  SELECT *,',
+    '    CASE WHEN drop_count_20 IS NULL OR drop_count_20 = 0 THEN 0 ELSE buy_on_drop_20 / drop_count_20 END AS ibf_20d,',
+    '    (CASE WHEN ma20 IS NOT NULL AND close > ma20 THEN 1 ELSE 0 END',
+    '      + CASE WHEN ma20_slope IS NOT NULL AND ma20_slope > 0 THEN 1 ELSE 0 END) AS trend_score',
+    '  FROM step4',
+    '),',
+    'ranged AS (',
+    "  SELECT * FROM step5 WHERE dt BETWEEN DATE('" + rangeStartStr + "') AND DATE('" + rangeEndStr + "')",
+    '),',
+    'ranked AS (',
+    '  SELECT *,',
+    // 跟 buildLatestDayFactorsSql_ 同一套「RANGE frame 算同分筆數」寫法，差別只在每個 OVER
+    // 子句都多加 PARTITION BY dt，讓排名限定在「同一天」內比較，不會跨天混在一起排名。
+    '    CASE WHEN inst_part_ma5 IS NULL THEN NULL ELSE',
+    '      (RANK() OVER (PARTITION BY dt ORDER BY inst_part_ma5 ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY dt ORDER BY inst_part_ma5 ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(inst_part_ma5) OVER (PARTITION BY dt)',
+    '    END AS inst_part_rank,',
+    '    CASE WHEN ibf_20d IS NULL THEN NULL ELSE',
+    '      (RANK() OVER (PARTITION BY dt ORDER BY ibf_20d ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY dt ORDER BY ibf_20d ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(ibf_20d) OVER (PARTITION BY dt)',
+    '    END AS ibf_20d_rank,',
+    '    CASE WHEN vol_ratio IS NULL THEN NULL ELSE',
+    '      (RANK() OVER (PARTITION BY dt ORDER BY vol_ratio ASC NULLS LAST) + (COUNT(*) OVER (PARTITION BY dt ORDER BY vol_ratio ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW) - 1) / 2.0) / COUNT(vol_ratio) OVER (PARTITION BY dt)',
+    '    END AS vol_ratio_rank',
+    '  FROM ranged',
+    ')',
+    'SELECT',
+    '  stock_id, stock_name, date_str,',
+    '  foreign_v AS foreign_net, trust_v AS trust_net, dealer_v AS dealer_net, inst_net_shares_v AS inst_net_shares,',
+    '  vol AS volume_shares, trade_count_v AS trade_count, turnover_v AS turnover,',
+    '  open_v AS open_price, high_v AS high_price, low_v AS low_price, close AS close_price,',
+    '  change_sign, change_amount_v AS change_amount,',
+    '  bid_price_v AS bid_price, bid_vol_v AS bid_vol, ask_price_v AS ask_price, ask_vol_v AS ask_vol,',
+    '  dividend_yield_v AS dividend_yield, pe_ratio_v AS pe_ratio, pb_ratio_v AS pb_ratio, fin_report_period,',
+    '  inst_net, inst_participation, inst_part_ma5, daily_return, is_drop, is_inst_buy_on_drop,',
+    '  ibf_20d, ma20, ma20_slope, trend_score, vol_ma20, vol_ratio, ma60, bias60, adjusted_peak_generic,',
+    '  inst_part_rank, ibf_20d_rank, vol_ratio_rank,',
+    '  CASE WHEN inst_part_rank IS NULL OR ibf_20d_rank IS NULL OR vol_ratio_rank IS NULL THEN NULL',
+    '    ELSE ROUND(inst_part_rank * 45 + ibf_20d_rank * 30 + vol_ratio_rank * 15 + trend_score * 10, 1)',
+    '  END AS armor_score',
+    'FROM ranked',
+    'ORDER BY dt ASC'
+  ].join('\n');
+}
+
+/**
+ * 回測（Backtest.gs runBacktestV17_）BigQuery 模式入口：對應 queryLatestDayFactorsFromBigQuery_，
+ * 差別是回傳的不是「最新一天」而是 [startStr, endStr] 整段區間。不處理持股 Adjusted_Peak
+ * 覆蓋（回測的 portfolioMap 永遠是空物件，每個訊號都當成新進場，見 Backtest.gs 的說明），
+ * 這點跟 queryLatestDayFactorsFromBigQuery_ 不同，所以不重用它、獨立一個函式。
+ */
+function queryFactorsRangeFromBigQuery_(startStr, endStr) {
+  var settings = requireBigQueryProjectId_();
+  refreshDataSourceForMode_(settings);
+
+  var warmupStart = new Date(startStr + 'T00:00:00');
+  warmupStart.setDate(warmupStart.getDate() - CONFIG.ANALYSIS_LOOKBACK_DAYS);
+  var cutoffStr = normalizeDateStr(warmupStart);
+
+  var sql = buildRangeFactorsSql_(sourceRefForBigQueryRead_(settings), cutoffStr, startStr, endStr);
+  return runBqQuery_(sql, 'range_factors').map(mapBqLatestFactorRowToAnalysisRow_);
+}
+
 /** buildLatestDayFactorsSql_ 查詢結果（ascii 欄名，全部字串／null）轉回跟 computeFactors_
  *  輸出完全一樣形狀的列物件（中文欄名），讓 diagnoseRow_ / buildFullReportRow_ /
  *  computePredictedFactorScores_ 完全不用改。Adjusted_Peak 先填「一般 expanding max」，

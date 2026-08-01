@@ -443,6 +443,47 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test buildLatestDayFactorsSql_ passed.');
 }
 
+// --- buildRangeFactorsSql_：v17.0 回測 BigQuery 模式用的核心 SQL，跟 buildLatestDayFactorsSql_
+//     共用同一套 rolling 因子公式，差別只在「輸出整段區間」跟「排名要依日期分組」---
+{
+  const sql = context.buildRangeFactorsSql_('proj.ds.history_materialized', '2026-03-01', '2026-07-01', '2026-07-31');
+  assert.ok(sql.indexOf("FROM `proj.ds.history_materialized`") !== -1);
+  assert.ok(sql.indexOf("date_str >= '2026-03-01'") !== -1, '暖機起點要用 warmupCutoffStr，不是輸出區間起點');
+
+  // rolling window 大小要跟 buildLatestDayFactorsSql_ 完全一樣（同一套 v17.0 公式）
+  assert.ok(sql.indexOf('ROWS BETWEEN 19 PRECEDING AND CURRENT ROW') !== -1);
+  assert.ok(sql.indexOf('ROWS BETWEEN 59 PRECEDING AND CURRENT ROW') !== -1);
+  assert.ok(sql.indexOf('ROWS BETWEEN 4 PRECEDING AND CURRENT ROW') !== -1);
+  assert.ok(sql.indexOf('IF(cnt20 = 20, ma20_raw, NULL)') !== -1);
+  assert.ok(sql.indexOf('IF(cnt5 = 5 AND cnt5_nonnull = 5, inst_part_ma5_raw, NULL)') !== -1);
+  assert.ok(sql.indexOf('WHEN drop_count_20 IS NULL OR drop_count_20 = 0 THEN 0') !== -1);
+
+  // 沒有 bounds/latest_dt「只找最新一天」的邏輯，改成明確的區間篩選
+  assert.ok(sql.indexOf('bounds AS (') === -1, '回測不用找「最新一天」，不該有 bounds CTE');
+  assert.ok(sql.indexOf('latest_dt') === -1);
+  assert.ok(sql.indexOf("dt BETWEEN DATE('2026-07-01') AND DATE('2026-07-31')") !== -1, '要輸出整段區間，不是只留一天');
+
+  // 橫斷面排名要依日期分組（PARTITION BY dt），不能把不同天的分數混在一起比較排名
+  assert.ok(sql.indexOf('RANK() OVER (PARTITION BY dt ORDER BY inst_part_ma5 ASC NULLS LAST)') !== -1);
+  assert.ok(sql.indexOf('RANK() OVER (PARTITION BY dt ORDER BY ibf_20d ASC NULLS LAST)') !== -1);
+  assert.ok(sql.indexOf('RANK() OVER (PARTITION BY dt ORDER BY vol_ratio ASC NULLS LAST)') !== -1);
+  assert.ok(sql.indexOf('COUNT(inst_part_ma5) OVER (PARTITION BY dt)') !== -1);
+  assert.ok(sql.indexOf('COUNT(ibf_20d) OVER (PARTITION BY dt)') !== -1);
+  assert.ok(sql.indexOf('COUNT(vol_ratio) OVER (PARTITION BY dt)') !== -1);
+  // 同分筆數（RANGE frame）也要限定在同一天內
+  assert.ok(sql.indexOf('PARTITION BY dt ORDER BY inst_part_ma5 ASC RANGE BETWEEN CURRENT ROW AND CURRENT ROW') !== -1);
+
+  // Armor_Score 公式要跟 buildLatestDayFactorsSql_ 完全一致
+  assert.ok(sql.indexOf('inst_part_rank * 45 + ibf_20d_rank * 30 + vol_ratio_rank * 15 + trend_score * 10') !== -1);
+
+  // 原始欄位都要出現，跟 buildLatestDayFactorsSql_ 一樣完整
+  context.CONFIG.BQ_COLUMN_MAP.forEach(function (m) {
+    if (m.bq === 'date_str' || m.bq === 'stock_id' || m.bq === 'stock_name') return;
+    assert.ok(sql.indexOf(m.bq) !== -1, 'missing raw column: ' + m.bq);
+  });
+  console.log('Test buildRangeFactorsSql_ passed.');
+}
+
 // --- mapBqLatestFactorRowToAnalysisRow_：ascii 結果列轉回中文欄名，null 要原樣保留、數字要轉型 ---
 {
   const bqRow = {
