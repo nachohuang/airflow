@@ -659,12 +659,12 @@
 
   function toNumOrNull_(v) { var n = parseFloat(v); return isNaN(n) ? null : n; }
 
-  /** 表單重置成「新增這筆買進」的初始狀態（不綁定任何既有股票/lot）。 */
+  /** 表單重置成「新增這筆持有」的初始狀態（不綁定任何既有股票/lot）。 */
   function resetPortfolioForm_() {
     pfForm.reset();
     document.getElementById('portfolioFormTitle').textContent = '新增持股';
     document.getElementById('pfLotId').value = '';
-    document.getElementById('pfSubmitBtn').textContent = '＋ 新增這筆買進';
+    document.getElementById('pfSubmitBtn').textContent = '＋ 新增這筆持有';
   }
 
   /** 「＋ 加碼買進」：代號/名稱鎖定成這檔股票，其餘欄位清空讓使用者填這筆新的買進紀錄。 */
