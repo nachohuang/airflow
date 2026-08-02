@@ -130,16 +130,32 @@ function readHistoryRange_(startStr, endStr) {
 /**
  * 只讀「單一股票代號」最近 N 天的歷史資料，給「個股分析」（getStockTimeSeries）用。
  * 跟 readRecentHistory_ 的差別：BigQuery 模式下直接在查詢裡用 WHERE stock_id 過濾
- * （見 queryHistoryRowsForCodeFromBigQuery_），不會把全市場資料都搬進 Apps Script
+ * （見 queryHistoryRowsForCodesFromBigQuery_），不會把全市場資料都搬進 Apps Script
  * 再篩選——後者資料量大時會撞到 6 分鐘執行上限，導致個股走勢卡在載入畫面不動。
  * 檔案模式（沒接 BigQuery）本來就只讀 days 天份的月份檔案，資料量小，可以接受先讀再篩。
  */
 function readHistoryForCode_(code, days) {
+  return readHistoryForCodes_([code], days);
+}
+
+/**
+ * 只讀「指定這幾檔股票代號」最近 N 天的歷史資料，給「持股庫存」（getLatestCloseByCode_，
+ * 讀持股目前市價用）跟持股續抱診斷用——同一批股票數量通常很小（使用者自己持有的幾檔），
+ * 跟 readHistoryForCode_ 一樣不要在 BigQuery 模式下把全市場資料都搬進 Apps Script
+ * 再篩選（原本 getLatestCloseByCode_() 呼叫 readRecentHistory_(10) 就是這個問題：即使
+ * 只是抓 10 天，BigQuery 模式下還是「全市場 x 10 天」的資料量，慢的時候會讓「持股庫存」
+ * 卡住甚至跳出 NetworkError HTTP 0）。
+ */
+function readHistoryForCodes_(codes, days) {
+  codes = (codes || []).filter(function (c) { return c; });
+  if (codes.length === 0) return [];
   if (shouldUseBigQueryForReads_()) {
-    return queryHistoryRowsForCodeFromBigQuery_(code, days);
+    return queryHistoryRowsForCodesFromBigQuery_(codes, days);
   }
+  var target = {};
+  codes.forEach(function (c) { target[zfill4(String(c).trim())] = true; });
   return readRecentHistoryFromFiles_(days).filter(function (r) {
-    return zfill4(String(r['證券代號']).trim()) === code;
+    return target[zfill4(String(r['證券代號']).trim())];
   });
 }
 

@@ -607,7 +607,7 @@ function runPortfolioHoldDiagnosis(code) {
     var row = getLatestReportRowForCode_(code);
     if (!row) throw new Error('在 Reports 裡找不到這檔股票的戰報資料，請先確認它出現在某一天的戰報中。');
 
-    var latestByCode = getLatestCloseByCode_();
+    var latestByCode = getLatestCloseByCode_([code]);
     var latestClose = latestByCode[code] ? latestByCode[code].close : null;
     var daysHeld = holdingInfo.buyDate
       ? Math.round((new Date(normalizeDateStr(new Date()) + 'T00:00:00') - new Date(holdingInfo.buyDate + 'T00:00:00')) / 86400000)

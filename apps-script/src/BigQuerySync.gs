@@ -1340,20 +1340,22 @@ function queryLatestDayFactorsFromBigQuery_(portfolioMap) {
 }
 
 /**
- * 「個股分析」（getStockTimeSeries）BigQuery 模式專用：只查「這一檔股票、最近 N 天」的原始
- * 歷史列（資料量是「1 檔 x days 天」，跟 queryHistoryRowsFromBigQuery_ 的全市場查詢完全不同
- * 量級）。點開個股走勢卡在「載入走勢中...」不動的根因，就跟之前的回測逾時是同一種——
- * getStockTimeSeries 原本呼叫 readRecentHistory_(days)，BigQuery 模式下會把「全市場 x
- * days 天」的原始資料全部搬進 Apps Script，再用 JS 篩出這一檔股票，資料量大時直接撞到
- * Apps Script 6 分鐘執行上限，整次 RPC 沒有任何回應、前端永遠停在 loading 狀態。
+ * 「個股分析」（getStockTimeSeries）與「持股庫存」（getLatestCloseByCode_/持股續抱診斷）
+ * BigQuery 模式專用：只查「指定這幾檔股票、最近 N 天」的原始歷史列（資料量是「股票數 x days
+ * 天」，跟 queryHistoryRowsFromBigQuery_ 的全市場查詢完全不同量級）。個股走勢／持股庫存卡在
+ * loading 不動的根因都是同一種——原本呼叫 readRecentHistory_(days)，BigQuery 模式下會把
+ * 「全市場 x days 天」的原始資料全部搬進 Apps Script，再用 JS 篩出需要的幾檔股票，資料量大時
+ * 直接撞到 Apps Script 6 分鐘執行上限，整次 RPC 沒有任何回應、前端永遠停在 loading 狀態
+ * （手機瀏覽器則更容易在等待過程中連線被中斷，變成「NetworkError: 連線失敗，原因 HTTP 0」）。
  */
-function queryHistoryRowsForCodeFromBigQuery_(code, days) {
+function queryHistoryRowsForCodesFromBigQuery_(codes, days) {
+  if (!codes || codes.length === 0) return [];
   var settings = requireBigQueryProjectId_();
   refreshDataSourceForMode_(settings);
   var cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
-  var sql = buildHistoryRowsForStocksSql_(sourceRefForBigQueryRead_(settings), [code], normalizeDateStr(cutoff));
-  return runBqQuery_(sql, 'stock_history_single').map(mapBqRowToHistoryRow_);
+  var sql = buildHistoryRowsForStocksSql_(sourceRefForBigQueryRead_(settings), codes, normalizeDateStr(cutoff));
+  return runBqQuery_(sql, 'stock_history_multi').map(mapBqRowToHistoryRow_);
 }
 
 /**

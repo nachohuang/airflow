@@ -106,9 +106,11 @@ function getHoldingLotsForCode_(code) {
   });
 }
 
-/** 近幾天的歷史資料裡，每檔股票最新一筆收盤價（給持股損益％用，跟 getPortfolio() 共用同一套邏輯）。 */
-function getLatestCloseByCode_() {
-  var recent = readRecentHistory_(10);
+/** 近幾天的歷史資料裡，「指定這幾檔股票代號」各自最新一筆收盤價（給持股損益％用）。
+ *  只查呼叫端實際需要的代號，不是全市場——BigQuery 模式下這點很關鍵，見
+ *  readHistoryForCodes_ 的說明。 */
+function getLatestCloseByCode_(codes) {
+  var recent = readHistoryForCodes_(codes, 10);
   var latestByCode = {};
   recent.forEach(function (r) {
     var code = zfill4(String(r['證券代號'] || '').trim());
@@ -163,7 +165,7 @@ function getPortfolio() {
   });
   if (items.length === 0) return items;
 
-  var latestByCode = getLatestCloseByCode_();
+  var latestByCode = getLatestCloseByCode_(items.map(function (it) { return it.code; }));
   var signalByCode = {};
   readSheetObjects_(getReportsSheet_()).forEach(function (r) {
     var code = zfill4(String(r['證券代號'] || '').trim());
