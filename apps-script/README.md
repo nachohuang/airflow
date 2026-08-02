@@ -282,11 +282,14 @@ CLASP_DEPLOYMENT_ID=你查到的deploymentId ./deploy-stock.sh
 
 ## 自動部署（GitHub Actions）
 
-`.github/workflows/deploy-stock-app.yml` 會在 `main` 分支裡 `apps-script/` 有變動時自動跑一次
-`npm test`（測試沒過就不會往下部署）＋ `clasp push`，也支援在 GitHub Actions 頁面手動觸發
-（不改程式碼、單純想重新部署一次）。這個 workflow 沒辦法幫你自動完成 `clasp login`（一樣需要
-瀏覽器登入 Google 帳號），所以要先在你自己的電腦或 Cloud Shell 做完登入，再把憑證存成這個 repo 的
-GitHub Secret，workflow 才有權限推程式碼：
+`.github/workflows/deploy-stock-app.yml` 會在 `claude/stock-data-apps-script-w1wsk1`
+分支裡 `apps-script/` 有變動時自動跑一次 `npm test`（測試沒過就不會往下部署）＋ `clasp push`。
+（這個專案目前整個都還只在這條開發分支上，還沒合併進 `main`，所以先直接對它自動部署；等哪天
+換成主要分支開發，把 workflow 檔案裡的分支名稱改掉就好。手動觸發／`workflow_dispatch` 目前還
+用不了——那是 GitHub Actions 本身的限制，只有工作流程檔案已經在 `main` 上才會被註冊，跟這條開發
+分支自己的 `push` 觸發是兩回事，不影響自動部署本身正常運作。）這個 workflow 沒辦法幫你自動完成
+`clasp login`（一樣需要瀏覽器登入 Google 帳號），所以要先在你自己的電腦或 Cloud Shell 做完登入，
+再把憑證存成這個 repo 的 GitHub Secret，workflow 才有權限推程式碼：
 
 **第一次設定（只需要做一次）：**
 
@@ -299,8 +302,8 @@ GitHub Secret，workflow 才有權限推程式碼：
    不設定的話，自動部署只會更新程式碼本體（HEAD／`/dev`），正式 `/exec` 網址還是要手動跑
    `CLASP_DEPLOYMENT_ID=xxx ./deploy-stock.sh` 或在 workflow 加上這個變數才會生效。
 
-設定完成後，之後每次把改動 merge 進 `main`（且有動到 `apps-script/`），GitHub Actions 就會自動跑
-測試、推上去，不用再手動進 Cloud Shell 執行 `deploy-stock.sh`。想在 merge 之前先手動部署到 `/dev`
+設定完成後，之後每次 push 到 `claude/stock-data-apps-script-w1wsk1`（且有動到 `apps-script/`），
+GitHub Actions 就會自動跑測試、推上去，不用再手動進 Cloud Shell 執行 `deploy-stock.sh`。想手動部署到 `/dev`
 測試網址驗證，本機流程（`clasp login` → `./deploy-stock.sh`）還是照舊可以用，兩者不衝突。
 
 ## AI 深度診斷

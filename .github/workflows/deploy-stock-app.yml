@@ -1,10 +1,16 @@
 name: 部署 TWSE 法人動能選股 App
 
-# 只在 apps-script/ 底下有變動、且推上 main 時自動部署；也保留手動觸發（workflow_dispatch），
-# 方便不改程式碼、單純想重新部署一次時使用（例如只是要讓正式 /exec 網址套用最新 HEAD 版本）。
+# 這個專案目前整個都還只在 claude/stock-data-apps-script-w1wsk1 這條開發分支上，還沒合併進
+# main，所以先直接對這條分支的 push 自動部署（不用等合併）。之後如果要換成主要分支開發，
+# 或想同時對多條分支自動部署，把下面 branches 清單加上去/改掉就好。
+#
+# 注意：workflow_dispatch（手動觸發）跟 Actions 頁面的 workflow 列表，只有工作流程檔案存在於
+# repo 的「預設分支」（這裡是 main）時 GitHub 才會註冊/認得——這是 GitHub Actions 本身的限制，
+# 不是這份設定檔的問題。在合併進 main 之前，唯一能觸發這個 job 的方式就是直接 push 到
+# claude/stock-data-apps-script-w1wsk1（一般的 on:push 觸發不受這個限制）。
 on:
   push:
-    branches: [main]
+    branches: [claude/stock-data-apps-script-w1wsk1]
     paths:
       - 'apps-script/**'
   workflow_dispatch: {}
