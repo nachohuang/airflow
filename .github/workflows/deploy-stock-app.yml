@@ -1,0 +1,48 @@
+name: 部署 TWSE 法人動能選股 App
+
+# 只在 apps-script/ 底下有變動、且推上 main 時自動部署；也保留手動觸發（workflow_dispatch），
+# 方便不改程式碼、單純想重新部署一次時使用（例如只是要讓正式 /exec 網址套用最新 HEAD 版本）。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps-script/**'
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: apps-script
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 純邏輯單元測試（不呼叫任何 Apps Script 服務），部署前先擋一次，測試沒過就不推上去。
+      - name: 執行單元測試
+        run: npm test
+
+      - name: 安裝 clasp
+        run: npm install -g @google/clasp
+
+      # CLASPRC_JSON 是 `clasp login` 在你自己電腦/Cloud Shell 產生的 ~/.clasprc.json 內容，
+      # 整份 JSON 存成這個 repo 的 Secret（Settings -> Secrets and variables -> Actions ->
+      # New repository secret，名稱要叫 CLASPRC_JSON）。這一步只是把它還原成 clasp 期待的
+      # 憑證檔案位置，不會被印出來或存進 log。
+      - name: 還原 clasp 登入憑證
+        run: echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
+
+      - name: clasp push（更新程式碼本體 / HEAD 版本）
+        run: clasp push -f
+
+      # CLASP_DEPLOYMENT_ID 選填：是「網頁應用程式」那個部署的 ID（用 `clasp deployments`
+      # 查），不是 script ID。有設定才會讓正式 /exec 網址（手機在用的那個）套用最新版本；
+      # 沒設定的話只有 /dev 測試網址會是最新的，這跟本機用 deploy-stock.sh 的行為一致。
+      - name: clasp deploy（更新正式 /exec 網址，選填）
+        if: ${{ vars.CLASP_DEPLOYMENT_ID != '' }}
+        run: clasp deploy -i "${{ vars.CLASP_DEPLOYMENT_ID }}" -d "auto deploy via GitHub Actions $(date '+%Y-%m-%d %H:%M:%S')"

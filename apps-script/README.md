@@ -278,12 +278,30 @@ CLASP_DEPLOYMENT_ID=你查到的deploymentId ./deploy-stock.sh
 
 **我這邊需要什麼資訊嗎？** 不需要你把任何密碼、OAuth token 貼給我——`clasp login` 這個授權動作
 一定要在你自己能完成 Google 登入畫面的環境做（Cloud Shell 正合適），我這個 remote sandbox
-沒有瀏覽器，沒辦法也不應該幫你完成登入。我只需要知道：
-1. 你是要新建一個 Apps Script 專案，還是已經有一個現成的 scriptId 要沿用？
-2. 如果之後想要「每次 git push 這個 repo 就自動部署」（不用手動進 Cloud Shell 跑），
-   我可以另外幫你寫一份 GitHub Actions workflow，但那需要你自己把 `clasp login` 產生的
-   `~/.clasprc.json` 內容存成 GitHub repo 的 Secret（一樣不透過我，直接在 GitHub 網頁設定），
-   要不要做這個我可以再幫你評估。
+沒有瀏覽器，沒辦法也不應該幫你完成登入。
+
+## 自動部署（GitHub Actions）
+
+`.github/workflows/deploy-stock-app.yml` 會在 `main` 分支裡 `apps-script/` 有變動時自動跑一次
+`npm test`（測試沒過就不會往下部署）＋ `clasp push`，也支援在 GitHub Actions 頁面手動觸發
+（不改程式碼、單純想重新部署一次）。這個 workflow 沒辦法幫你自動完成 `clasp login`（一樣需要
+瀏覽器登入 Google 帳號），所以要先在你自己的電腦或 Cloud Shell 做完登入，再把憑證存成這個 repo 的
+GitHub Secret，workflow 才有權限推程式碼：
+
+**第一次設定（只需要做一次）：**
+
+1. 在已經跑過 `clasp login` 的環境（例如 Cloud Shell）執行 `cat ~/.clasprc.json`，複製整份 JSON 內容。
+2. 到這個 repo 的 GitHub 頁面 → `Settings` → `Secrets and variables` → `Actions` →
+   `New repository secret`，名稱填 `CLASPRC_JSON`，值貼上剛剛複製的 JSON，儲存。
+3. （選填）如果也想讓正式 `/exec` 網址（手機在用的那個）跟著自動更新，不只是 `/dev` 測試網址：
+   跑 `clasp deployments` 查到「網頁應用程式」那個部署的 deploymentId，到同一個設定頁面的
+   `Variables` 分頁新增一個 Repository variable，名稱填 `CLASP_DEPLOYMENT_ID`，值貼上查到的 ID。
+   不設定的話，自動部署只會更新程式碼本體（HEAD／`/dev`），正式 `/exec` 網址還是要手動跑
+   `CLASP_DEPLOYMENT_ID=xxx ./deploy-stock.sh` 或在 workflow 加上這個變數才會生效。
+
+設定完成後，之後每次把改動 merge 進 `main`（且有動到 `apps-script/`），GitHub Actions 就會自動跑
+測試、推上去，不用再手動進 Cloud Shell 執行 `deploy-stock.sh`。想在 merge 之前先手動部署到 `/dev`
+測試網址驗證，本機流程（`clasp login` → `./deploy-stock.sh`）還是照舊可以用，兩者不衝突。
 
 ## AI 深度診斷
 
