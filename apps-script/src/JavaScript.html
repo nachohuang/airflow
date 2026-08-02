@@ -442,8 +442,8 @@
     var html = parsed.intro ? renderMarkdownLite(parsed.intro) : '';
     html += parsed.sections
       .filter(function (s) { return !/最終操作決策|最終建議/.test(s.title); })
-      .map(function (s, idx) {
-        return '<details class="info-collapse ai-section"' + (idx === 0 ? ' open' : '') + '>' +
+      .map(function (s) {
+        return '<details class="info-collapse ai-section">' +
           '<summary>' + pickSectionIcon_(s.title) + ' ' + escapeHtml(s.title) + '</summary>' +
           '<div class="info-body">' + renderMarkdownLite(s.lines.join('\n')) + '</div>' +
           '</details>';
