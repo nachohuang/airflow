@@ -60,12 +60,26 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   console.log('Test 3 (setPricingSettings reflected in calcCost_) passed:', cost);
 }
 
-// --- 4. extractVerdict_ 抓取最終建議關鍵字 ---
+// --- 4. extractVerdict_ 抓取最終建議關鍵字：新進場（買不買）跟持股續抱（怎麼處理現有部位）
+//    兩套決策分類都要認得 ---
 {
   const text = '一些分析文字...\n> 💡 **最終建議：** 【分批布局】\n> **核心理由：** blah';
   assert.strictEqual(context.extractVerdict_(text), '分批布局');
   assert.strictEqual(context.extractVerdict_('沒有關鍵字的文字'), '未明確');
+
+  const holdingText = '> 💡 **最終建議：** 【觸發止損平倉】\n> **核心理由：** 虧損擴大且籌碼轉弱';
+  assert.strictEqual(context.extractVerdict_(holdingText), '觸發止損平倉', '持股續抱的決策分類也要認得');
+  assert.strictEqual(context.extractVerdict_('> 💡 **最終建議：** 【強力續抱】'), '強力續抱');
   console.log('Test 4 (extractVerdict_) passed.');
+}
+
+// --- 4b. extractCoreReason_：決策結論置頂橫幅用，抓「核心理由」那一行的內容 ---
+{
+  const text = '> 💡 **最終建議：** 【分批布局】\n> **核心理由：** 法人連續買超且技術面站穩月線，適合分批進場。';
+  assert.strictEqual(context.extractCoreReason_(text), '法人連續買超且技術面站穩月線，適合分批進場。');
+  assert.strictEqual(context.extractCoreReason_('沒有核心理由這行文字'), '', '抓不到就回傳空字串，不能拋例外');
+  assert.strictEqual(context.extractCoreReason_(''), '');
+  console.log('Test 4b (extractCoreReason_) passed.');
 }
 
 // --- 5. buildTopPicksPrompt_：橫向比較清單要把每檔候選的量化欄位都列進去 ---

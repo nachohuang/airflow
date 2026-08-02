@@ -72,7 +72,10 @@ var CONFIG = {
   // 所以正常使用量下，這裡算出來的「預估費用」通常會比實際帳單（$0）高，僅供參考掃描量趨勢用。
   BIGQUERY_PRICE_PER_TB_DEFAULT: 6.25,
 
-  AI_DIAGNOSIS_COLUMNS: ['日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '最終建議', '診斷內容', '時間戳記'],
+  // 診斷類型：'深度診斷'（單檔，runAiDiagnosis）／'持股續抱診斷'（runPortfolioHoldDiagnosis）／
+  // 'TOP3推薦'（runAiTopPicks，證券代號固定存 'TOP3'）。upsert 的比對鍵是 證券代號+日期+診斷類型
+  // 三個一起比對，不會因為同一天對同一檔股票跑了不同類型的診斷互相覆蓋掉彼此。
+  AI_DIAGNOSIS_COLUMNS: ['日期', '證券代號', '證券名稱', 'Armor_Score', '操作策略', '最終建議', '診斷類型', '診斷內容', '時間戳記'],
 
   AI_USAGE_COLUMNS: ['日期', '時間戳記', '供應商', '模型', '證券代號', '輸入Tokens', '輸出Tokens', '預估費用(USD)'],
 
@@ -209,7 +212,12 @@ var CONFIG = {
     '殖利率(%)', '本益比', '股價淨值比'
   ],
 
-  PORTFOLIO_COLUMNS: ['證券代號', '證券名稱', '成本', '買進日期', '備註'],
+  // 一列＝一筆買進紀錄（lot），不是一列一檔股票——同一檔股票可以有好幾筆買進紀錄（分批買進/
+  // 加碼），「持股庫存」頁面會依證券代號聚合成加權平均成本/總股數。狀態='持有中' 或 '已賣出'，
+  // 賣出時把同一檔股票所有「持有中」的紀錄一次標記成'已賣出'（見 Portfolio.gs closePortfolioPosition）。
+  // 舊版（改版前）是一列一檔股票、沒有交易ID/股數/狀態欄位，第一次讀取時會自動轉換格式，
+  // 見 Portfolio.gs migratePortfolioSheetIfNeeded_。
+  PORTFOLIO_COLUMNS: ['交易ID', '證券代號', '證券名稱', '買進日期', '買進價格', '股數', '備註', '狀態', '賣出日期', '賣出價格'],
 
   // 給 Reports 分頁 / 手機 UI 用的精簡欄位
   REPORT_COLUMNS: [

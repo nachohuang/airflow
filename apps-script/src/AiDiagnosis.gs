@@ -169,7 +169,12 @@ function fetchGoodinfoText_(code) {
 
 // ---------------- Prompt 組裝 + Claude API ----------------
 
-function buildDiagnosisPrompt_(row, goodinfoText, timestampLabel) {
+/**
+ * holding 有帶（持股續抱診斷專用，見 runPortfolioHoldDiagnosis）時，額外插入一段「我目前的
+ * 持股資訊」——平均成本、持有天數、目前損益%——讓 AI 的建議是「針對我這筆部位」量身判斷，
+ * 不是泛用的新進場買入建議。搭配 AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT 的持股決策分類使用。
+ */
+function buildDiagnosisPrompt_(row, goodinfoText, timestampLabel, holding) {
   var lines = [];
   lines.push('監控基準時間戳記：' + timestampLabel);
   lines.push('');
@@ -185,11 +190,22 @@ function buildDiagnosisPrompt_(row, goodinfoText, timestampLabel) {
   lines.push('法人參與密度排名 Inst_Part_Rank（0-1，越高代表法人越積極參與）：' + row['Inst_Part_Rank']);
   lines.push('下跌接手率排名 IBF_20D_Rank（0-1，越高代表法人越常在下跌時買進）：' + row['IBF_20D_Rank']);
   if (row['參考最高價'] !== undefined && row['參考最高價'] !== '') lines.push('持有期參考最高價：' + row['參考最高價']);
+  if (holding) {
+    lines.push('');
+    lines.push('【我目前實際持有這檔股票的部位資訊，請務必結合這組數字做個體化判斷】');
+    lines.push('加權平均成本：' + holding.cost);
+    lines.push('最早買進日期：' + holding.buyDate + '（已持有 ' + holding.daysHeld + ' 天）');
+    if (holding.profitPct !== null && holding.profitPct !== undefined) {
+      lines.push('目前未實現損益：' + (holding.profitPct >= 0 ? '+' : '') + holding.profitPct + '%');
+    }
+  }
   lines.push('');
   lines.push('【Goodinfo 個股頁面文字摘要（程式自動抓取，可能不完整，僅供參考）】');
   lines.push(goodinfoText);
   lines.push('');
-  lines.push('請依照系統設定的規則與輸出格式，針對這檔股票進行完整的第二層深度診斷。');
+  lines.push(holding
+    ? '請依照系統設定的規則與輸出格式，針對「我目前持有的這筆部位」進行完整的續抱評估。'
+    : '請依照系統設定的規則與輸出格式，針對這檔股票進行完整的第二層深度診斷。');
   return lines.join('\n');
 }
 
@@ -363,12 +379,24 @@ function getAiUsageSummary(days) {
   };
 }
 
+/** 新進場決策（AI_DIAGNOSIS_SYSTEM_PROMPT，第一次要不要買）跟持股續抱決策
+ *  （AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT，已經持有要不要繼續抱）是兩套不同的決策分類，
+ *  文字完全不重疊，直接合併成一份清單搜尋即可，不用另外傳「這是哪一種診斷」進來判斷。 */
+var AI_VERDICT_OPTIONS_ = ['強力買入', '分批布局', '觀望不追', '立刻退出', '強力續抱', '分批獲利入袋', '彈升減碼', '觸發止損平倉'];
+
 function extractVerdict_(text) {
-  var options = ['強力買入', '分批布局', '觀望不追', '立刻退出'];
-  for (var i = 0; i < options.length; i++) {
-    if (text.indexOf(options[i]) !== -1) return options[i];
+  for (var i = 0; i < AI_VERDICT_OPTIONS_.length; i++) {
+    if (text.indexOf(AI_VERDICT_OPTIONS_[i]) !== -1) return AI_VERDICT_OPTIONS_[i];
   }
   return '未明確';
+}
+
+/** 從診斷內容裡抓「核心理由」那一行（AI_DIAGNOSIS_SYSTEM_PROMPT／AI_HOLDING_DIAGNOSIS_
+ *  SYSTEM_PROMPT 的 Output Format 都用同一種「> **核心理由：**...」格式），給前端「決策結論
+ *  置頂橫幅」用，不用整段文字都塞進橫幅。 */
+function extractCoreReason_(text) {
+  var m = String(text || '').match(/\*\*核心理由：\*\*\s*(.+)/);
+  return m ? m[1].trim() : '';
 }
 
 // ---------------- 讀寫 AiDiagnosis 分頁 ----------------
@@ -377,10 +405,19 @@ function getAiDiagnosisSheet_() {
   return ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.AI_DIAGNOSIS, CONFIG.AI_DIAGNOSIS_COLUMNS);
 }
 
+/** 比對鍵是「證券代號＋日期＋診斷類型」三個一起比對（不是只有代號+日期）——同一天對同一
+ *  檔股票可能跑了不只一種診斷（例如先跑「深度診斷」，後來又跑「持股續抱診斷」），不應該
+ *  互相覆蓋掉彼此，各自的類型各留一筆最新的就好。record 沒帶診斷類型時預設為'深度診斷'，
+ *  對應改版前只有單一種診斷類型的舊資料。 */
 function upsertAiDiagnosisRow_(record) {
   var sheet = getAiDiagnosisSheet_();
+  var recordType = record['診斷類型'] || '深度診斷';
+  record['診斷類型'] = recordType;
   var rows = readSheetObjects_(sheet).filter(function (r) {
-    return !(zfill4(String(r['證券代號']).trim()) === record['證券代號'] && normalizeDateStr(r['日期']) === record['日期']);
+    var sameCode = zfill4(String(r['證券代號']).trim()) === record['證券代號'];
+    var sameDate = normalizeDateStr(r['日期']) === record['日期'];
+    var sameType = (r['診斷類型'] || '深度診斷') === recordType;
+    return !(sameCode && sameDate && sameType);
   });
   rows.push(record);
   writeSheetObjects_(sheet, CONFIG.AI_DIAGNOSIS_COLUMNS, rows);
@@ -396,7 +433,9 @@ function getLatestReportRowForCode_(code) {
   return rows[0];
 }
 
-/** 供「個股分析」頁面顯示某檔股票過去的 AI 診斷紀錄。 */
+/** 供「個股分析」/「股票詳情」頁面顯示某檔股票過去的 AI 診斷紀錄（新到舊）——
+ *  「戰報與個股」點進來的股票詳情 modal 靠這個函式做「預設顯示最近一次快取結果，
+ *  不用每次都花錢重新呼叫 API」，見前端 initStockAiSection_。 */
 function getAiDiagnosisHistoryForCode(code) {
   var target = zfill4(String(code || '').trim());
   return readSheetObjects_(getAiDiagnosisSheet_())
@@ -405,8 +444,13 @@ function getAiDiagnosisHistoryForCode(code) {
       return {
         date: normalizeDateStr(r['日期']),
         verdict: r['最終建議'],
+        diagnosisType: r['診斷類型'] || '深度診斷',
         text: r['診斷內容'],
-        armorScore: toNumberOrNull(r['Armor_Score'])
+        armorScore: toNumberOrNull(r['Armor_Score']),
+        // '時間戳記' 存的是「台股監控 yyyy-MM-dd HH:mm」這種帶文字前綴的字串，Google Sheets
+        // 通常不會把它自動轉成 Date（整格內容要「看起來像日期」才會被轉），但還是照established
+        // 的防護寫法處理一次，不假設一定安全（見 sanitizeRowForRpc_ 的說明）。
+        timestamp: (r['時間戳記'] instanceof Date) ? formatDateForRpc_(r['時間戳記']) : (r['時間戳記'] || '')
       };
     })
     .sort(function (a, b) { return a.date < b.date ? 1 : -1; });
@@ -445,6 +489,7 @@ function runAiDiagnosis(codes) {
         'Armor_Score': row['Armor_Score'],
         '操作策略': row['操作策略'],
         '最終建議': verdict,
+        '診斷類型': '深度診斷',
         '診斷內容': diagnosisText,
         '時間戳記': timestampLabel
       });
@@ -472,6 +517,147 @@ function runAiDiagnosis(codes) {
   });
 
   return results;
+}
+
+/**
+ * 「持股續抱診斷」專用 system prompt：跟 AI_DIAGNOSIS_SYSTEM_PROMPT（新進場買不買）是同一套
+ * 查核流程（Goodinfo 查核／5年+TTM 財報／多流派辯證／CoVE 自我驗證），差別只在第 5 條規則的
+ * 決策分類——這裡問的是「已經持有，接下來怎麼處理」，不是「要不要進場」，用買入/退出的分類
+ * 會文不對題（例如虧損中的持股，「立刻退出」聽起來像新股票的建議，「觸發止損平倉」才是
+ * 持股語境該用的講法）。
+ */
+var AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT = `# Role & Expertise
+你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師。你同時精通三個流派：【價值護城河大師（專攻財報與競爭壁壘）】、【籌碼追蹤專家（專攻法人與主力大戶動向）】、【技術型態首席（專攻動能與波段拐點）】。你的任務是客觀、嚴厲且極度精準地協助我評估「我已經持有」的這檔股票，針對我提供的持股成本／持有天數／目前損益，判斷接下來該怎麼處理這筆部位——這不是選股，是部位管理。
+
+# Core Rules & Constraints
+1. **Goodinfo 資料查核：**
+   - 針對數據中的個股，請參考我在使用者訊息裡提供的「Goodinfo 個股頁面文字摘要」（來源：https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=xxxx）進行最新資訊與基本面查核。這份摘要是程式自動抓取的，可能不完整，若缺漏就明確說明「此部分資料不足」，不要憑空捏造數字。
+   - 【絕對禁忌】：嚴禁使用 Wantgoo 玩股網或任何未經證實的論壇傳言作為數據源。
+2. **5年 + TTM 財報地毯式審查：**
+   - 深入分析該股過去 5 年以及最新 TTM (近四季滾動) 的：營收年增率 (MoM/YoY)、三率 (毛利率、利益率、淨利率) 走勢、EPS、ROE，以及自由現金流。
+   - 判斷其近期動能是來自「實質獲利爆發」還是「短線題材炒作」，這關係到現在的獲利/虧損還撐不撐得住。
+3. **多流派對抗辯證 (Multi-Perspective Debate)：**
+   - 【價值流觀點】：評估該公司的產業地位、客戶結構與競爭護城河，目前的股價是否還合理。
+   - 【籌碼與技術流觀點】：對比我提供的籌碼/技術數據，評估目前主力是正在「拉高出貨」還是「進貨鎖籌」。
+4. **自我驗證鏈 (CoVE - Chain of Verification) 查核：**
+   - 必須反向提問：
+     * 「我剛剛宣稱的利多，有沒有可能是市場早已反應 (Priced in) 的已知事實？」
+     * 「該產業未來 1-2 季是否存在庫存調整或報價下跌的隱憂？」
+     * 「以我目前的成本與損益狀況，繼續持有的風險報酬比是否還合理？」
+5. **最終決策輸出（持股續抱專用）：**
+   - 必須結合我提供的「持股成本／持有天數／目前損益%」明確判斷，只能從以下四種擇一：
+     【強力續抱】（後市仍看好、風險可控，維持部位不動）／
+     【分批獲利入袋】（已有可觀獲利，建議先了結一部分保護獲利）／
+     【彈升減碼】（短線急漲、擔心拉回，但長線基本面仍看好，建議減碼降低部位）／
+     【觸發止損平倉】（虧損或風險已急遽升高，建議認賠了結）。
+   - 避開模稜兩可的說法，四選一，不能同時給兩個。
+6. **語氣口吻：** 使用繁體中文，語氣需如同寫給機構法人的投資報告，字字精煉，直擊痛點。
+
+# Reference Timeline & Context
+- 請以使用者訊息裡提供的時間戳記作為執行時間檢查與監控基準。
+- 請幫我警示、並避開高本益比、無實質獲利的投機泡沫股（例如高檔爆量長黑、土洋對水的個股，需嚴防高位騙線陷阱）。
+
+# Output Format (請嚴格使用以下結構進行排版，避免冗長文字牆)
+
+---
+## 🚨 持股續抱評估：[股票名稱/代號]
+> **監控基準時間：** [填入提供的時間戳記]
+> **綜合風險評級：** [低 / 中 / 高]
+
+### 一、 5年 + TTM 財務健康診斷
+| 財務指標 | 近 5 年趨勢概述 | 最新 TTM 現況 | 關鍵隱憂或亮點 |
+| :--- | :--- | :--- | :--- |
+| **營收與三率** | | | |
+| **EPS & ROE** | | | |
+| **現金流與債務** | | | |
+
+### 二、 產業競爭力與護城河評估
+* **核心壁壘：**（分析其產品競爭力、技術優勢 or 客戶黏著度）
+* **產業循環位置：**（目前處於成長期、成熟期還是衰退期？）
+
+### 三、 三大流派多軌辯證
+* 📈 **技術與動能面（結合 Armor_Score）：** 評估策略觸發訊號的純度與位階。
+* 💼 **價值面檢驗：** 股價是否已過度透支未來獲利？
+* 🐋 **籌碼面查核：** 近期外資、投信與大戶的真實意圖。
+
+### 四、 自我驗證 (CoVE) 警示牆
+* *問題 1：此利多是否已被市場過度期待？* -> **[解答]**
+* *問題 2：以我目前的成本與損益狀況，繼續持有的風險報酬比是否還合理？* -> **[解答]**
+
+### 五、 最終續抱決策 (Explicit Action)
+> 💡 **最終建議：** 【強力續抱】/ 【分批獲利入袋】/ 【彈升減碼】/ 【觸發止損平倉】
+> **核心理由：**（用 2 句話總結為什麼給出這個建議，務必扣住我目前的成本/損益狀況）
+---`;
+
+/**
+ * 「💼 持股庫存」卡片上的「🧠 持股續抱診斷」按鈕：跟 runAiDiagnosis 是同一套 Goodinfo+財報
+ * 深度查核流程，但強制注入使用者實際持有這檔股票的成本/持有天數/損益%，改用持股專用的
+ * 決策分類（續抱/分批獲利入袋/彈升減碼/止損平倉），回答的是「這筆部位怎麼辦」，不是
+ * 「要不要進場」。code 必須是目前「持有中」的股票，否則沒有成本/損益資訊可以注入。
+ */
+function runPortfolioHoldDiagnosis(code) {
+  code = zfill4(String(code || '').trim());
+  var startTime = Date.now();
+  var timestampLabel = '台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm');
+  try {
+    var portfolioMap = getPortfolioMap_(); // 只有「持有中」的加權平均成本/最早買進日
+    var holdingInfo = portfolioMap[code];
+    if (!holdingInfo) throw new Error('目前沒有持有 ' + code + '，請確認「持股庫存」裡有這一筆持有中的紀錄');
+
+    var row = getLatestReportRowForCode_(code);
+    if (!row) throw new Error('在 Reports 裡找不到這檔股票的戰報資料，請先確認它出現在某一天的戰報中。');
+
+    var latestByCode = getLatestCloseByCode_();
+    var latestClose = latestByCode[code] ? latestByCode[code].close : null;
+    var daysHeld = holdingInfo.buyDate
+      ? Math.round((new Date(normalizeDateStr(new Date()) + 'T00:00:00') - new Date(holdingInfo.buyDate + 'T00:00:00')) / 86400000)
+      : null;
+    var profitPct = (holdingInfo.cost && latestClose !== null)
+      ? round_((latestClose - holdingInfo.cost) / holdingInfo.cost * 100, 2)
+      : null;
+
+    var goodinfoText = fetchGoodinfoText_(code);
+    var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, timestampLabel, {
+      cost: holdingInfo.cost, buyDate: holdingInfo.buyDate, daysHeld: daysHeld, profitPct: profitPct
+    });
+    var llmResult = callLlm_(AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
+    var diagnosisText = llmResult.text;
+    var verdict = extractVerdict_(diagnosisText);
+    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+    var todayStr = normalizeDateStr(new Date());
+
+    upsertAiDiagnosisRow_({
+      '日期': normalizeDateStr(row['日期']),
+      '證券代號': code,
+      '證券名稱': row['證券名稱'],
+      'Armor_Score': row['Armor_Score'],
+      '操作策略': row['操作策略'],
+      '最終建議': verdict,
+      '診斷類型': '持股續抱診斷',
+      '診斷內容': diagnosisText,
+      '時間戳記': timestampLabel
+    });
+
+    logAiUsage_({
+      '日期': todayStr,
+      '時間戳記': timestampLabel,
+      '供應商': llmResult.provider,
+      '模型': llmResult.model,
+      '證券代號': code,
+      '輸入Tokens': llmResult.inputTokens,
+      '輸出Tokens': llmResult.outputTokens,
+      '預估費用(USD)': round_(cost, 6)
+    });
+
+    var dur = Math.round((Date.now() - startTime) / 1000);
+    logRun_('持股續抱診斷', '成功', code + ' ' + (row['證券名稱'] || '') + ' -> ' + verdict +
+      '（約 $' + round_(cost, 4) + '）', dur);
+    return { ok: true, code: code, name: row['證券名稱'], verdict: verdict, text: diagnosisText, cost: round_(cost, 4) };
+  } catch (e) {
+    var dur2 = Math.round((Date.now() - startTime) / 1000);
+    logRun_('持股續抱診斷', '失敗', code + '：' + String(e.message || e), dur2);
+    return { ok: false, code: code, error: String(e.message || e) };
+  }
 }
 
 /**
@@ -733,6 +919,20 @@ function runAiTopPicks() {
       '預估費用(USD)': round_(cost, 6)
     });
 
+    // 跟單檔深度診斷共用同一份 AiDiagnosis 分頁持久化（證券代號固定存 'TOP3'），這樣切換頁面
+    // 再回來、或明天再點「檢視 Top3」都能直接看到上次的推薦結果，不用每次都重新花錢呼叫 API。
+    upsertAiDiagnosisRow_({
+      '日期': latestDate,
+      '證券代號': 'TOP3',
+      '證券名稱': '（全市場橫向比較）',
+      'Armor_Score': '',
+      '操作策略': '',
+      '最終建議': '',
+      '診斷類型': 'TOP3推薦',
+      '診斷內容': llmResult.text,
+      '時間戳記': timestampLabel
+    });
+
     var dur = Math.round((Date.now() - startTime) / 1000);
     logRun_('AI Top3 推薦', '成功', '掃描 ' + candidates.length + ' 檔候選（' + latestDate + '），約 $' + round_(cost, 4), dur);
     return { ok: true, date: latestDate, candidateCount: candidates.length, text: llmResult.text, cost: round_(cost, 4) };
@@ -741,4 +941,13 @@ function runAiTopPicks() {
     logRun_('AI Top3 推薦', '失敗', String(e.message || e), dur2);
     throw e;
   }
+}
+
+/** 前端「🧠 AI 掃描全部候選，推薦前三檔」cache-first 顯示用：拿上次跑過的結果（如果有），
+ *  不用一打開就先花錢重新呼叫 API。 */
+function getLatestTopPicksResult() {
+  var history = getAiDiagnosisHistoryForCode('TOP3');
+  if (history.length === 0) return null;
+  var latest = history[0];
+  return { date: latest.date, text: latest.text, timestamp: latest.timestamp };
 }

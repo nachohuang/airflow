@@ -123,6 +123,11 @@
   .btn-primary { background: var(--accent); color: #fff; }
   .btn-secondary { background: var(--border); color: var(--text); }
   .btn-danger { background: var(--red); color: #fff; }
+  .btn-link {
+    border: none; background: transparent; color: var(--accent); font-size: 12px;
+    font-weight: 600; cursor: pointer; padding: 0 2px;
+  }
+  .btn-link.danger { color: var(--red); }
   button:disabled { opacity: 0.5; cursor: default; }
 
   .inline-form { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -213,6 +218,41 @@
     display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;
     background: var(--accent); color: #fff; margin-left: 6px;
   }
+
+  /* AI 診斷「決策結論置頂橫幅」：一打開就先看到最終建議，不用滑到最底部才找得到。 */
+  .ai-verdict-banner {
+    background: var(--bg); border: 2px solid var(--border); border-radius: 12px;
+    padding: 14px; margin-bottom: 10px; text-align: center;
+  }
+  .ai-verdict-banner.up { border-color: var(--green); background: rgba(22, 163, 74, 0.08); }
+  .ai-verdict-banner.down { border-color: var(--red); background: rgba(220, 38, 38, 0.08); }
+  .ai-verdict-banner-label { font-size: 11px; color: var(--text-muted); }
+  .ai-verdict-banner-value { font-size: 21px; font-weight: 700; margin: 4px 0; }
+  .ai-verdict-banner.up .ai-verdict-banner-value { color: var(--green); }
+  .ai-verdict-banner.down .ai-verdict-banner-value { color: var(--red); }
+  .ai-verdict-banner-reason { font-size: 13px; opacity: 0.85; }
+
+  /* AI 診斷內容依區段摺疊（一萬字長文收納起來，避免要滑很久才找得到重點）。 */
+  .ai-report details.ai-section {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 12px; margin-bottom: 8px; font-size: 13px;
+  }
+  .ai-report details.ai-section summary { cursor: pointer; font-weight: 600; list-style: none; }
+  .ai-report details.ai-section summary::-webkit-details-marker { display: none; }
+  .ai-report details.ai-section[open] summary { margin-bottom: 6px; }
+
+  /* 手機版財務表格：改成「一列一張卡片」的 key-value 呈現，避免欄位一多，表格被手機螢幕
+     寬度擠壓變形（原本 4~5 欄的財務指標表在手機上每一欄擠不到一個字寬，數字全部斷行）。 */
+  .md-table-cards { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+  .md-table-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .md-table-card-title { font-weight: 700; font-size: 13px; margin-bottom: 4px; color: var(--accent); }
+  .kv-row {
+    display: flex; justify-content: space-between; gap: 10px; font-size: 12px;
+    padding: 3px 0; border-bottom: 1px dashed var(--border);
+  }
+  .kv-row:last-child { border-bottom: none; }
+  .kv-label { color: var(--text-muted); flex-shrink: 0; }
+  .kv-value { text-align: right; }
 
   /* 底部彈出式面板（bottom sheet）共用元件：action sheet（重新整理選項）跟個股詳情 modal 都用這套。 */
   .sheet-overlay {

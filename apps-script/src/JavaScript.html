@@ -277,10 +277,9 @@
 
       var actionsHtml =
         '<div class="form-actions" style="margin-bottom:10px;">' +
-        (result.report.length > 0 ? '<button type="button" class="btn-secondary" id="aiTopPicksBtn">🧠 AI 掃描全部候選，推薦前三檔</button>' : '') +
         '<button type="button" class="btn-secondary" id="screeningFunnelBtn">🔍 查看篩選漏斗明細</button>' +
         '</div>' +
-        (result.report.length > 0 ? '<div id="aiTopPicksResult" style="margin-bottom:10px;"></div>' : '');
+        (result.report.length > 0 ? '<div id="aiTopPicksSection" style="margin-bottom:10px;"></div>' : '');
 
       if (result.report.length === 0) {
         listEl.innerHTML = actionsHtml + '<div class="empty-hint">這天沒有符合條件的訊號</div>';
@@ -310,7 +309,6 @@
           predictedLine +
           '<div class="form-actions">' +
           '<a class="stock-card-link" href="' + escapeHtml(r['監控連結']) + '" target="_blank" rel="noopener">Goodinfo ↗</a>' +
-          '<button type="button" class="btn-secondary ai-diagnose-btn" data-code="' + escapeHtml(code) + '">🧠 AI 深度診斷</button>' +
           '</div>' +
           '<div id="aiResult-' + escapeHtml(code) + '"></div>' +
           '</div>';
@@ -318,14 +316,13 @@
       listEl.querySelectorAll('.stock-card-open').forEach(function (headEl) {
         headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code')); });
       });
-      listEl.querySelectorAll('.ai-diagnose-btn').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          runAiDiagnosisForButton_(btn.getAttribute('data-code'), document.getElementById('aiResult-' + btn.getAttribute('data-code')));
+      result.report.forEach(function (r) {
+        var code = r['證券代號'];
+        initAiDiagnosisSection_(document.getElementById('aiResult-' + code), code, '深度診斷', '🧠 AI 深度診斷', function () {
+          return callServer('runAiDiagnosis', [code]).then(function (results) { return results[0]; });
         });
       });
-      document.getElementById('aiTopPicksBtn').addEventListener('click', function () {
-        runAiTopPicksForButton_(document.getElementById('aiTopPicksResult'));
-      });
+      initTopPicksSection_(document.getElementById('aiTopPicksSection'));
       document.getElementById('screeningFunnelBtn').addEventListener('click', openScreeningFunnelSheet_);
     }).catch(function (err) {
       metaEl.textContent = '';
@@ -335,38 +332,9 @@
 
   var AI_PROVIDER_LABEL = { claude: 'Claude API', gemini: 'Gemini API' };
 
-  /** 「AI 掃描全部候選，推薦前三檔」：跟單檔深度診斷不同量級的任務，只用戰報已經算好的
-   *  量化欄位做橫向比較，不會對每一檔都額外抓 Goodinfo（候選一多成本會爆掉）。 */
-  function runAiTopPicksForButton_(containerEl) {
-    var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
-    containerEl.innerHTML = '<div class="loading">AI 掃描全部候選中，會需要一點時間（要呼叫 ' + providerLabel + '）...</div>';
-    withSpin(callServer('runAiTopPicks')).then(function (res) {
-      containerEl.innerHTML =
-        '<div class="ai-report">' +
-        '<div class="meta-bar">掃描 ' + fmtNum(res.candidateCount, 0) + ' 檔候選（' + escapeHtml(res.date) + '）' +
-        (res.cost !== undefined ? '　本次預估費用 $' + fmtNum(res.cost, 4) : '') + '</div>' +
-        renderMarkdownLite(res.text) +
-        '</div>';
-    }).catch(function (err) { containerEl.innerHTML = errorBox(err); });
-  }
-
-  /** 供戰報卡片與股票詳情 modal 共用：跑一次 AI 診斷並把結果渲染進指定容器。 */
-  function runAiDiagnosisForButton_(code, containerEl) {
-    var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
-    containerEl.innerHTML = '<div class="loading">AI 診斷中，會需要一點時間（要呼叫 ' + providerLabel + ' + 抓 Goodinfo）...</div>';
-    withSpin(callServer('runAiDiagnosis', [code])).then(function (results) {
-      var res = results[0];
-      if (!res.ok) { containerEl.innerHTML = errorBox(res.error); return; }
-      containerEl.innerHTML =
-        '<div class="ai-report">' +
-        '<div>最終建議：<span class="ai-verdict-badge">' + escapeHtml(res.verdict) + '</span>' +
-        (res.cost !== undefined ? '　<span class="meta-bar" style="display:inline;">本次預估費用 $' + fmtNum(res.cost, 4) + '</span>' : '') + '</div>' +
-        renderMarkdownLite(res.text) +
-        '</div>';
-    }).catch(function (err) { containerEl.innerHTML = errorBox(err); });
-  }
-
-  /** 輕量 markdown -> HTML（只處理 AI 診斷模板用到的標題/表格/引用/粗體/清單，不是完整 markdown 解析器）。 */
+  /** 輕量 markdown -> HTML（只處理 AI 診斷模板用到的標題/表格/引用/粗體/清單，不是完整 markdown 解析器）。
+   *  表格改成「一列一張 key-value 卡片」而不是原生 <table>，避免財務指標表在手機螢幕上欄位被擠壓變形
+   *  （表頭第一欄當卡片標題，其餘欄位變成 label/value 兩兩一行）。 */
   function renderMarkdownLite(md) {
     if (!md) return '';
     var lines = String(md).split(/\r?\n/);
@@ -377,12 +345,18 @@
       return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     }
     function flushTable() {
-      if (tableRows.length === 0) return;
-      var rowsHtml = tableRows.map(function (cells, idx) {
-        var tag = idx === 0 ? 'th' : 'td';
-        return '<tr>' + cells.map(function (c) { return '<' + tag + '>' + inlineMd(c.trim()) + '</' + tag + '>'; }).join('') + '</tr>';
+      if (tableRows.length < 2) { tableRows = []; return; } // 只有表頭、沒有資料列就不用輸出
+      var headers = tableRows[0].map(function (c) { return c.trim(); });
+      var cardsHtml = tableRows.slice(1).map(function (cells) {
+        var title = (cells[0] || '').trim();
+        var kvHtml = headers.slice(1).map(function (h, i) {
+          var val = (cells[i + 1] || '').trim();
+          if (!val) return '';
+          return '<div class="kv-row"><span class="kv-label">' + inlineMd(h) + '</span><span class="kv-value">' + inlineMd(val) + '</span></div>';
+        }).join('');
+        return '<div class="md-table-card"><div class="md-table-card-title">' + inlineMd(title) + '</div>' + kvHtml + '</div>';
       }).join('');
-      out.push('<div class="table-scroll"><table class="simple-table">' + rowsHtml + '</table></div>');
+      out.push('<div class="md-table-cards">' + cardsHtml + '</div>');
       tableRows = [];
     }
 
@@ -410,7 +384,189 @@
     return out.join('\n');
   }
 
-  // ---------- 持股庫存 ----------
+  /** 把 AI 診斷內容依標題拆段：第一個出現的標題（診斷模板固定是 H2 報告標題）留在頂部簡介、
+   *  不摺疊；之後每個標題各自變成一個可摺疊區塊的邊界。不綁死特定標題文字，AI 輸出的標題
+   *  措辭若有些微出入也不會整段解析失敗。 */
+  function splitMarkdownSections_(md) {
+    var lines = String(md || '').split(/\r?\n/);
+    var intro = [];
+    var sections = [];
+    var current = null;
+    var sawFirstHeader = false;
+    lines.forEach(function (line) {
+      var h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) {
+        if (!sawFirstHeader) { intro.push(line); sawFirstHeader = true; return; }
+        current = { title: h[2].trim(), lines: [] };
+        sections.push(current);
+        return;
+      }
+      if (current) current.lines.push(line); else intro.push(line);
+    });
+    return { intro: intro.join('\n'), sections: sections };
+  }
+
+  function pickSectionIcon_(title) {
+    if (/CoVE|驗證|警示/.test(title)) return '🛡️';
+    if (/財務|EPS|ROE|現金流|三表/.test(title)) return '📑';
+    if (/護城河|產業|競爭力/.test(title)) return '🏢';
+    if (/籌碼|技術|流派|辯證|動能/.test(title)) return '📊';
+    return '📄';
+  }
+
+  /** 決策結論置頂橫幅：一打開就先看到最終建議，不用滑到最底部才找得到。verdict 是空字串或
+   *  「未明確」時不畫（例如 Top3 橫向比較沒有單一決策）。 */
+  var AI_VERDICT_UP_ = ['強力買入', '分批布局', '強力續抱', '分批獲利入袋'];
+  var AI_VERDICT_DOWN_ = ['立刻退出', '觸發止損平倉', '彈升減碼'];
+  function renderAiVerdictBanner_(verdict, reason) {
+    if (!verdict || verdict === '未明確') return '';
+    var cls = AI_VERDICT_UP_.indexOf(verdict) !== -1 ? 'up' : (AI_VERDICT_DOWN_.indexOf(verdict) !== -1 ? 'down' : '');
+    return '<div class="ai-verdict-banner ' + cls + '">' +
+      '<div class="ai-verdict-banner-label">最終操作決策</div>' +
+      '<div class="ai-verdict-banner-value">' + escapeHtml(verdict) + '</div>' +
+      (reason ? '<div class="ai-verdict-banner-reason">' + escapeHtml(reason) + '</div>' : '') +
+      '</div>';
+  }
+
+  /** 對應 AiDiagnosis.gs 的 extractCoreReason_，前端直接從診斷全文抓「核心理由」那一行，
+   *  不用為了這幾個字多打一次 RPC。 */
+  function extractCoreReasonClient_(text) {
+    var m = String(text || '').match(/\*\*核心理由：\*\*\s*(.+)/);
+    return m ? m[1].trim() : '';
+  }
+
+  /** 內文依標題拆成手風琴摺疊區塊；「最終操作決策」那段已經在置頂橫幅顯示過，這裡不重複列出，
+   *  避免使用者展開最後一個區塊卻只看到跟橫幅一樣的內容。第一個區塊預設展開，其餘收合。 */
+  function renderAiDiagnosisReportBody_(text) {
+    var parsed = splitMarkdownSections_(text);
+    var html = parsed.intro ? renderMarkdownLite(parsed.intro) : '';
+    html += parsed.sections
+      .filter(function (s) { return !/最終操作決策|最終建議/.test(s.title); })
+      .map(function (s, idx) {
+        return '<details class="info-collapse ai-section"' + (idx === 0 ? ' open' : '') + '>' +
+          '<summary>' + pickSectionIcon_(s.title) + ' ' + escapeHtml(s.title) + '</summary>' +
+          '<div class="info-body">' + renderMarkdownLite(s.lines.join('\n')) + '</div>' +
+          '</details>';
+      }).join('');
+    return html;
+  }
+
+  /** AI 診斷報告完整呈現：（可選）決策結論置頂橫幅 + 費用/快取時間戳記 + 內容手風琴。
+   *  res 至少要有 text；verdict/cost 沒有就不畫對應區塊。opts.cacheLabel / opts.metaExtra
+   *  是額外要顯示在頂部 meta-bar 的文字（例如「📅 歷史診斷紀錄（... 產出）」）。 */
+  function renderAiDiagnosisReport_(res, opts) {
+    opts = opts || {};
+    var reason = extractCoreReasonClient_(res.text);
+    var metaParts = [];
+    if (opts.cacheLabel) metaParts.push(opts.cacheLabel);
+    if (opts.metaExtra) metaParts.push(opts.metaExtra);
+    if (res.cost !== undefined && res.cost !== null) metaParts.push('本次預估費用 $' + fmtNum(res.cost, 4));
+    return '<div class="ai-report">' +
+      (metaParts.length ? '<div class="meta-bar">' + metaParts.map(function (p) { return escapeHtml(p); }).join('　') + '</div>' : '') +
+      renderAiVerdictBanner_(res.verdict, reason) +
+      renderAiDiagnosisReportBody_(res.text) +
+      '</div>';
+  }
+
+  /**
+   * 共用「cache-first AI 診斷區塊」：容器一開始先查同一檔股票／同一種診斷類型過去是否已經
+   * 存過結果，有的話直接顯示（標明是快取），主按鈕降級成次要的「🔄 重新花費 API 重新分析」；
+   * 沒有快取才顯示主要按鈕、等使用者主動點才花錢呼叫 API。
+   * runFn() 要回傳 promise，resolve 出單一結果物件 { ok, verdict, text, cost, error }
+   * （runAiDiagnosis 回傳的是陣列，呼叫端要自己取 results[0] 再包一層 promise 傳進來）。
+   */
+  function initAiDiagnosisSection_(containerEl, code, diagnosisType, primaryLabel, runFn) {
+    containerEl.innerHTML = '<div class="loading">載入診斷紀錄中...</div>';
+    callServer('getAiDiagnosisHistoryForCode', code).then(function (history) {
+      var cached = history.filter(function (h) { return h.diagnosisType === diagnosisType; })[0] || null;
+      renderAiDiagnosisSection_(containerEl, primaryLabel, cached, runFn);
+    }).catch(function () { renderAiDiagnosisSection_(containerEl, primaryLabel, null, runFn); });
+  }
+
+  function renderAiDiagnosisSection_(containerEl, primaryLabel, entry, runFn) {
+    var btnLabel = entry ? '🔄 重新花費 API 重新分析' : primaryLabel;
+    var resultHtml = '';
+    if (entry) {
+      resultHtml = renderAiDiagnosisReport_(entry, entry.fresh ? {} : { cacheLabel: '📅 歷史診斷紀錄（' + entry.timestamp + ' 產出）' });
+    }
+    containerEl.innerHTML =
+      '<div class="form-actions"><button type="button" class="' + (entry ? 'btn-secondary' : 'btn-primary') + ' ai-run-btn">' + escapeHtml(btnLabel) + '</button></div>' +
+      '<div class="ai-result-slot">' + resultHtml + '</div>';
+    containerEl.querySelector('.ai-run-btn').addEventListener('click', function () {
+      runAiDiagnosisSection_(containerEl, primaryLabel, runFn);
+    });
+  }
+
+  function runAiDiagnosisSection_(containerEl, primaryLabel, runFn) {
+    var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
+    var runBtn = containerEl.querySelector('.ai-run-btn');
+    if (runBtn) runBtn.disabled = true;
+    containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">AI 診斷中，會需要一點時間（要呼叫 ' + providerLabel + ' + 抓 Goodinfo）...</div>';
+    withSpin(runFn()).then(function (res) {
+      if (!res.ok) { containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(res.error); if (runBtn) runBtn.disabled = false; return; }
+      renderAiDiagnosisSection_(containerEl, primaryLabel, { verdict: res.verdict, text: res.text, cost: res.cost, fresh: true }, runFn);
+    }).catch(function (err) {
+      containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(err);
+      if (runBtn) runBtn.disabled = false;
+    });
+  }
+
+  /** 更早的診斷紀錄（排除目前已經顯示在上面的最新一筆），收合在最下面，需要時才展開看，
+   *  只有股票詳情 modal 這種本來就有較多版面的地方才顯示，戰報卡片、持股卡片不放。 */
+  function loadOlderAiDiagnosisHistoryInto_(code, el, diagnosisType) {
+    if (!el) return;
+    callServer('getAiDiagnosisHistoryForCode', code).then(function (history) {
+      var older = history.filter(function (h) { return h.diagnosisType === diagnosisType; }).slice(1);
+      if (!older.length) { el.innerHTML = ''; return; }
+      el.innerHTML = '<details class="info-collapse"><summary>更早的診斷紀錄（' + older.length + ' 筆）</summary><div class="info-body">' +
+        older.map(function (h) {
+          return '<div class="ai-report"><div class="meta-bar">' + escapeHtml(h.date) + '　最終建議：<span class="ai-verdict-badge">' + escapeHtml(h.verdict) + '</span></div>' +
+            renderAiDiagnosisReportBody_(h.text) + '</div>';
+        }).join('') + '</div></details>';
+    }).catch(function () { el.innerHTML = ''; });
+  }
+
+  /** 「AI 掃描全部候選，推薦前三檔」：cache-first，跟單檔深度診斷不同量級的任務，只用戰報
+   *  已經算好的量化欄位做橫向比較，不會對每一檔都額外抓 Goodinfo（候選一多成本會爆掉）。 */
+  function initTopPicksSection_(containerEl) {
+    containerEl.innerHTML = '<div class="loading">載入快取中...</div>';
+    callServer('getLatestTopPicksResult').then(function (cached) {
+      renderTopPicksSection_(containerEl, cached);
+    }).catch(function () { renderTopPicksSection_(containerEl, null); });
+  }
+
+  function renderTopPicksSection_(containerEl, entry) {
+    var btnLabel = entry ? '🔄 重新花費 API 重新掃描' : '🧠 AI 掃描全部候選，推薦前三檔';
+    var resultHtml = '';
+    if (entry) {
+      var opts = entry.fresh
+        ? { metaExtra: '掃描 ' + fmtNum(entry.candidateCount, 0) + ' 檔候選（' + entry.date + '）', cost: entry.cost }
+        : { cacheLabel: '📅 歷史推薦紀錄（' + entry.timestamp + ' 產出）' };
+      resultHtml = renderAiDiagnosisReport_({ text: entry.text, cost: entry.fresh ? entry.cost : undefined }, opts);
+    }
+    containerEl.innerHTML =
+      '<div class="form-actions"><button type="button" class="' + (entry ? 'btn-secondary' : 'btn-primary') + '" id="aiTopPicksBtn">' + escapeHtml(btnLabel) + '</button></div>' +
+      '<div class="ai-result-slot">' + resultHtml + '</div>';
+    document.getElementById('aiTopPicksBtn').addEventListener('click', function () {
+      runAiTopPicksForButton_(containerEl);
+    });
+  }
+
+  /** 跟單檔深度診斷不同量級的任務，只用戰報已經算好的量化欄位做橫向比較。 */
+  function runAiTopPicksForButton_(containerEl) {
+    var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
+    var btn = document.getElementById('aiTopPicksBtn');
+    if (btn) btn.disabled = true;
+    containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">AI 掃描全部候選中，會需要一點時間（要呼叫 ' + providerLabel + '）...</div>';
+    withSpin(callServer('runAiTopPicks')).then(function (res) {
+      renderTopPicksSection_(containerEl, { text: res.text, cost: res.cost, candidateCount: res.candidateCount, date: res.date, fresh: true });
+    }).catch(function (err) {
+      containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(err);
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  // ---------- 持股庫存（一檔股票可能有多筆分批買進的 lot） ----------
   var pfForm = document.getElementById('portfolioForm');
   var pfClearBtn = document.getElementById('pfClearBtn');
 
@@ -422,113 +578,237 @@
         listEl.innerHTML = '<div class="empty-hint">尚未新增任何持股</div>';
         return;
       }
-      listEl.innerHTML = items.map(function (it) {
-        var profit = (it.cost && it.latestClose !== null) ? (it.latestClose - it.cost) / it.cost * 100 : null;
-        var profitHtml = profit === null ? '' :
-          '<div class="stock-card-strategy" style="color:' + (profit >= 0 ? 'var(--green)' : 'var(--red)') + '">' +
-          '現價 ' + fmtNum(it.latestClose) + '　損益 ' + (profit >= 0 ? '+' : '') + fmtNum(profit, 1) + '%</div>';
-        var signalHtml = '';
-        if (it.signal && it.signal.strategy) {
-          var color = STRATEGY_HINT[it.signal.strategy] || 'var(--text)';
-          signalHtml = '<div class="stock-card-strategy" style="color:' + color + '">' +
-            escapeHtml(it.signal.strategy) + (it.signal.action ? ' · ' + escapeHtml(it.signal.action) : '') +
-            '<span class="stock-card-action">（' + escapeHtml(it.signal.date) + ' 戰報）</span></div>';
-        }
-        return '<div class="stock-card">' +
-          '<div class="stock-card-head stock-card-open" data-code="' + escapeHtml(it.code) + '" style="cursor:pointer;">' +
-          '<span><span class="stock-card-code">' + escapeHtml(it.code) + '</span>' +
-          '<span class="stock-card-name">' + escapeHtml(it.name) + '</span></span>' +
-          '</div>' +
-          '<div class="stock-card-note">成本 ' + fmtNum(it.cost) + '　買進日 ' + escapeHtml(it.buyDate || '-') + '</div>' +
-          profitHtml +
-          signalHtml +
-          (it.note ? '<div class="stock-card-note">備註：' + escapeHtml(it.note) + '</div>' : '') +
-          '<div class="form-actions">' +
-          '<button type="button" class="btn-secondary pf-edit" data-code="' + escapeHtml(it.code) + '">編輯</button>' +
-          '<button type="button" class="btn-danger pf-delete" data-code="' + escapeHtml(it.code) + '">刪除</button>' +
-          '</div></div>';
-      }).join('');
-
-      var byCode = {};
-      items.forEach(function (it) { byCode[it.code] = it; });
-      listEl.querySelectorAll('.stock-card-open').forEach(function (headEl) {
-        headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code')); });
-      });
-      listEl.querySelectorAll('.pf-edit').forEach(function (btn) {
-        btn.addEventListener('click', function () { fillPortfolioForm(byCode[btn.getAttribute('data-code')]); });
-      });
-      listEl.querySelectorAll('.pf-delete').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          var code = btn.getAttribute('data-code');
-          if (!confirm('確定要刪除持股 ' + code + ' 嗎？')) return;
-          callServer('deletePortfolioItem', code).then(function () { loadPortfolio(); });
+      listEl.innerHTML = items.map(renderPortfolioCard_).join('');
+      wirePortfolioCardEvents_(listEl);
+      items.forEach(function (it) {
+        initAiDiagnosisSection_(document.getElementById('pfHoldResult-' + it.code), it.code, '持股續抱診斷', '🧠 持股續抱診斷', function () {
+          return callServer('runPortfolioHoldDiagnosis', it.code);
         });
       });
     }).catch(function (err) { listEl.innerHTML = errorBox(err); });
   }
 
-  function fillPortfolioForm(it) {
-    document.getElementById('portfolioFormTitle').textContent = '編輯持股 ' + it.code;
-    document.getElementById('pfOriginalCode').value = it.code;
-    document.getElementById('pfCode').value = it.code;
-    document.getElementById('pfName').value = it.name || '';
-    document.getElementById('pfCost').value = it.cost;
-    document.getElementById('pfBuyDate').value = it.buyDate || '';
-    document.getElementById('pfNote').value = it.note || '';
+  function renderPortfolioCard_(it) {
+    var profit = (it.cost && it.latestClose !== null) ? (it.latestClose - it.cost) / it.cost * 100 : null;
+    var profitHtml = profit === null ? '' :
+      '<div class="stock-card-strategy" style="color:' + (profit >= 0 ? 'var(--green)' : 'var(--red)') + '">' +
+      '現價 ' + fmtNum(it.latestClose) + '　未實現損益 ' + (profit >= 0 ? '+' : '') + fmtNum(profit, 1) + '%</div>';
+    var signalHtml = '';
+    if (it.signal && it.signal.strategy) {
+      var color = STRATEGY_HINT[it.signal.strategy] || 'var(--text)';
+      signalHtml = '<div class="stock-card-strategy" style="color:' + color + '">' +
+        escapeHtml(it.signal.strategy) + (it.signal.action ? ' · ' + escapeHtml(it.signal.action) : '') +
+        '<span class="stock-card-action">（' + escapeHtml(it.signal.date) + ' 戰報）</span></div>';
+    }
+    var lotsHtml = it.lots.map(function (lot) {
+      return '<div class="kv-row"><span class="kv-label">' + escapeHtml(lot.buyDate || '-') + '　' +
+        fmtNum(lot.shares, 0) + ' 股 @ ' + fmtNum(lot.cost) + (lot.note ? '　' + escapeHtml(lot.note) : '') + '</span>' +
+        '<span class="kv-value">' +
+        '<button type="button" class="btn-link pf-lot-edit" data-lot="' + escapeHtml(lot.id) + '" data-code="' + escapeHtml(it.code) + '">編輯</button> ' +
+        '<button type="button" class="btn-link danger pf-lot-delete" data-lot="' + escapeHtml(lot.id) + '">刪除</button>' +
+        '</span></div>';
+    }).join('');
+    return '<div class="stock-card" data-portfolio-code="' + escapeHtml(it.code) + '">' +
+      '<div class="stock-card-head stock-card-open" data-code="' + escapeHtml(it.code) + '" style="cursor:pointer;">' +
+      '<span><span class="stock-card-code">' + escapeHtml(it.code) + '</span>' +
+      '<span class="stock-card-name">' + escapeHtml(it.name) + '</span></span>' +
+      '</div>' +
+      '<div class="stock-card-note">加權平均成本 ' + fmtNum(it.cost) + '　共 ' + fmtNum(it.totalShares, 0) + ' 股（' +
+      fmtNum(it.totalShares / 1000, 2) + ' 張）　最早買進 ' + escapeHtml(it.buyDate || '-') + '</div>' +
+      profitHtml + signalHtml +
+      (it.note ? '<div class="stock-card-note">備註：' + escapeHtml(it.note) + '</div>' : '') +
+      '<details class="info-collapse"><summary>買進明細（' + it.lots.length + ' 筆）</summary><div class="info-body">' + lotsHtml + '</div></details>' +
+      '<div class="form-actions">' +
+      '<button type="button" class="btn-secondary pf-add-lot" data-code="' + escapeHtml(it.code) + '" data-name="' + escapeHtml(it.name) + '">＋ 加碼買進</button>' +
+      '<button type="button" class="btn-primary pf-close-position" data-code="' + escapeHtml(it.code) + '" data-name="' + escapeHtml(it.name) + '" data-cost="' + it.cost + '" data-shares="' + it.totalShares + '">💰 標示已賣出/結案</button>' +
+      '</div>' +
+      '<div id="pfHoldResult-' + escapeHtml(it.code) + '"></div>' +
+      '</div>';
+  }
+
+  function wirePortfolioCardEvents_(listEl) {
+    listEl.querySelectorAll('.stock-card-open').forEach(function (headEl) {
+      headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code')); });
+    });
+    listEl.querySelectorAll('.pf-add-lot').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        startNewPortfolioLot_(btn.getAttribute('data-code'), btn.getAttribute('data-name'));
+      });
+    });
+    listEl.querySelectorAll('.pf-lot-edit').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        fillPortfolioLotForm_(btn.getAttribute('data-code'), btn.getAttribute('data-lot'));
+      });
+    });
+    listEl.querySelectorAll('.pf-lot-delete').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!confirm('確定要刪除這筆買進紀錄嗎？')) return;
+        callServer('deletePortfolioLot', btn.getAttribute('data-lot')).then(function () { loadPortfolio(); });
+      });
+    });
+    listEl.querySelectorAll('.pf-close-position').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        openPfCloseSheet_(btn.getAttribute('data-code'), btn.getAttribute('data-name'), toNumOrNull_(btn.getAttribute('data-cost')), toNumOrNull_(btn.getAttribute('data-shares')));
+      });
+    });
+  }
+
+  function toNumOrNull_(v) { var n = parseFloat(v); return isNaN(n) ? null : n; }
+
+  /** 表單重置成「新增這筆買進」的初始狀態（不綁定任何既有股票/lot）。 */
+  function resetPortfolioForm_() {
+    pfForm.reset();
+    document.getElementById('portfolioFormTitle').textContent = '新增持股';
+    document.getElementById('pfLotId').value = '';
+    document.getElementById('pfSubmitBtn').textContent = '＋ 新增這筆買進';
+  }
+
+  /** 「＋ 加碼買進」：代號/名稱鎖定成這檔股票，其餘欄位清空讓使用者填這筆新的買進紀錄。 */
+  function startNewPortfolioLot_(code, name) {
+    resetPortfolioForm_();
+    document.getElementById('portfolioFormTitle').textContent = code + ' 加碼買進';
+    document.getElementById('pfCode').value = code;
+    document.getElementById('pfName').value = name || '';
+    document.getElementById('pfBuyDate').value = todayDateStr_();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
-  pfClearBtn.addEventListener('click', function () {
-    pfForm.reset();
-    document.getElementById('portfolioFormTitle').textContent = '新增持股';
-    document.getElementById('pfOriginalCode').value = '';
-  });
+  function fillPortfolioLotForm_(code, lotId) {
+    callServer('getPortfolio').then(function (items) {
+      var it = items.filter(function (x) { return x.code === code; })[0];
+      var lot = it && it.lots.filter(function (l) { return l.id === lotId; })[0];
+      if (!lot) { alert('找不到這筆買進紀錄，可能已被刪除，請重新整理後再試一次'); return; }
+      document.getElementById('portfolioFormTitle').textContent = '編輯買進紀錄 ' + code;
+      document.getElementById('pfLotId').value = lot.id;
+      document.getElementById('pfCode').value = code;
+      document.getElementById('pfName').value = it.name || '';
+      document.getElementById('pfBuyDate').value = lot.buyDate || '';
+      document.getElementById('pfCost').value = lot.cost;
+      document.getElementById('pfShares').value = lot.shares;
+      document.getElementById('pfNote').value = lot.note || '';
+      document.getElementById('pfSubmitBtn').textContent = '儲存修改';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
+
+  pfClearBtn.addEventListener('click', resetPortfolioForm_);
 
   pfForm.addEventListener('submit', function (e) {
     e.preventDefault();
     var item = {
+      lotId: document.getElementById('pfLotId').value || '',
       code: document.getElementById('pfCode').value.trim(),
       name: document.getElementById('pfName').value.trim(),
-      cost: parseFloat(document.getElementById('pfCost').value),
       buyDate: document.getElementById('pfBuyDate').value,
+      cost: parseFloat(document.getElementById('pfCost').value),
+      shares: parseFloat(document.getElementById('pfShares').value),
       note: document.getElementById('pfNote').value.trim()
     };
     callServer('savePortfolioItem', item).then(function () {
-      pfForm.reset();
-      document.getElementById('portfolioFormTitle').textContent = '新增持股';
-      document.getElementById('pfOriginalCode').value = '';
+      resetPortfolioForm_();
       loadPortfolio();
     }).catch(function (err) { alert(err.message || err); });
   });
 
-  // ---------- 個股搜尋（開啟股票詳情 modal） ----------
-  var stockSearchInput = document.getElementById('stockSearchInput');
-  var stockSearchResults = document.getElementById('stockSearchResults');
-  var searchDebounceTimer = null;
+  // ---------- 持股結案（標示已賣出）與歷史結案紀錄 ----------
+  var pfCloseSheet = document.getElementById('pfCloseSheet');
+  var pfCloseForm = document.getElementById('pfCloseForm');
 
-  stockSearchInput.addEventListener('input', function () {
-    clearTimeout(searchDebounceTimer);
-    var q = stockSearchInput.value.trim();
-    if (!q) { stockSearchResults.innerHTML = ''; return; }
-    searchDebounceTimer = setTimeout(function () {
-      callServer('searchStockCodes', q).then(function (results) {
-        if (!results.length) { stockSearchResults.innerHTML = '<div class="search-result-item">找不到符合的股票</div>'; return; }
-        stockSearchResults.innerHTML = results.map(function (r) {
-          return '<div class="search-result-item" data-code="' + escapeHtml(r.code) + '">' +
-            escapeHtml(r.code) + ' ' + escapeHtml(r.name) + '</div>';
-        }).join('');
-        stockSearchResults.querySelectorAll('.search-result-item[data-code]').forEach(function (el) {
-          el.addEventListener('click', function () {
-            stockSearchResults.innerHTML = '';
-            stockSearchInput.value = '';
-            openStockDetailModal_(el.getAttribute('data-code'));
+  function openPfCloseSheet_(code, name, cost, shares) {
+    document.getElementById('pfCloseSheetTitle').textContent = '標示已賣出／結案：' + code + ' ' + (name || '');
+    document.getElementById('pfCloseCode').value = code;
+    document.getElementById('pfCloseSummary').textContent =
+      (cost !== null ? '加權平均成本 ' + fmtNum(cost) : '') + (shares !== null ? '　共 ' + fmtNum(shares, 0) + ' 股' : '') +
+      '　賣出後這檔股票目前「持有中」的買進紀錄會一起結案，移到「歷史結案紀錄」。';
+    document.getElementById('pfCloseSellDate').value = todayDateStr_();
+    document.getElementById('pfCloseSellPrice').value = '';
+    openSheet_(pfCloseSheet);
+  }
+  document.getElementById('pfCloseSheetCloseBtn').addEventListener('click', function () { closeSheet_(pfCloseSheet); });
+  document.getElementById('pfCloseCancelBtn').addEventListener('click', function () { closeSheet_(pfCloseSheet); });
+  pfCloseSheet.addEventListener('click', function (e) { if (e.target === pfCloseSheet) closeSheet_(pfCloseSheet); });
+
+  pfCloseForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var code = document.getElementById('pfCloseCode').value;
+    var sellDate = document.getElementById('pfCloseSellDate').value;
+    var sellPrice = parseFloat(document.getElementById('pfCloseSellPrice').value);
+    callServer('closePortfolioPosition', code, sellDate, sellPrice).then(function () {
+      closeSheet_(pfCloseSheet);
+      loadPortfolio();
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  function loadPortfolioHistory_() {
+    var listEl = document.getElementById('portfolioHistoryList');
+    listEl.innerHTML = '<div class="loading">載入中...</div>';
+    return callServer('getClosedPortfolioHistory').then(function (groups) {
+      if (!groups.length) { listEl.innerHTML = '<div class="empty-hint">尚無已結案的持股</div>'; return; }
+      listEl.innerHTML = groups.map(function (g) {
+        var realized = g.realizedPct;
+        var color = realized === null ? 'var(--text)' : (realized >= 0 ? 'var(--green)' : 'var(--red)');
+        return '<div class="stock-card">' +
+          '<div class="stock-card-head"><span><span class="stock-card-code">' + escapeHtml(g.code) + '</span>' +
+          '<span class="stock-card-name">' + escapeHtml(g.name) + '</span></span></div>' +
+          '<div class="stock-card-note">買進 ' + escapeHtml(g.buyDate || '-') + '　@ ' + fmtNum(g.avgCost) +
+          '　→　賣出 ' + escapeHtml(g.sellDate || '-') + '　@ ' + fmtNum(g.sellPrice) + '</div>' +
+          '<div class="stock-card-note">共 ' + fmtNum(g.totalShares, 0) + ' 股</div>' +
+          '<div class="stock-card-strategy" style="color:' + color + '">已實現損益 ' +
+          (realized === null ? '-' : ((realized >= 0 ? '+' : '') + fmtNum(realized, 1) + '%　' + (g.realizedAmount >= 0 ? '+' : '') + fmtNum(g.realizedAmount, 0) + ' 元')) +
+          '</div></div>';
+      }).join('');
+    }).catch(function (err) { listEl.innerHTML = errorBox(err); });
+  }
+
+  // ---------- 股票代號/名稱自動完成（共用：戰報搜尋列、持股表單代號/名稱雙向連動） ----------
+  /** 幫 inputEl 掛上 250ms debounce 的代號/名稱搜尋（依 searchStockCodes 對最近 History
+   *  資料做代號或名稱關鍵字比對），選到一筆結果時呼叫 onPick(code, name)。 */
+  function wireStockAutocomplete_(inputEl, resultsEl, onPick) {
+    var timer = null;
+    inputEl.addEventListener('input', function () {
+      clearTimeout(timer);
+      var q = inputEl.value.trim();
+      if (!q) { resultsEl.innerHTML = ''; return; }
+      timer = setTimeout(function () {
+        callServer('searchStockCodes', q).then(function (results) {
+          if (!results.length) { resultsEl.innerHTML = '<div class="search-result-item">找不到符合的股票</div>'; return; }
+          resultsEl.innerHTML = results.map(function (r) {
+            return '<div class="search-result-item" data-code="' + escapeHtml(r.code) + '" data-name="' + escapeHtml(r.name) + '">' +
+              escapeHtml(r.code) + ' ' + escapeHtml(r.name) + '</div>';
+          }).join('');
+          resultsEl.querySelectorAll('.search-result-item[data-code]').forEach(function (el) {
+            el.addEventListener('click', function () {
+              resultsEl.innerHTML = '';
+              onPick(el.getAttribute('data-code'), el.getAttribute('data-name'));
+            });
           });
         });
-      });
-    }, 250);
+      }, 250);
+    });
+    document.addEventListener('click', function (e) {
+      if (!resultsEl.contains(e.target) && e.target !== inputEl) resultsEl.innerHTML = '';
+    });
+  }
+
+  var stockSearchInput = document.getElementById('stockSearchInput');
+  wireStockAutocomplete_(stockSearchInput, document.getElementById('stockSearchResults'), function (code) {
+    stockSearchInput.value = '';
+    openStockDetailModal_(code);
   });
-  document.addEventListener('click', function (e) {
-    if (!stockSearchResults.contains(e.target) && e.target !== stockSearchInput) stockSearchResults.innerHTML = '';
+
+  var pfCodeInput = document.getElementById('pfCode');
+  var pfNameInput = document.getElementById('pfName');
+  wireStockAutocomplete_(pfCodeInput, document.getElementById('pfCodeResults'), function (code, name) {
+    pfCodeInput.value = code;
+    if (name) pfNameInput.value = name;
+  });
+  wireStockAutocomplete_(pfNameInput, document.getElementById('pfNameResults'), function (code, name) {
+    pfCodeInput.value = code;
+    pfNameInput.value = name;
   });
 
   /**
@@ -554,30 +834,20 @@
       '<button type="button" class="btn-secondary" id="quickAddBtn-' + prefix + '">+ 快捷加入持股</button>' +
       '</div>' +
       '<div class="chart-card"><h4>AI 深度診斷</h4>' +
-      '<div class="form-actions"><button type="button" class="btn-primary" id="stockAiDiagnoseBtn-' + prefix + '">🧠 針對 ' + escapeHtml(data.code) + ' 跑一次 AI 診斷</button></div>' +
-      '<div id="stockAiResult-' + prefix + '"></div>' +
-      '<div id="stockAiHistory-' + prefix + '"></div></div>';
+      '<div id="stockAiSection-' + prefix + '"></div>' +
+      '<div id="stockAiHistory-' + prefix + '" style="margin-top:8px;"></div></div>';
 
     renderPriceChartInto_(priceCanvasId, prefix, data.series);
     renderInstChartInto_(instCanvasId, prefix, data.series);
-    document.getElementById('stockAiDiagnoseBtn-' + prefix).addEventListener('click', function () {
-      runAiDiagnosisForButton_(data.code, document.getElementById('stockAiResult-' + prefix));
-    });
-    loadAiDiagnosisHistoryInto_(data.code, document.getElementById('stockAiHistory-' + prefix));
+    initAiDiagnosisSection_(
+      document.getElementById('stockAiSection-' + prefix), data.code, '深度診斷',
+      '🧠 針對 ' + data.code + ' 跑一次 AI 診斷',
+      function () { return callServer('runAiDiagnosis', [data.code]).then(function (results) { return results[0]; }); }
+    );
+    loadOlderAiDiagnosisHistoryInto_(data.code, document.getElementById('stockAiHistory-' + prefix), '深度診斷');
     document.getElementById('quickAddBtn-' + prefix).addEventListener('click', function () {
       openQuickAddPortfolio_(data.code, data.name, data.series);
     });
-  }
-
-  function loadAiDiagnosisHistoryInto_(code, el) {
-    if (!el) return;
-    callServer('getAiDiagnosisHistoryForCode', code).then(function (history) {
-      if (!history.length) { el.innerHTML = '<div class="empty-hint">尚無 AI 診斷歷史紀錄</div>'; return; }
-      el.innerHTML = '<h4 style="margin-top:12px;">過去診斷紀錄</h4>' + history.map(function (h) {
-        return '<div class="ai-report"><div>' + escapeHtml(h.date) + '　最終建議：<span class="ai-verdict-badge">' + escapeHtml(h.verdict) + '</span></div>' +
-          renderMarkdownLite(h.text) + '</div>';
-      }).join('');
-    }).catch(function (err) { el.innerHTML = errorBox(err); });
   }
 
   function renderScoreHistoryTable(rows) {
@@ -673,25 +943,32 @@
    *  使用者確認或調整成本/日期後還是要自己按「儲存」，不會沒經過確認就直接寫入。 */
   function openQuickAddPortfolio_(code, name, series) {
     var latestClose = series.length ? series[series.length - 1].close : null;
-    document.getElementById('portfolioFormTitle').textContent = '新增持股';
-    document.getElementById('pfOriginalCode').value = '';
+    resetPortfolioForm_();
     document.getElementById('pfCode').value = code;
     document.getElementById('pfName').value = name || '';
     document.getElementById('pfCost').value = latestClose !== null ? latestClose : '';
     document.getElementById('pfBuyDate').value = todayDateStr_();
-    document.getElementById('pfNote').value = '';
     closeSheet_(stockDetailSheet);
     activateTab('portfolio');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
-  // ---------- 回測研究 ----------
-  document.querySelectorAll('.sub-tab-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      document.querySelectorAll('.sub-tab-btn').forEach(function (b) { b.classList.remove('active'); });
-      document.querySelectorAll('.sub-tab-panel').forEach(function (p) { p.classList.remove('active'); });
-      btn.classList.add('active');
-      document.getElementById('subtab-' + btn.getAttribute('data-subtab')).classList.add('active');
+  // ---------- 子分頁切換（研究頁的回測/因子迴歸、持股庫存的持有中/歷史結案共用同一套元件） ----------
+  // 每組 .sub-tabs 各自管自己那一組按鈕/面板，不用 document 全域 querySelectorAll，
+  // 避免切換持股庫存的子分頁時，不小心把研究頁的子分頁 active 狀態也清掉（反之亦然）。
+  document.querySelectorAll('.sub-tabs').forEach(function (group) {
+    var scope = group.parentElement;
+    group.querySelectorAll('.sub-tab-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        group.querySelectorAll('.sub-tab-btn').forEach(function (b) { b.classList.remove('active'); });
+        Array.prototype.forEach.call(scope.children, function (p) {
+          if (p.classList.contains('sub-tab-panel')) p.classList.remove('active');
+        });
+        btn.classList.add('active');
+        var targetId = btn.getAttribute('data-target');
+        document.getElementById(targetId).classList.add('active');
+        if (targetId === 'pftab-history') loadPortfolioHistory_();
+      });
     });
   });
 

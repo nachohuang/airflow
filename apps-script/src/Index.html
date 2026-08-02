@@ -25,34 +25,49 @@
       <section id="tab-portfolio" class="tab-panel">
         <form id="portfolioForm" class="form-card">
           <h3 id="portfolioFormTitle">新增持股</h3>
-          <input type="hidden" id="pfOriginalCode">
-          <label>股票代號
-            <input id="pfCode" required maxlength="6" placeholder="例如 2330">
+          <input type="hidden" id="pfLotId">
+          <label style="position:relative;">股票代號
+            <input id="pfCode" required maxlength="6" placeholder="例如 2330" autocomplete="off">
+            <div id="pfCodeResults" class="search-results"></div>
           </label>
-          <label>名稱（選填）
-            <input id="pfName" placeholder="例如 台積電">
-          </label>
-          <label>成本
-            <input id="pfCost" type="number" step="0.01" required>
+          <label style="position:relative;">名稱（選填，也可以直接輸入名稱搜尋代號）
+            <input id="pfName" placeholder="例如 台積電" autocomplete="off">
+            <div id="pfNameResults" class="search-results"></div>
           </label>
           <label>買進日期
             <input id="pfBuyDate" type="date" required>
+          </label>
+          <label>買進價格（單位成本）
+            <input id="pfCost" type="number" step="0.01" required>
+          </label>
+          <label>股數
+            <input id="pfShares" type="number" step="1" min="1" required placeholder="例如 1000（= 1張）">
           </label>
           <label>備註（選填）
             <input id="pfNote">
           </label>
           <div class="form-actions">
-            <button type="submit" class="btn-primary">儲存</button>
+            <button type="submit" class="btn-primary" id="pfSubmitBtn">＋ 新增這筆買進</button>
             <button type="button" id="pfClearBtn" class="btn-secondary">清空</button>
           </div>
         </form>
-        <div id="portfolioList" class="card-list"></div>
+
+        <div class="sub-tabs">
+          <button type="button" class="sub-tab-btn active" data-target="pftab-holding">持有中</button>
+          <button type="button" class="sub-tab-btn" data-target="pftab-history">💰 歷史結案紀錄</button>
+        </div>
+        <div id="pftab-holding" class="sub-tab-panel active">
+          <div id="portfolioList" class="card-list"></div>
+        </div>
+        <div id="pftab-history" class="sub-tab-panel">
+          <div id="portfolioHistoryList" class="card-list"></div>
+        </div>
       </section>
 
       <section id="tab-research" class="tab-panel">
         <div class="sub-tabs">
-          <button class="sub-tab-btn active" data-subtab="backtest">📊 策略回測驗證</button>
-          <button class="sub-tab-btn" data-subtab="factorregression">🧠 因子健康度＋迴歸模型</button>
+          <button class="sub-tab-btn active" data-target="subtab-backtest">📊 策略回測驗證</button>
+          <button class="sub-tab-btn" data-target="subtab-factorregression">🧠 因子健康度＋迴歸模型</button>
         </div>
 
         <div id="subtab-backtest" class="sub-tab-panel active">
@@ -467,6 +482,26 @@
       <div class="sheet-panel">
         <div class="sheet-header"><h3>篩選漏斗明細</h3><button type="button" class="sheet-close-btn" id="screeningFunnelSheetCloseBtn">✕</button></div>
         <div id="screeningFunnelSheetBody"></div>
+      </div>
+    </div>
+
+    <div id="pfCloseSheet" class="sheet-overlay hidden">
+      <div class="sheet-panel">
+        <div class="sheet-header"><h3 id="pfCloseSheetTitle">標示已賣出／結案</h3><button type="button" class="sheet-close-btn" id="pfCloseSheetCloseBtn">✕</button></div>
+        <form id="pfCloseForm" class="form-card">
+          <input type="hidden" id="pfCloseCode">
+          <div id="pfCloseSummary" class="meta-bar"></div>
+          <label>賣出日期
+            <input id="pfCloseSellDate" type="date" required>
+          </label>
+          <label>賣出價格
+            <input id="pfCloseSellPrice" type="number" step="0.01" required>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary">確認結案</button>
+            <button type="button" class="btn-secondary" id="pfCloseCancelBtn">取消</button>
+          </div>
+        </form>
       </div>
     </div>
   </div>
