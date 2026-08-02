@@ -32,9 +32,7 @@ function getStockTimeSeries(code, days) {
   if (!code) throw new Error('請提供股票代號');
   days = days || 240;
 
-  var rows = readRecentHistory_(days).filter(function (r) {
-    return zfill4(String(r['證券代號']).trim()) === code;
-  });
+  var rows = readHistoryForCode_(code, days);
   if (rows.length === 0) return { code: code, name: '', series: [], scoreHistory: [] };
 
   rows.forEach(function (r) {

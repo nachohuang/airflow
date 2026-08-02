@@ -119,12 +119,28 @@ function readRecentHistory_(days) {
   return readRecentHistoryFromFiles_(days);
 }
 
-/** 讀取指定日期區間（含頭尾）的歷史資料，給回測/因子掃描/個股分析用。 */
+/** 讀取指定日期區間（含頭尾）的歷史資料，給回測/因子掃描用。 */
 function readHistoryRange_(startStr, endStr) {
   if (shouldUseBigQueryForReads_()) {
     return queryHistoryRowsFromBigQuery_(startStr || null, endStr || null);
   }
   return readHistoryRangeFromFiles_(startStr, endStr);
+}
+
+/**
+ * 只讀「單一股票代號」最近 N 天的歷史資料，給「個股分析」（getStockTimeSeries）用。
+ * 跟 readRecentHistory_ 的差別：BigQuery 模式下直接在查詢裡用 WHERE stock_id 過濾
+ * （見 queryHistoryRowsForCodeFromBigQuery_），不會把全市場資料都搬進 Apps Script
+ * 再篩選——後者資料量大時會撞到 6 分鐘執行上限，導致個股走勢卡在載入畫面不動。
+ * 檔案模式（沒接 BigQuery）本來就只讀 days 天份的月份檔案，資料量小，可以接受先讀再篩。
+ */
+function readHistoryForCode_(code, days) {
+  if (shouldUseBigQueryForReads_()) {
+    return queryHistoryRowsForCodeFromBigQuery_(code, days);
+  }
+  return readRecentHistoryFromFiles_(days).filter(function (r) {
+    return zfill4(String(r['證券代號']).trim()) === code;
+  });
 }
 
 /** 寫入一筆執行紀錄（成功/失敗），供後台管理頁面顯示，並自動裁剪舊紀錄。 */

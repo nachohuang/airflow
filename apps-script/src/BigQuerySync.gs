@@ -1340,6 +1340,23 @@ function queryLatestDayFactorsFromBigQuery_(portfolioMap) {
 }
 
 /**
+ * 「個股分析」（getStockTimeSeries）BigQuery 模式專用：只查「這一檔股票、最近 N 天」的原始
+ * 歷史列（資料量是「1 檔 x days 天」，跟 queryHistoryRowsFromBigQuery_ 的全市場查詢完全不同
+ * 量級）。點開個股走勢卡在「載入走勢中...」不動的根因，就跟之前的回測逾時是同一種——
+ * getStockTimeSeries 原本呼叫 readRecentHistory_(days)，BigQuery 模式下會把「全市場 x
+ * days 天」的原始資料全部搬進 Apps Script，再用 JS 篩出這一檔股票，資料量大時直接撞到
+ * Apps Script 6 分鐘執行上限，整次 RPC 沒有任何回應、前端永遠停在 loading 狀態。
+ */
+function queryHistoryRowsForCodeFromBigQuery_(code, days) {
+  var settings = requireBigQueryProjectId_();
+  refreshDataSourceForMode_(settings);
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  var sql = buildHistoryRowsForStocksSql_(sourceRefForBigQueryRead_(settings), [code], normalizeDateStr(cutoff));
+  return runBqQuery_(sql, 'stock_history_single').map(mapBqRowToHistoryRow_);
+}
+
+/**
  * 對有持股的每一檔股票，只查「這幾檔股票、從最早買進日起算」的原始歷史列
  * （資料量是「持股數 x 天數」，跟全市場查詢完全不同量級，不會有記憶體問題），
  * 完整重用（不是重寫）已經驗證過的 computeFactors_ + expandingMaxFromIndex 邏輯算出
