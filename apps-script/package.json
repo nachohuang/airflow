@@ -3,6 +3,6 @@
   "private": true,
   "description": "TWSE 法人動能選股 App - Google Apps Script 專案（純邏輯單元測試用 package.json，本身不會部署）",
   "scripts": {
-    "test": "node test/utils.test.js && node test/analysis.test.js && node test/research.test.js && node test/aiDiagnosis.test.js && node test/historyFiles.test.js && node test/factorModel.test.js && node test/importHistory.test.js && node test/jobQueue.test.js && node test/portfolio.test.js"
+    "test": "node test/utils.test.js && node test/analysis.test.js && node test/research.test.js && node test/aiDiagnosis.test.js && node test/historyFiles.test.js && node test/factorModel.test.js && node test/importHistory.test.js && node test/jobQueue.test.js && node test/portfolio.test.js && node test/realtime.test.js"
   }
 }

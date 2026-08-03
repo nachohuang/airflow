@@ -27,6 +27,49 @@ function parseMisLevels_(str) {
 }
 
 /**
+ * 純函式：綜合「委買委賣力道比」與「現價在當日高低區間的相對位置」，算出一個 0~100 的
+ * 「買賣力道評估分數」——分數愈高代表當下愈偏向「委買力道強、且價位在當日區間裡相對偏低」。
+ *
+ * 這是刻意跟「🚨 持股續抱評估」（AI 深度診斷，看公司體質/趨勢，判斷值不值得繼續抱或加碼、
+ * 是長線的基本面判斷）分開設計的短期戰術指標：這裡只回答「當下這個價位，掛單簿的買賣力道
+ * 跟今天的相對高低位置，偏多還是偏空」，完全不看公司基本面、不看持股成本、也不看任何歷史
+ * 趨勢——只是「這一刻」的參考，不是操作建議，更不是續抱評估的替代品。
+ *
+ * 權重：委買委賣力道比佔 60%（掛單簿當下的多空力道，是最直接的買賣壓訊號，權重較高），
+ * 當日價位相對高低點的位置佔 40%（愈接近當日最低點分數愈高——單純描述「現在站在今天的
+ * 價格區間裡相對低檔或高檔」，不含任何技術分析或趨勢判斷，不代表「便宜」或「見底」）。
+ * high === low（例如剛開盤還沒有價格波動）時，價位位置這項給中性值 50，避免除以 0。
+ */
+function computeBuySellVerdict_(buyRatio, latestPrice, highPrice, lowPrice) {
+  if (buyRatio === null || buyRatio === undefined) {
+    return { score: null, label: '⚪ 資料不足', detail: '目前五檔掛單量都是 0，無法計算買賣力道評估。' };
+  }
+  var pressureScore = buyRatio * 100;
+  var rangeScore;
+  if (highPrice === null || lowPrice === null || latestPrice === null || highPrice === lowPrice) {
+    rangeScore = 50;
+  } else {
+    rangeScore = (highPrice - latestPrice) / (highPrice - lowPrice) * 100;
+    rangeScore = Math.max(0, Math.min(100, rangeScore));
+  }
+
+  var score = Math.round((pressureScore * 0.6 + rangeScore * 0.4) * 10) / 10;
+
+  var label, detail;
+  if (score >= 65) {
+    label = '🟢 偏向有利買進';
+    detail = '委買力道較強，且現價在當日區間中相對偏低。';
+  } else if (score <= 35) {
+    label = '🔴 偏向有利賣出';
+    detail = '委賣力道較強，且現價在當日區間中相對偏高。';
+  } else {
+    label = '⚪ 多空不明顯';
+    detail = '委買委賣力道與價位都沒有明顯偏向。';
+  }
+  return { score: score, label: label, detail: detail };
+}
+
+/**
  * 前端「個股詳情」畫面「查詢即時內外盤」按鈕呼叫。code 是 4 碼股票代號，不先判斷是上市
  * 還是上櫃，兩種前綴（tse_/otc_）用 "|" 合併成一次查詢，MIS 回傳的 msgArray 只會有真正
  * 存在的那一筆（同一個代號不可能同時是上市又是上櫃）。
@@ -73,25 +116,19 @@ function getRealtimeQuote(code) {
   var total = buyPressure + sellPressure;
   var buyRatio = total > 0 ? buyPressure / total : null;
 
-  var interpretation;
-  if (buyRatio === null) {
-    interpretation = '目前五檔掛單量都是 0，暫時無法判斷買賣力道。';
-  } else if (buyRatio >= 0.6) {
-    interpretation = '委買掛單量明顯大於委賣，偏多方力道（僅反映當下掛單簿，不是已成交籌碼方向，僅供參考）。';
-  } else if (buyRatio <= 0.4) {
-    interpretation = '委賣掛單量明顯大於委買，偏空方力道（僅反映當下掛單簿，不是已成交籌碼方向，僅供參考）。';
-  } else {
-    interpretation = '委買委賣掛單量接近，多空力道不明顯。';
-  }
+  var latestPrice = (q.z && q.z !== '-') ? Number(q.z) : null;
+  var highPrice = q.h ? Number(q.h) : null;
+  var lowPrice = q.l ? Number(q.l) : null;
+  var verdict = computeBuySellVerdict_(buyRatio, latestPrice, highPrice, lowPrice);
 
   return {
     code: c,
     ok: true,
     name: q.n || '',
-    latestPrice: (q.z && q.z !== '-') ? Number(q.z) : null,
+    latestPrice: latestPrice,
     openPrice: q.o ? Number(q.o) : null,
-    highPrice: q.h ? Number(q.h) : null,
-    lowPrice: q.l ? Number(q.l) : null,
+    highPrice: highPrice,
+    lowPrice: lowPrice,
     accumulatedVolume: q.v ? Number(q.v) : null,
     timestamp: q.tlong ? Number(q.tlong) : null,
     bidLevels: bidLevels,
@@ -99,6 +136,6 @@ function getRealtimeQuote(code) {
     buyPressure: buyPressure,
     sellPressure: sellPressure,
     buyRatio: buyRatio,
-    interpretation: interpretation
+    verdict: verdict
   };
 }

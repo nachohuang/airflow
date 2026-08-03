@@ -888,10 +888,14 @@
    * 函式，唯一的呈現位置是「股票詳情 modal」（從戰報搜尋／卡片、持股庫存卡片點進來）。
    * prefix 保留給未來同頁同時開多個 modal 實例時區分 canvas id / Chart.js 實例用。
    */
-  /** 即時內外盤卡片的說明文字（info icon 用原生 title tooltip，不用另外做彈窗元件）。 */
-  var RT_QUOTE_TOOLTIP_ = '買方力道 = 委買五檔量 ÷ (委買五檔量 + 委賣五檔量)。這只是「掛單簿」目前排隊的多空量，' +
-    '不是已經成交的籌碼方向，僅供輔助參考、不是操作建議。資料來源是證交所看盤系統自己在用的即時報價端點，' +
-    '只有交易時間內才查得到資料，且不是正式文件化的公開 API，沒有官方保證格式不會改版。';
+  /** 買賣力道評估卡片的說明文字（info icon 用原生 title tooltip，不用另外做彈窗元件）。
+   *  刻意跟下面的「AI 深度診斷」分開說明：這裡是「當下這個價位，買賣盤氣氛偏多還是偏空」
+   *  的短期戰術參考，不看公司體質；AI 深度診斷才是回答「這家公司值不值得繼續抱／加碼」。 */
+  var RT_QUOTE_TOOLTIP_ = '評估分數（0~100）＝委買委賣力道比 × 60% ＋ 現價在當日高低區間的相對位置 × 40%。' +
+    '力道比＝委買五檔量 ÷ (委買五檔量＋委賣五檔量)；區間位置＝愈接近當日最低點分數愈高。' +
+    '分數 ≥65 標示「偏向有利買進」，≤35 標示「偏向有利賣出」，只反映「當下」掛單簿與價位，' +
+    '不看公司體質、不看持股成本、不是操作建議，資料來源是證交所看盤系統的即時報價端點，' +
+    '只有交易時間內才查得到，且不是正式文件化的公開 API，沒有官方保證格式不會改版。';
 
   function renderStockDetailInto_(containerEl, prefix, data) {
     if (!data.series.length) {
@@ -903,7 +907,8 @@
     containerEl.innerHTML =
       '<div class="chart-card"><h4>' + escapeHtml(data.code) + ' ' + escapeHtml(data.name) + '　收盤價 / MA5 / MA20 / MA60</h4>' +
       '<canvas id="' + priceCanvasId + '" height="220"></canvas></div>' +
-      '<div class="chart-card"><h4>⚡ 即時內外盤 <span title="' + escapeHtml(RT_QUOTE_TOOLTIP_) + '" style="cursor:help; color:var(--text-muted);">ⓘ</span></h4>' +
+      '<div class="chart-card"><h4>🎯 買賣力道評估（即時內外盤） <span title="' + escapeHtml(RT_QUOTE_TOOLTIP_) + '" style="cursor:help; color:var(--text-muted);">ⓘ</span></h4>' +
+      '<div class="meta-bar" style="margin-bottom:6px;">回答「當下這個價位，買賣盤偏多還是偏空」——跟下面的「AI 深度診斷」是分開的兩件事：AI 深度診斷看公司體質，這裡只看當下的掛單與價位。</div>' +
       '<div id="rtQuoteBody-' + prefix + '">' +
       '<button type="button" class="btn-secondary" id="rtQuoteBtn-' + prefix + '">🔄 查詢即時內外盤</button>' +
       '<div class="meta-bar" style="margin-top:6px;">只在交易時間內查得到資料，僅供輔助參考，不是操作建議。</div>' +
@@ -952,18 +957,22 @@
         wireRealtimeQuoteBtn_(prefix, code);
         return;
       }
-      var pctColor = q.buyRatio === null ? 'var(--text-muted)' : (q.buyRatio >= 0.6 ? 'var(--red)' : (q.buyRatio <= 0.4 ? 'var(--green)' : 'var(--text-muted)'));
+      var v = q.verdict || {};
+      var verdictColor = v.score === null || v.score === undefined ? 'var(--text-muted)' :
+        (v.score >= 65 ? 'var(--red)' : (v.score <= 35 ? 'var(--green)' : 'var(--text-muted)'));
       var askRows = q.askLevels.map(function (l, i) { return { label: '賣' + (i + 1), price: l.price, volume: l.volume }; }).reverse();
       var bidRows = q.bidLevels.map(function (l, i) { return { label: '買' + (i + 1), price: l.price, volume: l.volume }; });
       var tableRows = askRows.concat(bidRows).map(function (r) {
         return '<tr><td>' + r.label + '</td><td>' + fmtNum(r.price, 2) + '</td><td>' + fmtNum(r.volume, 0) + '</td></tr>';
       }).join('');
       bodyEl.innerHTML =
+        '<div style="font-size:20px; font-weight:700; color:' + verdictColor + ';">' + escapeHtml(v.label || '') +
+        (v.score === null || v.score === undefined ? '' : '　' + fmtNum(v.score, 1) + ' 分') + '</div>' +
+        '<div class="meta-bar" style="margin:2px 0 8px;">' + escapeHtml(v.detail || '') +
+        (q.buyRatio === null ? '' : '　委買力道 ' + fmtNum(q.buyRatio * 100, 1) + '%') + '</div>' +
         '<div class="meta-bar">成交價 ' + fmtNum(q.latestPrice, 2) + '　累積成交量 ' + fmtNum(q.accumulatedVolume, 0) +
         (q.timestamp ? '　' + new Date(q.timestamp).toLocaleTimeString('zh-TW') : '') + '</div>' +
-        '<div style="font-weight:700; color:' + pctColor + '; margin:6px 0;">' +
-        (q.buyRatio === null ? '' : '買方力道 ' + fmtNum(q.buyRatio * 100, 1) + '%　') + escapeHtml(q.interpretation) + '</div>' +
-        '<table class="simple-table"><thead><tr><th>檔位</th><th>價格</th><th>量</th></tr></thead><tbody>' + tableRows + '</tbody></table>' +
+        '<table class="simple-table" style="margin-top:6px;"><thead><tr><th>檔位</th><th>價格</th><th>量</th></tr></thead><tbody>' + tableRows + '</tbody></table>' +
         '<div class="form-actions" style="margin-top:6px; margin-bottom:0;">' +
         '<button type="button" class="btn-secondary" id="rtQuoteBtn-' + prefix + '">🔄 重新查詢</button></div>';
       wireRealtimeQuoteBtn_(prefix, code);
