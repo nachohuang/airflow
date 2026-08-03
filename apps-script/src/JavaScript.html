@@ -319,7 +319,7 @@
       result.report.forEach(function (r) {
         var code = r['證券代號'];
         initAiDiagnosisSection_(document.getElementById('aiResult-' + code), code, '深度診斷', '🧠 AI 深度診斷', function () {
-          return callServer('runAiDiagnosis', [code]).then(function (results) { return results[0]; });
+          return runAiTaskAsJob_('diagnosis', { codes: [code] }).then(function (results) { return results[0]; });
         });
       });
       initTopPicksSection_(document.getElementById('aiTopPicksSection'));
@@ -469,6 +469,44 @@
   }
 
   /**
+   * AI 診斷／續抱診斷／Top3 都改成背景 job：Goodinfo 抓取 + LLM 呼叫合計常常十幾秒到快一
+   * 分鐘，手機瀏覽器切到背景很容易讓連線直接中斷，變成「NetworkError: 連線失敗，原因
+   * HTTP 0」——即使 AI 那邊其實還在跑或已經跑完（跟因子迴歸模型／回測背景 job 同樣的問題，
+   * 見 AiDiagnosis.gs 的說明）。startAiDiagnosisJob 只是排工作、立刻回傳，這裡輪詢
+   * getAiDiagnosisJobStatus() 直到完成，resolve/reject 出跟直接呼叫 runAiDiagnosis／
+   * runPortfolioHoldDiagnosis／runAiTopPicks 一樣的結果形狀，呼叫端不用區分「背景跑」
+   * 還是「同步呼叫」。超過 2 分鐘沒有結果視為可能卡住，改成報錯而不是無限等待。
+   */
+  function runAiTaskAsJob_(taskType, payload) {
+    return callServer('startAiDiagnosisJob', taskType, payload).then(function () {
+      return new Promise(function (resolve, reject) {
+        var attempts = 0;
+        var maxAttempts = 40; // 40 次 * 3 秒 = 2 分鐘
+        var poll = function () {
+          attempts++;
+          callServer('getAiDiagnosisJobStatus').then(function (state) {
+            if (!state || state.status === 'running') {
+              if (attempts >= maxAttempts) {
+                reject(new Error('AI 任務執行太久沒有回應，可能是背景工作卡住了，請稍後到「系統與資料後台」的排程佇列查看或重新啟動'));
+                return;
+              }
+              setTimeout(poll, 3000);
+              return;
+            }
+            if (state.status === 'error') { reject(new Error(state.errorMessage || 'AI 任務失敗')); return; }
+            resolve(state.result);
+          }).catch(function () {
+            // 輪詢本身失敗（例如剛好網路不穩）不代表任務失敗，跟其他背景 job 輪詢一樣繼續重試
+            if (attempts >= maxAttempts) { reject(new Error('AI 任務執行太久沒有回應')); return; }
+            setTimeout(poll, 3000);
+          });
+        };
+        poll();
+      });
+    });
+  }
+
+  /**
    * 共用「cache-first AI 診斷區塊」：容器一開始先查同一檔股票／同一種診斷類型過去是否已經
    * 存過結果，有的話直接顯示（標明是快取），主按鈕降級成次要的「🔄 重新花費 API 重新分析」；
    * 沒有快取才顯示主要按鈕、等使用者主動點才花錢呼叫 API。
@@ -501,7 +539,7 @@
     var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
     var runBtn = containerEl.querySelector('.ai-run-btn');
     if (runBtn) runBtn.disabled = true;
-    containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">AI 診斷中，會需要一點時間（要呼叫 ' + providerLabel + ' + 抓 Goodinfo）...</div>';
+    containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">⏳ 背景執行 AI 診斷中（要呼叫 ' + providerLabel + ' + 抓 Goodinfo），可以切到別的畫面，不會中斷這個工作，通常十幾秒到一分鐘...</div>';
     withSpin(runFn()).then(function (res) {
       if (!res.ok) { containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(res.error); if (runBtn) runBtn.disabled = false; return; }
       renderAiDiagnosisSection_(containerEl, primaryLabel, { verdict: res.verdict, text: res.text, cost: res.cost, fresh: true }, runFn);
@@ -557,8 +595,8 @@
     var providerLabel = AI_PROVIDER_LABEL[window.__aiProvider] || 'AI';
     var btn = document.getElementById('aiTopPicksBtn');
     if (btn) btn.disabled = true;
-    containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">AI 掃描全部候選中，會需要一點時間（要呼叫 ' + providerLabel + '）...</div>';
-    withSpin(callServer('runAiTopPicks')).then(function (res) {
+    containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">⏳ 背景執行 AI 掃描全部候選中（要呼叫 ' + providerLabel + '），可以切到別的畫面，不會中斷這個工作...</div>';
+    withSpin(runAiTaskAsJob_('topPicks', null)).then(function (res) {
       renderTopPicksSection_(containerEl, { text: res.text, cost: res.cost, candidateCount: res.candidateCount, date: res.date, fresh: true });
     }).catch(function (err) {
       containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(err);
@@ -582,7 +620,7 @@
       wirePortfolioCardEvents_(listEl);
       items.forEach(function (it) {
         initAiDiagnosisSection_(document.getElementById('pfHoldResult-' + it.code), it.code, '持股續抱診斷', '🧠 持股續抱診斷', function () {
-          return callServer('runPortfolioHoldDiagnosis', it.code);
+          return runAiTaskAsJob_('hold', { code: it.code });
         });
       });
     }).catch(function (err) { listEl.innerHTML = errorBox(err); });
@@ -869,7 +907,7 @@
     initAiDiagnosisSection_(
       document.getElementById('stockAiSection-' + prefix), data.code, '深度診斷',
       '🧠 針對 ' + data.code + ' 跑一次 AI 診斷',
-      function () { return callServer('runAiDiagnosis', [data.code]).then(function (results) { return results[0]; }); }
+      function () { return runAiTaskAsJob_('diagnosis', { codes: [data.code] }).then(function (results) { return results[0]; }); }
     );
     loadOlderAiDiagnosisHistoryInto_(data.code, document.getElementById('stockAiHistory-' + prefix), '深度診斷');
     document.getElementById('quickAddBtn-' + prefix).addEventListener('click', function () {

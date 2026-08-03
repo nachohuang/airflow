@@ -109,4 +109,42 @@ loadIntoContext('JobQueue.gs');
   console.log('Test jobQueueDetail_ (backtest) passed.');
 }
 
+// --- jobQueueDetail_: aiTask ---
+{
+  assert.strictEqual(context.jobQueueDetail_('aiTask', { status: 'running' }), '');
+
+  const holdDone = context.jobQueueDetail_('aiTask', {
+    status: 'done', taskType: 'hold', payload: { code: '5434' },
+    result: { ok: true, code: '5434', verdict: '強力續抱' }
+  });
+  assert.ok(holdDone.indexOf('持股續抱診斷') !== -1);
+  assert.ok(holdDone.indexOf('5434') !== -1);
+  assert.ok(holdDone.indexOf('強力續抱') !== -1);
+
+  const holdFailed = context.jobQueueDetail_('aiTask', {
+    status: 'done', taskType: 'hold', payload: { code: '5434' },
+    result: { ok: false, code: '5434', error: 'API 金鑰未設定' }
+  });
+  assert.ok(holdFailed.indexOf('失敗：API 金鑰未設定') !== -1, '任務本身失敗（ok:false）也要能看出原因，不能只顯示空白');
+
+  // diagnosis 是批次的（一次可能對多個代號跑），結果是陣列，每個代號各自的成功/失敗都要列出
+  const diagnosisDone = context.jobQueueDetail_('aiTask', {
+    status: 'done', taskType: 'diagnosis', payload: { codes: ['2603', '2890'] },
+    result: [
+      { ok: true, code: '2603', verdict: '分批布局' },
+      { ok: false, code: '2890', error: '抓取 Goodinfo 失敗' }
+    ]
+  });
+  assert.ok(diagnosisDone.indexOf('2603, 2890') !== -1);
+  assert.ok(diagnosisDone.indexOf('2603：分批布局') !== -1);
+  assert.ok(diagnosisDone.indexOf('2890：失敗') !== -1);
+
+  const topPicksDone = context.jobQueueDetail_('aiTask', {
+    status: 'done', taskType: 'topPicks', payload: null,
+    result: { ok: true, date: '2026-08-03', candidateCount: 12, text: '...' }
+  });
+  assert.ok(topPicksDone.indexOf('Top3 橫向比較') !== -1);
+  console.log('Test jobQueueDetail_ (aiTask) passed.');
+}
+
 console.log('All JobQueue.gs tests passed.');

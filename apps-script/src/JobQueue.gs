@@ -17,7 +17,8 @@ function jobQueueDefs_() {
     { key: 'backfill', label: '資料範圍重新彙整', getStatus: getBackfillJobStatus },
     { key: 'factorRegression', label: '因子迴歸模型', getStatus: getFactorRegressionJobStatus },
     { key: 'materialize', label: '立即重新整理（materialized）', getStatus: getMaterializeJobStatus },
-    { key: 'backtest', label: 'v17.0 策略回測', getStatus: getBacktestV17JobStatus }
+    { key: 'backtest', label: 'v17.0 策略回測', getStatus: getBacktestV17JobStatus },
+    { key: 'aiTask', label: 'AI 診斷／續抱／Top3', getStatus: getAiDiagnosisJobStatus }
   ];
 }
 
@@ -69,6 +70,17 @@ function jobQueueDetail_(key, state) {
     if (!res.summary) return strategyPart + (res.warning || '');
     return strategyPart + state.startStr + '~' + state.endStr + '　' + res.summary.signalCount + ' 筆訊號、勝率 ' + res.summary.winRate + '%';
   }
+  if (key === 'aiTask') {
+    if (state.status !== 'done') return '';
+    var taskLabel = { diagnosis: 'AI 深度診斷', hold: '持股續抱診斷', topPicks: 'Top3 橫向比較' }[state.taskType] || state.taskType;
+    var target = (state.payload && state.payload.code) ? state.payload.code :
+      (state.payload && state.payload.codes ? state.payload.codes.join(', ') : '');
+    var res2 = state.result;
+    var resultPart = Array.isArray(res2)
+      ? res2.map(function (r) { return r.ok ? r.code + '：' + r.verdict : r.code + '：失敗'; }).join('、')
+      : (res2 && res2.ok === false ? '失敗：' + res2.error : (res2 && res2.verdict ? res2.verdict : ''));
+    return taskLabel + (target ? '（' + target + '）' : '') + (resultPart ? '　' + resultPart : '');
+  }
   return '';
 }
 
@@ -118,6 +130,11 @@ function restartJob(key) {
     }
     return startBacktestV17Job(backtestState.startStr, backtestState.endStr, backtestState.targetProfit, backtestState.strategyKey);
   }
+  if (key === 'aiTask') {
+    var aiState = getAiDiagnosisJobStatus();
+    if (!aiState || !aiState.taskType) throw new Error('沒有可重新啟動的 AI 任務');
+    return startAiDiagnosisJob(aiState.taskType, aiState.payload);
+  }
   throw new Error('未知的工作類型：' + key);
 }
 
@@ -128,21 +145,22 @@ function deleteJob(key) {
   if (key === 'factorRegression') return clearFactorRegressionJob_();
   if (key === 'materialize') return clearMaterializeJob_();
   if (key === 'backtest') return clearBacktestV17Job_();
+  if (key === 'aiTask') return clearAiDiagnosisJob_();
   throw new Error('未知的工作類型：' + key);
 }
 
-/** 五種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
+/** 六種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
  *  不會碰到「每日自動排程」（scheduledDailyFetch，見 Scheduler.gs，那是核心功能本身，
  *  不是這裡管的「背景 job」）。 */
 function knownJobTickHandlers_() {
   return ['processAnalysisJobTick_', 'processBackfillJobTick_', 'processFactorRegressionJobTick_',
-    'processMaterializeJobTick_', 'processBacktestV17JobTick_'];
+    'processMaterializeJobTick_', 'processBacktestV17JobTick_', 'processAiDiagnosisJobTick_'];
 }
 
 /**
- * 排程佇列的「強制清空所有背景工作」按鈕：把五個 job 的狀態都清回 idle，同時直接掃過整個
- * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這五種 tick 函式的觸發器。
- * 不是只呼叫五個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
+ * 排程佇列的「強制清空所有背景工作」按鈕：把六個 job 的狀態都清回 idle，同時直接掃過整個
+ * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這六種 tick 函式的觸發器。
+ * 不是只呼叫六個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
  * 用「直接掃過觸發器列表」再確認一次，避免萬一有某個角落遺留、沒有被任何 job 狀態追蹤到
  * 的孤兒觸發器——例如很久以前用過的 handler 名稱、或某次刪除呼叫剛好失敗——這種觸發器
  * 不會出現在排程佇列的任何一張卡片裡，卻仍然會在排定的時間自己觸發、佔用執行配額，
@@ -154,6 +172,7 @@ function stopAllJobs() {
   clearFactorRegressionJob_();
   clearMaterializeJob_();
   clearBacktestV17Job_();
+  clearAiDiagnosisJob_();
   var handlers = knownJobTickHandlers_();
   var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
@@ -162,7 +181,7 @@ function stopAllJobs() {
       removed++;
     }
   });
-  logRun_('強制清空背景工作', '成功', '已清空 5 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
+  logRun_('強制清空背景工作', '成功', '已清空 6 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
   return { removedTriggerCount: removed };
 }
 

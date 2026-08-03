@@ -955,3 +955,88 @@ function getLatestTopPicksResult() {
   var latest = history[0];
   return { date: latest.date, text: latest.text, timestamp: latest.timestamp };
 }
+
+// ============================================================
+// AI 診斷背景 job：Goodinfo 抓取 + LLM 呼叫合計常常十幾秒到快一分鐘（尤其換模型思考比較久、
+// 或 Goodinfo 頁面比較肥大時），手機瀏覽器切到背景很容易讓連線直接中斷，變成「NetworkError:
+// 連線失敗，原因 HTTP 0」——即使 AI 那邊其實還在跑或已經跑完。改用時間觸發器在背景做，前端
+// 只需要輪詢 getAiDiagnosisJobStatus() 顯示進度，跟因子迴歸模型／回測背景 job 是同一套機制
+// （見 FactorRegression.gs / Backtest.gs）。三種任務（新進場深度診斷／持股續抱診斷／Top3
+// 橫向比較）共用同一個 job 狀態，taskType 決定要執行哪一個、payload 帶對應的參數。
+// ============================================================
+
+function getAiDiagnosisJobState_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.AI_DIAGNOSIS_JOB_STATE);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveAiDiagnosisJobState_(state) {
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.AI_DIAGNOSIS_JOB_STATE, JSON.stringify(state));
+}
+
+function deleteAiDiagnosisJobTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'processAiDiagnosisJobTick_') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/**
+ * 前端呼叫：排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，實際執行（含 Goodinfo 抓取／
+ * LLM 呼叫）在另一次獨立觸發的執行裡進行，不受這次瀏覽器連線影響。
+ * taskType: 'diagnosis'（新進場深度診斷，payload={codes:[...]}，對應 runAiDiagnosis）／
+ *   'hold'（持股續抱診斷，payload={code:'xxxx'}，對應 runPortfolioHoldDiagnosis）／
+ *   'topPicks'（Top3 橫向比較，不需要 payload，對應 runAiTopPicks）。
+ */
+function startAiDiagnosisJob(taskType, payload) {
+  deleteAiDiagnosisJobTriggers_();
+  saveAiDiagnosisJobState_({
+    status: 'running', taskType: taskType, payload: payload || null, updatedAt: Date.now()
+  });
+  ScriptApp.newTrigger('processAiDiagnosisJobTick_').timeBased().after(1000).create();
+  return { status: 'running' };
+}
+
+/** 前端輪詢用：狀態存在 Script Properties，任何時候打開頁面呼叫都看得到最新進度或結果。 */
+function getAiDiagnosisJobStatus() {
+  return getAiDiagnosisJobState_() || { status: 'idle' };
+}
+
+/** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器，
+ *  回到乾淨的 idle。 */
+function clearAiDiagnosisJob_() {
+  deleteAiDiagnosisJobTriggers_();
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.AI_DIAGNOSIS_JOB_STATE);
+  return { status: 'idle' };
+}
+
+/** 真正做事的地方，由時間觸發器呼叫，完全不受瀏覽器分頁影響。runAiDiagnosis／
+ *  runPortfolioHoldDiagnosis 本身已經把每個代號的失敗包成 {ok:false, error} 回傳、不會
+ *  拋例外；這裡的 try/catch 是防 runAiTopPicks（金鑰沒設定、候選清單是空的等）跟其他真正
+ *  意外狀況（例如 PropertiesService 讀寫失敗）用。 */
+function processAiDiagnosisJobTick_() {
+  deleteAiDiagnosisJobTriggers_();
+  var state = getAiDiagnosisJobState_();
+  if (!state || state.status !== 'running') return;
+
+  try {
+    var result;
+    if (state.taskType === 'diagnosis') {
+      result = runAiDiagnosis((state.payload && state.payload.codes) || []);
+    } else if (state.taskType === 'hold') {
+      result = runPortfolioHoldDiagnosis(state.payload && state.payload.code);
+    } else if (state.taskType === 'topPicks') {
+      result = runAiTopPicks();
+    } else {
+      throw new Error('未知的 AI 任務類型：' + state.taskType);
+    }
+    state.status = 'done';
+    state.result = result;
+    state.updatedAt = Date.now();
+    saveAiDiagnosisJobState_(state);
+  } catch (e) {
+    state.status = 'error';
+    state.errorMessage = String(e.message || e);
+    state.updatedAt = Date.now();
+    saveAiDiagnosisJobState_(state);
+  }
+}
