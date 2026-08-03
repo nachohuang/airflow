@@ -394,8 +394,8 @@
           <div id="geminiKeyStatus" class="meta-bar"></div>
 
           <form id="aiDailyForm" class="form-card" style="margin-top:10px;">
-            <label class="checkbox-row"><input type="checkbox" id="aiDailyEnabled"> 每日排程自動產生 AI 診斷</label>
-            <label>每日候選名單大小（AI 先橫向比較篩選，全部再逐檔深度診斷）
+            <label class="checkbox-row"><input type="checkbox" id="aiDailyEnabled"> 每日排程自動產生 AI 診斷（含候選名單深度診斷＋Top3 橫向比較）</label>
+            <label>每日候選名單大小（AI 先橫向比較篩選，全部再逐檔深度診斷；Top3 橫向比較固定跑，不受這個數字影響）
               <input id="aiDailyTopN" type="number" min="3" max="10" value="5">
             </label>
             <div class="form-actions">

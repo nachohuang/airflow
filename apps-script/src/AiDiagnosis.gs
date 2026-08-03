@@ -751,14 +751,21 @@ function runPortfolioHoldDiagnosis(code) {
 }
 
 /**
- * 每日排程呼叫：如果有開啟「每日自動 AI 診斷」，選股分兩層——先用 AI 橫向比較（見
- * AI_SHORTLIST_SYSTEM_PROMPT）從當天全部候選裡篩出一份較寬的候選名單（不查財報，
- * 純量化因子比較，維持低成本），名單大小就是 settings.topN；接著把這份名單「全部」
- * 送進「AI 深度診斷」（runAiDiagnosis，會另外抓 Goodinfo 財報/籌碼資料做完整查核）。
- * 刻意不做「橫向比較選 3 檔、深度診斷再驗證同一批 3 檔」這種兩階段都各自拍板的設計——
- * 橫向比較分數再高的候選，基本面查核仍有可能不合格，所以「值不值得投入」完全交給
- * 深度診斷的最終建議（強力買入/分批布局/觀望不追/立刻退出）決定，不會出現「初篩推薦
- * 的標的」跟「深度診斷結論」互相矛盾、還要使用者自己來回對照兩份報告的情況。
+ * 每日排程呼叫：如果有開啟「每日自動 AI 診斷」，做兩件各自獨立、互不影響的事：
+ *
+ * 1. 深度診斷候選名單——分兩層：先用 AI 橫向比較（見 AI_SHORTLIST_SYSTEM_PROMPT）從當天
+ *    全部候選裡篩出一份較寬的候選名單（不查財報，純量化因子比較，維持低成本），名單大小
+ *    就是 settings.topN；接著把這份名單「全部」送進「AI 深度診斷」（runAiDiagnosis，會
+ *    另外抓 Goodinfo/證交所財報資料做完整查核）。刻意不做「橫向比較選 3 檔、深度診斷再
+ *    驗證同一批 3 檔」這種兩階段都各自拍板的設計——橫向比較分數再高的候選，基本面查核
+ *    仍有可能不合格，所以「值不值得投入」完全交給深度診斷的最終建議決定，不會出現「初篩
+ *    推薦的標的」跟「深度診斷結論」互相矛盾、還要使用者自己來回對照兩份報告的情況。
+ * 2. Top3 橫向比較（runAiTopPicks）——手動按「AI 掃描全部候選，推薦前三檔」按鈕跑的
+ *    同一個函式，讓「每日自動 AI 診斷」開著就好，不用每天手動點一次才有當天的 Top3 推薦、
+ *    避免使用者以為排程有跑，隔天打開卻只看到前一天（甚至更早）留下的快取結果。
+ *
+ * 這兩件事分開包 try/catch，其中一個失敗（例如候選名單解析不出代號、Top3 掃描時 API
+ * 逾時）不影響另一個照常執行完成。
  */
 function runDailyAiDiagnosisForTopPicks() {
   var settings = getAiSettings();
@@ -766,22 +773,27 @@ function runDailyAiDiagnosisForTopPicks() {
   var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
   if (!hasKey) return { skipped: true, reason: '尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰' };
 
-  var shortlist;
+  var shortlistResult = { ok: false, error: null };
   try {
-    shortlist = runAiShortlist_(settings.topN);
+    var shortlist = runAiShortlist_(settings.topN);
+    var codes = extractShortlistCodes_(shortlist.text, settings.topN);
+    if (codes.length === 0) {
+      shortlistResult.error = '無法從 AI 候選名單中取出股票代號';
+    } else {
+      shortlistResult = { ok: true, shortlistText: shortlist.text, shortlistCost: shortlist.cost, results: runAiDiagnosis(codes) };
+    }
   } catch (e) {
-    return { skipped: true, reason: String(e.message || e) };
+    shortlistResult.error = String(e.message || e);
   }
 
-  var codes = extractShortlistCodes_(shortlist.text, settings.topN);
-  if (codes.length === 0) return { skipped: true, reason: '無法從 AI 候選名單中取出股票代號' };
+  var topPicksResult = { ok: false, error: null };
+  try {
+    topPicksResult = { ok: true, result: runAiTopPicks() };
+  } catch (e) {
+    topPicksResult.error = String(e.message || e);
+  }
 
-  return {
-    skipped: false,
-    shortlistText: shortlist.text,
-    shortlistCost: shortlist.cost,
-    results: runAiDiagnosis(codes)
-  };
+  return { skipped: false, shortlist: shortlistResult, topPicks: topPicksResult };
 }
 
 /**

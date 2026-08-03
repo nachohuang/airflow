@@ -422,7 +422,7 @@ function runManualFetchToday() {
  *      中斷過幾天（某次執行失敗、機器沒開機…），下次執行也會自動把中間漏掉的每一天補齊。
  *   3. 完成後，materialized 模式下重新整理進 BigQuery 原生表
  *   4. 完成後，重新計算戰報（runAnalysisAndSave 本來就會自動用歷史資料裡最新的一天）
- *   5. 完成後，跑每日自動 AI 診斷（選股邏輯見 runDailyAiDiagnosisForTopPicks 的說明）
+ *   5. 完成後，跑每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較，見 runDailyAiDiagnosisForTopPicks 的說明）
  * 即使第 2 步有某幾天抓取失敗，仍然照常往下跑 3~5 步、沿用目前既有的歷史資料——理由跟
  * runManualFullUpdate() 一樣：不該因為某一天抓不到就完全沒有戰報可看。
  */
