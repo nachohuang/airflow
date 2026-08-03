@@ -7,6 +7,34 @@
  * 重新操作一次。只讀彙整 + 轉派重啟，不擁有任何 job 自己的狀態或邏輯。
  */
 
+/** 背景 job 卡住太久沒更新的判定門檻（分鐘），六種 job 共用同一個保守值：正常情況下每種
+ *  job 的單次 tick（或整個流程）都會在幾分鐘內有進度更新，超過這個門檻還是 'running' 且
+ *  完全沒有更新，基本上可以確定是時間觸發器沒有真的被觸發，不是「還在算只是比較慢」。 */
+var JOB_STALE_MINUTES_ = 30;
+
+/**
+ * 六個背景 job 的 getXJobStatus() 共用：如果目前狀態是「執行中」但已經超過 JOB_STALE_MINUTES_
+ * 分鐘沒有任何更新，自動判定成逾時失敗並存回 Script Properties，不用等使用者自己發現卡住、
+ * 跑到「系統與資料後台」手動按「重新啟動」或「刪除」。所有呼叫端（排程佇列彙整、各自頁籤
+ * 打開時的檢查、前端輪詢迴圈）都是透過這幾個 getXJobStatus() 讀狀態，在這裡做一次自動修復，
+ * 全部呼叫端都受益，不用每個檔案各自重複判斷邏輯。
+ *
+ * 根本原因：Apps Script 近乎即時（1~2 秒後觸發）的一次性時間觸發器，偶爾會不知道什麼原因
+ * 沒有真的被 Google 平台觸發執行——這是 Apps Script 平台本身的可靠度限制，不是這裡程式
+ * 邏輯的問題，無法 100% 避免，只能讓「卡住之後」的體驗盡量不需要人工介入。觸發器沒被觸發，
+ * 狀態就永遠停在 'running' 不會再更新，跟過期的 setTimeout 沒有人清掉是一樣的道理。
+ */
+function autoHealStaleJobState_(propKey, state) {
+  if (!state || state.status !== 'running' || !state.updatedAt) return state;
+  var idleMinutes = (Date.now() - state.updatedAt) / 60000;
+  if (idleMinutes < JOB_STALE_MINUTES_) return state;
+  state.status = 'error';
+  state.errorMessage = '已經 ' + Math.round(idleMinutes) + ' 分鐘沒有更新，時間觸發器很可能沒有被正常觸發，已自動判定逾時失敗，可以直接重新啟動。';
+  state.updatedAt = Date.now();
+  PropertiesService.getScriptProperties().setProperty(propKey, JSON.stringify(state));
+  return state;
+}
+
 /** 刻意延後到呼叫時才組出這份清單（而不是檔案最上層的 var）：Apps Script 不保證多個 .gs
  *  檔案裡「最上層程式碼」的執行順序，函式宣告本身沒問題，但如果在最上層就直接把其他檔案
  *  的函式當值取出來，遇到載入順序不巧排在該檔案前面就會出錯；包在函式裡面只在真的被呼叫

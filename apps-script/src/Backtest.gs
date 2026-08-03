@@ -285,7 +285,7 @@ function startBacktestV17Job(startStr, endStr, targetProfit, strategyKey) {
     strategyKey: SCREENING_STRATEGIES[strategyKey] ? strategyKey : getScreeningStrategy(),
     updatedAt: Date.now()
   });
-  ScriptApp.newTrigger('processBacktestV17JobTick_').timeBased().after(1000).create();
+  ScriptApp.newTrigger('processBacktestV17JobTick_').timeBased().after(3000).create();
   return { status: 'running' };
 }
 
@@ -298,13 +298,13 @@ function startBacktestAllStrategiesJob(startStr, endStr, targetProfit) {
     targetProfit: targetProfit || BACKTEST_V17_TARGET_DEFAULT,
     updatedAt: Date.now()
   });
-  ScriptApp.newTrigger('processBacktestV17JobTick_').timeBased().after(1000).create();
+  ScriptApp.newTrigger('processBacktestV17JobTick_').timeBased().after(3000).create();
   return { status: 'running' };
 }
 
 /** 前端輪詢用：狀態存在 Script Properties，任何時候打開頁面呼叫都看得到最新進度或結果。 */
 function getBacktestV17JobStatus() {
-  return getBacktestV17JobState_() || { status: 'idle' };
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.BACKTEST_JOB_STATE, getBacktestV17JobState_() || { status: 'idle' });
 }
 
 /** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器。 */

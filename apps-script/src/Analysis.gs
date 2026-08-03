@@ -503,14 +503,14 @@ function deleteAnalysisJobTriggers_() {
 function startAnalysisJob() {
   deleteAnalysisJobTriggers_();
   saveAnalysisJobState_({ status: 'running', updatedAt: Date.now() });
-  ScriptApp.newTrigger('processAnalysisJobTick_').timeBased().after(1000).create();
+  ScriptApp.newTrigger('processAnalysisJobTick_').timeBased().after(3000).create();
   return { status: 'running' };
 }
 
 /** 前端輪詢用：狀態存在 Script Properties，不是存在瀏覽器分頁的記憶體裡，任何時候打開頁面
  *  呼叫這個都看得到最新進度（或是已經做完的結果）。 */
 function getAnalysisJobStatus() {
-  return getAnalysisJobState_() || { status: 'idle' };
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.ANALYSIS_JOB_STATE, getAnalysisJobState_() || { status: 'idle' });
 }
 
 /** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器，

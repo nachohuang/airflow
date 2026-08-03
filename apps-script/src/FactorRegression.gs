@@ -286,13 +286,13 @@ function startFactorRegressionJob(l1Reg) {
   saveFactorRegressionJobState_({
     status: 'running', l1Reg: l1Reg || CONFIG.FACTOR_MODEL_L1_REG_DEFAULT, updatedAt: Date.now()
   });
-  ScriptApp.newTrigger('processFactorRegressionJobTick_').timeBased().after(1000).create();
+  ScriptApp.newTrigger('processFactorRegressionJobTick_').timeBased().after(3000).create();
   return { status: 'running' };
 }
 
 /** 前端輪詢用：狀態存在 Script Properties，任何時候打開頁面呼叫都看得到最新進度或結果。 */
 function getFactorRegressionJobStatus() {
-  return getFactorRegressionJobState_() || { status: 'idle' };
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.FACTOR_REGRESSION_JOB_STATE, getFactorRegressionJobState_() || { status: 'idle' });
 }
 
 /** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器，

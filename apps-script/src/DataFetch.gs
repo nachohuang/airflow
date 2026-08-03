@@ -301,7 +301,7 @@ function startBackfillJob(startStr, endStr) {
     succeeded: [], failed: [], skipped: [],
     status: 'running', updatedAt: Date.now()
   });
-  ScriptApp.newTrigger('processBackfillJobTick_').timeBased().after(1000).create();
+  ScriptApp.newTrigger('processBackfillJobTick_').timeBased().after(3000).create();
   return { status: 'running' };
 }
 
@@ -309,7 +309,7 @@ function startBackfillJob(startStr, endStr) {
  *  呼叫這個都看得到最新進度（或是已經做完的結果），因為狀態存在 Script Properties，
  *  不是存在瀏覽器分頁的記憶體裡。 */
 function getBackfillJobStatus() {
-  return getBackfillJobState_() || { status: 'idle' };
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.BACKFILL_JOB_STATE, getBackfillJobState_() || { status: 'idle' });
 }
 
 /** 使用者按「取消」：標記狀態，讓還在排隊中的下一次 tick 執行時看到就直接停下來，
@@ -368,7 +368,7 @@ function processBackfillJobTick_() {
         state.cursor = formatDashedYmd_(cur);
         state.updatedAt = Date.now();
         saveBackfillJobState_(state);
-        ScriptApp.newTrigger('processBackfillJobTick_').timeBased().after(1000).create();
+        ScriptApp.newTrigger('processBackfillJobTick_').timeBased().after(3000).create();
         return;
       }
 

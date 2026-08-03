@@ -1090,13 +1090,13 @@ function startAiDiagnosisJob(taskType, payload) {
   saveAiDiagnosisJobState_({
     status: 'running', taskType: taskType, payload: payload || null, updatedAt: Date.now()
   });
-  ScriptApp.newTrigger('processAiDiagnosisJobTick_').timeBased().after(1000).create();
+  ScriptApp.newTrigger('processAiDiagnosisJobTick_').timeBased().after(3000).create();
   return { status: 'running' };
 }
 
 /** 前端輪詢用：狀態存在 Script Properties，任何時候打開頁面呼叫都看得到最新進度或結果。 */
 function getAiDiagnosisJobStatus() {
-  return getAiDiagnosisJobState_() || { status: 'idle' };
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.AI_DIAGNOSIS_JOB_STATE, getAiDiagnosisJobState_() || { status: 'idle' });
 }
 
 /** 排程佇列的「刪除」按鈕呼叫：不管目前狀態是什麼，直接清掉狀態跟任何已排定的觸發器，
