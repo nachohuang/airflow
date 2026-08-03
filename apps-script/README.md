@@ -313,11 +313,18 @@ GitHub Actions 就會自動跑測試、推上去，不用再手動進 Cloud Shel
 輸出格式（5年+TTM財務健檢表、三大流派辯證、CoVE 自我驗證、最終決策）完全比照你提供的原始 prompt。
 Claude 跟 Gemini 都支援，兩邊金鑰都設定的話可以在後台管理隨時切換／比較輸出品質：
 
-- **Claude**：沒有原生瀏覽能力，所以由 Apps Script 自己抓 Goodinfo 頁面文字
-  （`fetchGoodinfoText_`，粗略的 HTML 去標籤，抓不到 Goodinfo 動態載入的部分）當作參考資料餵給模型
-  （這也是原始 prompt 第 1 條規則的調整之處，原版假設模型自己能上網查）。
-- **Gemini**：呼叫時開啟了 Google 原生的 `google_search` grounding 工具，模型自己也能查即時資訊，
-  不完全依賴我們餵的 Goodinfo 摘要（兩者會一起送給模型參考）。
+- **兩邊都會餵**：`fetchTwseOfficialFinancialsText_` 直接查證交所公開資訊觀測站 OpenAPI
+  （`openapi.twse.com.tw`，公開資料、不用金鑰）的月營收／綜合損益表／資產負債表，抓到的官方
+  結構化資料原樣（欄位：值）餵給模型，不在 Apps Script 這邊自己解析/計算指標；再加上
+  `fetchGoodinfoText_` 抓 Goodinfo 個股頁面文字（粗略的 HTML 去標籤，抓不到動態載入的部分，
+  也只有頁首摘要）當輔助補充。兩份資料在 prompt 裡分開標示來源，系統 prompt 明確要求「證交所
+  官方資料可信度最高，缺漏或衝突時以它為準，Goodinfo 只是輔助」（目前只接了「一般業」財報
+  端點，金融/證券/保險等特殊產業別的公司這段會顯示查無資料，是預期行為）。
+- **Claude**：沒有原生瀏覽能力，上面兩份資料是它獲取個股資訊的唯一管道。
+- **Gemini**：呼叫時額外開啟了 Google 原生的 `google_search` grounding 工具，模型自己也能查
+  即時資訊，但系統 prompt 明確把它列為「可信度低於證交所官方資料的輔助佐證」——查到的內容
+  跟我們餵的官方資料衝突時要以官方資料為準並註明落差，不能因為搜尋結果比較新就直接覆蓋；
+  Wantgoo／PTT／Dcard 這類論壇社群來源一律禁止引用，即使是模型自己搜尋查到的也一樣。
 
 **設定步驟：**
 1. Claude：到 [console.anthropic.com](https://console.anthropic.com) 申請一組 API 金鑰；

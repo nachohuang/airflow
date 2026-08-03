@@ -15,9 +15,10 @@ var AI_DIAGNOSIS_SYSTEM_PROMPT = `# Role & Expertise
 你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師。你同時精通三個流派：【價值護城河大師（專攻財報與競爭壁壘）】、【籌碼追蹤專家（專攻法人與主力大戶動向）】、【技術型態首席（專攻動能與波段拐點）】。你的任務是客觀、嚴厲且極度精準地協助我，針對我提供的「台股量化選股策略 (v17.0) 趨勢共鳴戰報」資料與指定的個股進行「第二層思考」診斷。
 
 # Core Rules & Constraints
-1. **Goodinfo 資料查核：**
-   - 針對數據中的個股，請參考我在使用者訊息裡提供的「Goodinfo 個股頁面文字摘要」（來源：https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=xxxx）進行最新資訊與基本面查核。這份摘要是程式自動抓取的，可能不完整，若缺漏就明確說明「此部分資料不足」，不要憑空捏造數字。
-   - 【絕對禁忌】：嚴禁使用 Wantgoo 玩股網或任何未經證實的論壇傳言作為數據源。
+1. **資料查核與可信度分級：**
+   - 我在使用者訊息裡會提供兩種輔助資料：①「證交所公開資訊觀測站官方資料」（來源：openapi.twse.com.tw，程式直接查詢官方公開 API 取得月營收/財報，可信度最高）、②「Goodinfo 個股頁面文字摘要」（來源：https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=xxxx，程式自動抓取網頁文字，可能不完整或抓取失敗）。兩者衝突時以①官方資料為準；①缺漏才依②判斷；兩者都缺漏就明確說明「此部分資料不足」，不要憑空捏造數字。
+   - 如果你有能力自行查詢即時資訊（例如透過搜尋工具），查到的內容一律視為「輔助佐證」，可信度必須低於我提供的①官方資料——遇到搜尋結果跟①衝突，以①為準，並在報告中註明這個落差，不要因為搜尋結果看起來比較「新」就直接覆蓋官方數字。
+   - 【絕對禁忌】：嚴禁使用 Wantgoo 玩股網、PTT、Dcard 或任何未經證實的論壇/社群傳言作為數據源，即使是你自己搜尋查到的也一樣不能用。
 2. **5年 + TTM 財報地毯式審查：**
    - 深入分析該股過去 5 年以及最新 TTM (近四季滾動) 的：營收年增率 (MoM/YoY)、三率 (毛利率、利益率、淨利率) 走勢、EPS、ROE，以及自由現金流。
    - 判斷其近期動能是來自「實質獲利爆發」還是「短線題材炒作」。
@@ -167,14 +168,62 @@ function fetchGoodinfoText_(code) {
   }
 }
 
+/**
+ * 抓證交所公開資訊觀測站 OpenAPI（openapi.twse.com.tw，公開、不用金鑰）的月營收／綜合損益表／
+ * 資產負債表資料集，過濾出這一檔股票的列，原樣序列化成「欄位：值」文字餵給 AI——不在這裡
+ * 自己解析/計算哪個欄位是營收、哪個是淨利，官方回傳的中文欄位名稱本身就有意義，讓 AI 自己讀。
+ * 跟 fetchGoodinfoText_（抓網頁 HTML 去標籤，抓不到 JS 動態載入的內容、也只有頁首摘要）比，
+ * 這是官方直接查詢的結構化資料，可信度更高，見系統 prompt 規則 1 的可信度分級——這兩個函式
+ * 回傳的文字會分開標示來源放進 prompt，不是互相取代。
+ *
+ * 目前只接了「一般業」的財報端點；金融/證券期貨/保險/金控等特殊產業別的財報格式跟一般業
+ * 不同、在另外的端點（t187ap06_L_bd／_basi／_ins／_fh 等），這裡沒有涵蓋，遇到這類股票
+ * 查無資料是預期行為，不是 bug——AI 看不到這段資料時，系統 prompt 規則 1 會要求它明確
+ * 說明「此部分資料不足」，不會憑空捏造數字。
+ */
+function fetchTwseOfficialFinancialsText_(code) {
+  var datasets = [
+    { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap05_L', label: '上市公司每月營業收入彙總表' },
+    { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci', label: '上市公司綜合損益表（一般業）' },
+    { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap07_L_ci', label: '上市公司資產負債表（一般業）' }
+  ];
+  var MAX_CHARS = 4000;
+  var parts = [];
+  datasets.forEach(function (ds) {
+    try {
+      var resp = UrlFetchApp.fetch(ds.url, { muteHttpExceptions: true });
+      if (resp.getResponseCode() !== 200) return;
+      var rows = JSON.parse(resp.getContentText('UTF-8'));
+      if (!Array.isArray(rows)) return;
+      var matched = rows.filter(function (r) { return String(r['公司代號'] || '').trim() === code; });
+      if (matched.length === 0) return;
+      var text = matched.map(function (r) {
+        return Object.keys(r).map(function (k) { return k + '：' + r[k]; }).join('，');
+      }).join('\n');
+      parts.push('【' + ds.label + '】\n' + text);
+    } catch (e) {
+      // 單一資料集抓取失敗（格式變動、逾時等）不影響其他資料集，靜默略過即可，
+      // 不中斷整體診斷流程——這一段資料缺漏時，系統 prompt 規則 1 會要求 AI 明確講清楚。
+    }
+  });
+  if (parts.length === 0) {
+    return '（查無此股票代號在證交所公開資訊觀測站的月營收／財報公開資料——可能是非「一般業」分類' +
+      '的公司（金融/證券/保險/金控等產業另有獨立端點，這裡沒有涵蓋），這部分請依 Goodinfo 摘要與你' +
+      '既有的知識判斷，並在報告中註明缺乏官方結構化財報資料）';
+  }
+  return parts.join('\n\n').slice(0, MAX_CHARS);
+}
+
 // ---------------- Prompt 組裝 + Claude API ----------------
 
 /**
  * holding 有帶（持股續抱診斷專用，見 runPortfolioHoldDiagnosis）時，額外插入一段「我目前的
  * 持股資訊」——平均成本、持有天數、目前損益%——讓 AI 的建議是「針對我這筆部位」量身判斷，
  * 不是泛用的新進場買入建議。搭配 AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT 的持股決策分類使用。
+ * twseOfficialText 是證交所 OpenAPI 官方結構化財報資料（見 fetchTwseOfficialFinancialsText_），
+ * 跟 goodinfoText 分開標示來源放進 prompt，可信度分級交給系統 prompt 規則 1 處理。
  */
-function buildDiagnosisPrompt_(row, goodinfoText, timestampLabel, holding) {
+function buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel, holding) {
   var lines = [];
   lines.push('監控基準時間戳記：' + timestampLabel);
   lines.push('');
@@ -200,7 +249,11 @@ function buildDiagnosisPrompt_(row, goodinfoText, timestampLabel, holding) {
     }
   }
   lines.push('');
-  lines.push('【Goodinfo 個股頁面文字摘要（程式自動抓取，可能不完整，僅供參考）】');
+  lines.push('【證交所公開資訊觀測站官方資料（openapi.twse.com.tw，官方 API 直接查詢，可信度最高，' +
+    '缺漏或跟其他來源衝突時以這裡為準）】');
+  lines.push(twseOfficialText);
+  lines.push('');
+  lines.push('【Goodinfo 個股頁面文字摘要（程式自動抓取，可能不完整，僅供輔助參考）】');
   lines.push(goodinfoText);
   lines.push('');
   lines.push(holding
@@ -475,7 +528,8 @@ function runAiDiagnosis(codes) {
       if (!row) throw new Error('在 Reports 裡找不到這檔股票的戰報資料，請先確認它出現在某一天的戰報中。');
 
       var goodinfoText = fetchGoodinfoText_(code);
-      var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, timestampLabel);
+      var twseOfficialText = fetchTwseOfficialFinancialsText_(code);
+      var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel);
       var llmResult = callLlm_(AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
       var diagnosisText = llmResult.text;
       var verdict = extractVerdict_(diagnosisText);
@@ -530,9 +584,10 @@ var AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT = `# Role & Expertise
 你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師。你同時精通三個流派：【價值護城河大師（專攻財報與競爭壁壘）】、【籌碼追蹤專家（專攻法人與主力大戶動向）】、【技術型態首席（專攻動能與波段拐點）】。你的任務是客觀、嚴厲且極度精準地協助我評估「我已經持有」的這檔股票，針對我提供的持股成本／持有天數／目前損益，判斷接下來該怎麼處理這筆部位——這不是選股，是部位管理。
 
 # Core Rules & Constraints
-1. **Goodinfo 資料查核：**
-   - 針對數據中的個股，請參考我在使用者訊息裡提供的「Goodinfo 個股頁面文字摘要」（來源：https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=xxxx）進行最新資訊與基本面查核。這份摘要是程式自動抓取的，可能不完整，若缺漏就明確說明「此部分資料不足」，不要憑空捏造數字。
-   - 【絕對禁忌】：嚴禁使用 Wantgoo 玩股網或任何未經證實的論壇傳言作為數據源。
+1. **資料查核與可信度分級：**
+   - 我在使用者訊息裡會提供兩種輔助資料：①「證交所公開資訊觀測站官方資料」（來源：openapi.twse.com.tw，程式直接查詢官方公開 API 取得月營收/財報，可信度最高）、②「Goodinfo 個股頁面文字摘要」（來源：https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=xxxx，程式自動抓取網頁文字，可能不完整或抓取失敗）。兩者衝突時以①官方資料為準；①缺漏才依②判斷；兩者都缺漏就明確說明「此部分資料不足」，不要憑空捏造數字。
+   - 如果你有能力自行查詢即時資訊（例如透過搜尋工具），查到的內容一律視為「輔助佐證」，可信度必須低於我提供的①官方資料——遇到搜尋結果跟①衝突，以①為準，並在報告中註明這個落差，不要因為搜尋結果看起來比較「新」就直接覆蓋官方數字。
+   - 【絕對禁忌】：嚴禁使用 Wantgoo 玩股網、PTT、Dcard 或任何未經證實的論壇/社群傳言作為數據源，即使是你自己搜尋查到的也一樣不能用。
 2. **5年 + TTM 財報地毯式審查：**
    - 深入分析該股過去 5 年以及最新 TTM (近四季滾動) 的：營收年增率 (MoM/YoY)、三率 (毛利率、利益率、淨利率) 走勢、EPS、ROE，以及自由現金流。
    - 判斷其近期動能是來自「實質獲利爆發」還是「短線題材炒作」，這關係到現在的獲利/虧損還撐不撐得住。
@@ -621,7 +676,8 @@ function runPortfolioHoldDiagnosis(code) {
       : null;
 
     var goodinfoText = fetchGoodinfoText_(code);
-    var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, timestampLabel, {
+    var twseOfficialText = fetchTwseOfficialFinancialsText_(code);
+    var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel, {
       cost: holdingInfo.cost, buyDate: holdingInfo.buyDate, daysHeld: daysHeld, profitPct: profitPct
     });
     var llmResult = callLlm_(AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
