@@ -294,16 +294,21 @@
           </div>
 
           <div class="admin-section">
-            <h3>資料庫 Spreadsheet</h3>
+            <h3>儲存位置總覽</h3>
             <div class="meta-bar">
-              History／Reports／Portfolio／AiDiagnosis 這些分頁實際存在哪一個 Google Sheets 檔案裡。
-              正常情況下不需要碰這裡；只有在下面顯示「⚠️ 無法開啟」或戰報／持股資料無故消失時，
-              才需要貼上原本資料庫檔案的網址或 ID 手動復原指向。
+              History／Reports／Portfolio／AiDiagnosis／每日戰報 xlsx 實際存在哪個 Google Sheets／
+              Drive 資料夾，全部列在這裡。正常情況下不需要碰這裡；只有下面某一項顯示「⚠️ 無法開啟」，
+              或戰報／持股資料無故消失、疑似被切換到別的資料夾時，才需要用下面兩個表單貼上原本的
+              網址／ID 手動復原指向。
             </div>
-            <div id="spreadsheetStatus" class="meta-bar"></div>
-            <form id="spreadsheetIdForm" class="inline-form">
-              <input type="text" id="spreadsheetIdInput" placeholder="貼上 Google Sheets 網址或 ID">
+            <div id="storageDiagnostics" class="md-table-cards"></div>
+            <form id="spreadsheetIdForm" class="inline-form" style="margin-top:10px;">
+              <input type="text" id="spreadsheetIdInput" placeholder="貼上資料庫 Google Sheets 網址或 ID">
               <button type="submit" class="btn-primary">設為資料庫</button>
+            </form>
+            <form id="rootFolderIdForm" class="inline-form" style="margin-top:6px;">
+              <input type="text" id="rootFolderIdInput" placeholder="貼上根資料夾 Drive 網址或 ID">
+              <button type="submit" class="btn-primary">設為根資料夾</button>
             </form>
           </div>
 

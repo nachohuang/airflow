@@ -268,6 +268,41 @@ var CONFIG = {
 };
 
 /**
+ * ============================================================================
+ * 重要教訓（2026-08-03 資料「消失」事故根因記錄，請務必讀完再修改本檔案任何一個
+ * 「取得（或建立）持久化資源」的函式——Spreadsheet、Root/Archive/Reports/Regression
+ * 資料夾都算）：
+ *
+ * 症狀：使用者回報 History／Reports／Portfolio／AiDiagnosis／每日戰報全部憑空消失，
+ * 畫面顯示「目前還沒有任何戰報」，但 Drive 裡明明有同一天匯出的戰報 xlsx 檔案；
+ * 之後使用者自己在 Drive 裡發現多出一個全新資料夾，裡面是全新建立、內容是空的
+ * Spreadsheet／Reports／Regression 資料夾——原本的資料並沒有真的被刪除，只是
+ * App 悄悄換去讀寫別的地方。
+ *
+ * 根因：本檔案裡原本有多個「取得（或建立）持久化資源」的函式，邏輯都是「先嘗試用
+ * Script Properties 存的 ID 開啟既有資源，開啟失敗（不管什麼原因：暫時性 API 錯誤、
+ * 額度限制、Properties 意外被清空……）就默默 fallback 去新建一個空白資源、然後
+ * 用新資源的 ID 覆蓋掉 Script Properties」。這種寫法在 Apps Script 環境下特別危險：
+ *   1. UrlFetch/DriveApp/SpreadsheetApp 呼叫本來就偶爾會有暫時性失敗，機率不算低，
+ *      而 openById 失敗「不代表資源真的不見了」，代表要處理錯誤，而不是造一個新的頂替。
+ *   2. Script Properties 覆蓋是立即生效、沒有版本歷史、也沒有任何確認步驟，覆蓋掉的
+ *      舊 ID 沒有內建救援機制——原本資料變成孤兒檔案，只能靠使用者自己去 Drive 大海撈針找。
+ *   3. 從使用者角度看，這是「資料無聲消失」：沒有任何錯誤訊息，畫面只是安靜地變成空的，
+ *      非常難察覺、更難回溯原因，往往要等使用者自己發現「數字對不起來」才會被回報。
+ *
+ * 規則（以後任何新增/修改「取得或建立持久化資源」的函式都必須遵守，沒有例外）：
+ *   - 只有在「Script Properties 裡從來沒有存過這個 ID」時，才可以自動新建資源。
+ *   - 只要 ID 已經存在、但用這個 ID 開啟資源失敗，一律要讓錯誤直接往外拋出，
+ *     絕對不能默默 fallback 去新建或另外尋找一個資源來頂替、更不能自動覆蓋掉
+ *     Script Properties 裡已經存的 ID。
+ *   - 每一個持久化資源都要能在後台「儲存位置總覽」（見 getStorageDiagnostics()）
+ *     看到目前狀態（正常／無法開啟＋錯誤訊息），並且要有手動覆蓋（貼網址/ID）的
+ *     復原路徑——因為「靜默壞掉」比「馬上噴錯」危險太多倍，寧可讓使用者在後台
+ *     看到刺眼的紅字，也不要讓資料在背後被默默棄置。
+ * ============================================================================
+ */
+
+/**
  * 取得（或建立）主要 Spreadsheet，並確保它放在使用者指定的根資料夾裡（不是 Drive 根目錄）。
  *
  * 注意：只有在「從來沒有設定過 SPREADSHEET_ID」時才會自動新建一個空白資料庫。
@@ -403,20 +438,78 @@ function getRegressionFolder_() {
   return getNamedSubfolder_(CONFIG.PROP_KEYS.REGRESSION_FOLDER_ID, CONFIG.REGRESSION_FOLDER_NAME);
 }
 
-/** Reports / Regression 沒有各自的既有資料夾 ID，所以在根資料夾（使用者指定的那個）底下自動建立同名子資料夾。 */
+/**
+ * Reports / Regression 沒有各自的既有資料夾 ID，所以在根資料夾（使用者指定的那個）底下自動建立
+ * 同名子資料夾。只有在「從來沒存過 ID」時才會用名稱找/建；ID 已經存在但開啟失敗就直接拋出錯誤，
+ * 不會默默改成另外找或新建一個來頂替（理由見本檔案上方的事故根因記錄）。
+ */
 function getNamedSubfolder_(propKey, folderName) {
   var props = PropertiesService.getScriptProperties();
   var id = props.getProperty(propKey);
   if (id) {
-    try {
-      return DriveApp.getFolderById(id);
-    } catch (e) {
-      // fall through and recreate
-    }
+    return DriveApp.getFolderById(id);
   }
   var folder = getOrCreateFolder_(getRootFolder_(), folderName);
   props.setProperty(propKey, folder.getId());
   return folder;
+}
+
+/**
+ * 讓使用者手動把「根資料夾」指向另一個既有的 Drive 資料夾（例如發現資料被靜默切換到
+ * 別的資料夾後，找回原本使用的根資料夾並貼上網址／ID 復原）。換根資料夾之後，Reports／
+ * Regression 這兩個「用名稱自動尋找/建立的子資料夾」快取的 ID 也一併清掉，強制下次
+ * 存取時改成在新根資料夾底下重新用名稱尋找——這樣如果原本的 Reports/Regression 資料夾
+ * 本來就在新根資料夾下面，會直接找到，不會又生出一份新的空資料夾。
+ */
+function setRootFolderId(idOrUrl) {
+  var input = String(idOrUrl || '').trim();
+  if (!input) throw new Error('請輸入資料夾網址或 ID。');
+  var match = input.match(/\/folders\/([-\w]{10,})/);
+  var id = match ? match[1] : input;
+  var folder = DriveApp.getFolderById(id);
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(CONFIG.PROP_KEYS.ROOT_FOLDER_ID, folder.getId());
+  props.deleteProperty(CONFIG.PROP_KEYS.REPORTS_FOLDER_ID);
+  props.deleteProperty(CONFIG.PROP_KEYS.REGRESSION_FOLDER_ID);
+  return { id: folder.getId(), name: folder.getName(), url: folder.getUrl() };
+}
+
+/**
+ * 後台「儲存位置總覽」：一次列出全部 5 個持久化資源（Spreadsheet + 4 個 Drive 資料夾）目前
+ * 實際指向哪裡、能不能正常開啟。每一項獨立 try/catch，一項失敗不影響其他項的顯示——這樣
+ * 使用者才能一眼看出「到底是哪一個資源被靜默換掉了」，直接跟自己手上的 Drive 連結核對。
+ */
+function getStorageDiagnostics() {
+  var checks = [
+    { key: 'spreadsheet', label: '資料庫 Spreadsheet', fn: function () {
+      var ss = getSpreadsheet_();
+      return { name: ss.getName(), url: ss.getUrl() };
+    } },
+    { key: 'root', label: '根資料夾', fn: function () {
+      var f = getRootFolder_();
+      return { name: f.getName(), url: f.getUrl() };
+    } },
+    { key: 'archive', label: '歷史資料夾（History CSV）', fn: function () {
+      var f = getArchiveFolder_();
+      return { name: f.getName(), url: f.getUrl() };
+    } },
+    { key: 'reports', label: '每日戰報資料夾（Reports xlsx）', fn: function () {
+      var f = getReportsFolder_();
+      return { name: f.getName(), url: f.getUrl() };
+    } },
+    { key: 'regression', label: '回測／因子掃描資料夾（Regression）', fn: function () {
+      var f = getRegressionFolder_();
+      return { name: f.getName(), url: f.getUrl() };
+    } }
+  ];
+  return checks.map(function (c) {
+    try {
+      var info = c.fn();
+      return { key: c.key, label: c.label, ok: true, name: info.name, url: info.url };
+    } catch (e) {
+      return { key: c.key, label: c.label, ok: false, name: '', url: '', error: String(e.message || e) };
+    }
+  });
 }
 
 /**
