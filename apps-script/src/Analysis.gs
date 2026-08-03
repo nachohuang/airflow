@@ -283,6 +283,42 @@ function computeLatestDayRows_(portfolioMap) {
   return rows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDateStr; });
 }
 
+/**
+ * 供「持股續抱診斷」用：Reports 分頁只存「通過篩選」的訊號（診斷是 Neutral 的列會被
+ * runAnalysis() 濾掉），但持股不見得會出現在裡面——可能不符合目前的進場篩選標準（篩選版本
+ * 切換過、或這檔股票本來就不是靠這套策略選進來的），這種情況不該讓續抱診斷直接查無資料。
+ * 這裡直接對「最新一天」全市場已算好因子的列（跟今日戰報同一份計算結果，不是另外重算）
+ * 找這一檔股票：只要它在 portfolioMap 裡（持有中），diagnoseRow_ 一定會走 holding 分支，
+ * 得到 🛡️ 持股守護／🛑 止盈止損兩種分類之一，不受進場篩選門檻（成交金額/Trend_Score等）限制。
+ * 找不到列代表這檔股票在最新一天的原始歷史資料裡本來就沒有（例如停牌、資料尚未同步），
+ * 這種情況才是真的沒資料可以診斷。
+ */
+function getLatestFactorRowForCode_(code) {
+  var target = zfill4(String(code || '').trim());
+  var portfolioMap = getPortfolioMap_();
+  var scanRows = computeLatestDayRows_(portfolioMap);
+  var row = scanRows.filter(function (r) { return zfill4(String(r['證券代號']).trim()) === target; })[0];
+  if (!row) return null;
+
+  var strategyKey = getScreeningStrategy();
+  var diag = diagnoseRow_(row, portfolioMap, strategyKey);
+  return {
+    '日期': row['日期'],
+    '證券代號': row['證券代號'],
+    '證券名稱': row['證券名稱'],
+    'Armor_Score': row.Armor_Score,
+    '操作策略': diag.strategy,
+    '建議動作': diag.action,
+    '實相解讀': diag.interpretation,
+    'Trend_Score': row.Trend_Score,
+    'Inst_Part_Rank': row.Inst_Part_Rank,
+    'IBF_20D_Rank': row.IBF_20D_Rank,
+    '監控連結': diag.url,
+    '參考最高價': diag.peak,
+    '收盤價': row['收盤價']
+  };
+}
+
 /** 這份戰報實際是從哪裡讀資料的：native（Drive 月份檔案）／external／materialized
  *  （BigQuery），前端拿這個字串顯示「資料來源」，不用讓使用者自己猜。跟 sourceMode 這個
  *  Script Property 設定值不完全一樣——沒設定 BigQuery 專案的話，就算 sourceMode 存的是

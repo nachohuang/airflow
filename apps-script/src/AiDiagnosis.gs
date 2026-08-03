@@ -604,8 +604,12 @@ function runPortfolioHoldDiagnosis(code) {
     var holdingInfo = portfolioMap[code];
     if (!holdingInfo) throw new Error('目前沒有持有 ' + code + '，請確認「持股庫存」裡有這一筆持有中的紀錄');
 
-    var row = getLatestReportRowForCode_(code);
-    if (!row) throw new Error('在 Reports 裡找不到這檔股票的戰報資料，請先確認它出現在某一天的戰報中。');
+    // Reports 分頁只存「通過篩選」的訊號，持股不見得會在裡面（不符合目前的進場篩選標準、
+    // 或篩選版本切換過）——優先用 Reports 的快取列（便宜），查不到再退而求其次直接對「最新
+    // 一天」全市場已算好因子的列找這一檔股票（見 getLatestFactorRowForCode_ 的說明），
+    // 只要它是持有中的股票，一定能拿到 🛡️/🛑 分類，不會因為「沒上過戰報」就不能診斷。
+    var row = getLatestReportRowForCode_(code) || getLatestFactorRowForCode_(code);
+    if (!row) throw new Error('在歷史資料裡找不到 ' + code + ' 最新交易日的資料，請確認代號正確、且歷史資料已經同步到最新交易日。');
 
     var latestByCode = getLatestCloseByCode_([code]);
     var latestClose = latestByCode[code] ? latestByCode[code].close : null;
