@@ -1359,6 +1359,23 @@ function queryHistoryRowsForCodesFromBigQuery_(codes, days) {
 }
 
 /**
+ * 持股表單代號欄位失焦時查一次對應名稱用（getStockNameByCode）：跟 searchStockCodes()
+ * （給打字自動完成用，刻意只看最近 10 天資料，避免每次按鍵都全市場查詢太慢）不同，這裡
+ * 「只查這一檔股票、不限日期範圍」——冷門股或最近沒被每日掃描選中的股票，10 天內剛好沒
+ * 出現的話 searchStockCodes 會查無結果，但只查一檔股票在 BigQuery 模式下不限日期範圍
+ * 也不會有效能問題（資料量頂多幾年 x 一檔，跟全市場查詢完全不同量級）。
+ */
+function queryLatestNameForCodeFromBigQuery_(code) {
+  var settings = requireBigQueryProjectId_();
+  refreshDataSourceForMode_(settings);
+  var sql = buildHistoryRowsForStocksSql_(sourceRefForBigQueryRead_(settings), [code], null);
+  var rows = runBqQuery_(sql, 'latest_name_for_code').map(mapBqRowToHistoryRow_);
+  if (rows.length === 0) return null;
+  rows.sort(function (a, b) { return normalizeDateStr(a['日期']) < normalizeDateStr(b['日期']) ? 1 : -1; });
+  return { code: code, name: rows[0]['證券名稱'] || '' };
+}
+
+/**
  * 對有持股的每一檔股票，只查「這幾檔股票、從最早買進日起算」的原始歷史列
  * （資料量是「持股數 x 天數」，跟全市場查詢完全不同量級，不會有記憶體問題），
  * 完整重用（不是重寫）已經驗證過的 computeFactors_ + expandingMaxFromIndex 邏輯算出

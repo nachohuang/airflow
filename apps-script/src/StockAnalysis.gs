@@ -24,6 +24,26 @@ function searchStockCodes(query) {
 }
 
 /**
+ * 供持股表單代號欄位失焦時查一次對應名稱用：跟 searchStockCodes（限最近 10 天，
+ * 給打字自動完成用）不同，這裡查「這一檔股票、盡量不限日期範圍」，讓最近 10 天沒被
+ * 每日掃描選中的冷門股也查得到名字（BigQuery 模式下不限日期範圍；檔案模式沒有「不限
+ * 範圍」查詢，退而求其次抓最近約一年，仍然找不到就回傳 null，前端維持使用者自行輸入）。
+ */
+function getStockNameByCode(code) {
+  code = zfill4(String(code || '').trim());
+  if (!code) return null;
+  if (shouldUseBigQueryForReads_()) {
+    return queryLatestNameForCodeFromBigQuery_(code);
+  }
+  var rows = readRecentHistoryFromFiles_(400).filter(function (r) {
+    return zfill4(String(r['證券代號']).trim()) === code;
+  });
+  if (rows.length === 0) return null;
+  rows.sort(function (a, b) { return normalizeDateStr(a['日期']) < normalizeDateStr(b['日期']) ? 1 : -1; });
+  return { code: code, name: rows[0]['證券名稱'] || '' };
+}
+
+/**
  * 回傳單一股票的時間序列（收盤價、MA5/20/60、法人買賣超）+ 歷史 Armor_Score 走勢。
  * days: 要往回抓多少天的 History（預設 240 天，留夠 buffer 讓 MA60 有意義）。
  */

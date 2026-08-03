@@ -165,6 +165,14 @@ function getPortfolio() {
   });
   if (items.length === 0) return items;
 
+  // 補救措施：在代號離開欄位自動帶名稱功能上線前存進去的舊紀錄，可能名稱是空的
+  // （或使用者當時查無結果、手動略過），這裡順便補一次名稱，不用逐筆手動編輯。
+  items.forEach(function (it) {
+    if (it.name) return;
+    var found = getStockNameByCode(it.code);
+    if (found && found.name) it.name = found.name;
+  });
+
   var latestByCode = getLatestCloseByCode_(items.map(function (it) { return it.code; }));
   var signalByCode = {};
   readSheetObjects_(getReportsSheet_()).forEach(function (r) {

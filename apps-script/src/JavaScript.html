@@ -830,10 +830,11 @@
   pfCodeInput.addEventListener('blur', function () {
     var raw = pfCodeInput.value.trim();
     if (!raw || pfNameInput.value.trim()) return;
-    var padded = raw.length < 4 ? ('0000' + raw).slice(-4) : raw;
-    callServer('searchStockCodes', raw).then(function (results) {
-      var exact = results.filter(function (r) { return r.code === padded; })[0];
-      if (exact) { pfCodeInput.value = exact.code; pfNameInput.value = exact.name; }
+    // 用 getStockNameByCode（不限日期範圍查這一檔股票）而不是 searchStockCodes（只看最近
+    // 10 天，給打字自動完成用）——冷門股或最近沒被每日掃描選中的話，10 天內查不到，
+    // 但這裡查名字只查一檔股票，不受那個限制。
+    callServer('getStockNameByCode', raw).then(function (result) {
+      if (result) { pfCodeInput.value = result.code; pfNameInput.value = result.name; }
     }).catch(function () { /* 查不到就算了，不影響使用者自己填代號/名稱 */ });
   });
 
