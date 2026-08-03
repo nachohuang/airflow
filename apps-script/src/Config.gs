@@ -269,24 +269,69 @@ var CONFIG = {
 
 /**
  * 取得（或建立）主要 Spreadsheet，並確保它放在使用者指定的根資料夾裡（不是 Drive 根目錄）。
+ *
+ * 注意：只有在「從來沒有設定過 SPREADSHEET_ID」時才會自動新建一個空白資料庫。
+ * 如果 SPREADSHEET_ID 已經有值、但 openById 失敗（例如暫時的 API 錯誤、權限問題），
+ * 一律讓錯誤往外丟出，絕對不能默默建立新的空白 Spreadsheet 並覆蓋掉原本的 ID——
+ * 這樣會讓既有的 History／Reports／Portfolio／AiDiagnosis 資料在使用者眼中「憑空消失」。
  */
 function getSpreadsheet_() {
   var props = PropertiesService.getScriptProperties();
   var id = props.getProperty(CONFIG.PROP_KEYS.SPREADSHEET_ID);
-  var ss;
   if (id) {
-    try {
-      ss = SpreadsheetApp.openById(id);
-    } catch (e) {
-      ss = null;
-    }
+    return SpreadsheetApp.openById(id);
   }
-  if (!ss) {
-    ss = SpreadsheetApp.create('TWSE 法人動能選股 App 資料庫');
-    props.setProperty(CONFIG.PROP_KEYS.SPREADSHEET_ID, ss.getId());
-    moveFileIntoFolder_(ss.getId(), getRootFolder_());
-  }
+  var ss = SpreadsheetApp.create('TWSE 法人動能選股 App 資料庫');
+  props.setProperty(CONFIG.PROP_KEYS.SPREADSHEET_ID, ss.getId());
+  moveFileIntoFolder_(ss.getId(), getRootFolder_());
   return ss;
+}
+
+/**
+ * 供後台「系統與資料後台」頁面顯示目前實際指向哪一個資料庫 Spreadsheet，
+ * 並標示是否能正常開啟（讓使用者能及早發現「資料庫被切換成空白檔案」之類的問題）。
+ */
+function getSpreadsheetInfo() {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty(CONFIG.PROP_KEYS.SPREADSHEET_ID);
+  if (!id) {
+    return { configured: false, ok: false, id: '', name: '', url: '' };
+  }
+  try {
+    var ss = SpreadsheetApp.openById(id);
+    return {
+      configured: true,
+      ok: true,
+      id: id,
+      name: ss.getName(),
+      url: ss.getUrl()
+    };
+  } catch (e) {
+    return {
+      configured: true,
+      ok: false,
+      id: id,
+      name: '',
+      url: 'https://docs.google.com/spreadsheets/d/' + id + '/edit',
+      error: String(e.message || e)
+    };
+  }
+}
+
+/**
+ * 讓使用者手動把資料庫指向另一個既有的 Spreadsheet（例如資料被誤切換成空白檔案後，
+ * 找回原本的「TWSE 法人動能選股 App 資料庫」檔案並貼上網址／ID 復原）。
+ * 會先嘗試開啟該 Spreadsheet 確認可以正常存取，才會真的覆蓋 SPREADSHEET_ID。
+ */
+function setSpreadsheetId(idOrUrl) {
+  var input = String(idOrUrl || '').trim();
+  if (!input) throw new Error('請輸入 Spreadsheet 網址或 ID。');
+  var match = input.match(/\/spreadsheets\/d\/([-\w]{20,})/);
+  var id = match ? match[1] : input;
+  var ss = SpreadsheetApp.openById(id);
+  var name = ss.getName();
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.SPREADSHEET_ID, id);
+  return { id: id, name: name, url: ss.getUrl() };
 }
 
 /** 把檔案從目前所在的父資料夾移到指定資料夾（Apps Script 沒有直接的「搬移」API，用移除舊parent+加新parent達成）。 */

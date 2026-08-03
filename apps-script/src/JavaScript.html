@@ -1272,7 +1272,7 @@
     return Promise.all([
       loadScheduleSettings(), loadLastScheduledRunSteps_(), loadRunLog(), loadFileList(currentFolder),
       loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
-      loadHistoryFolderStatus_(),
+      loadHistoryFolderStatus_(), loadSpreadsheetStatus_(),
       loadBqSettings_(), loadBqMaterializedStatus_(),
       loadJobQueue_(),
       loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_(),
@@ -2096,6 +2096,37 @@
       loadHistoryFolderStatus_();
       document.getElementById('importLatestCandidates').innerHTML = '';
       alert('✅ 已切換歷史資料夾，之後每日抓取／匯入／BigQuery 同步都會用這個資料夾。');
+    }).catch(function (err) { alert(err.message || err); });
+  });
+
+  // ---------- 資料庫 Spreadsheet ----------
+  function loadSpreadsheetStatus_() {
+    return callServer('getSpreadsheetInfo').then(function (info) {
+      var el = document.getElementById('spreadsheetStatus');
+      if (!info.configured) {
+        el.innerHTML = '尚未設定，第一次執行任何功能時會自動建立一個新的資料庫檔案。';
+        return;
+      }
+      if (info.ok) {
+        el.innerHTML = '目前資料庫：<a href="' + info.url + '" target="_blank">' + escapeHtml(info.name) + '</a>';
+        document.getElementById('spreadsheetLink').setAttribute('href', info.url || '#');
+        window.__spreadsheetUrl = info.url;
+      } else {
+        el.innerHTML = '<span style="color:var(--red); font-weight:700;">⚠️ 無法開啟目前設定的資料庫（' +
+          escapeHtml(info.error || '') + '）</span>　請到 Google Drive 找回原本「TWSE 法人動能選股 App 資料庫」' +
+          '檔案，把網址貼到下面表單重新指向。';
+      }
+    }).catch(function (err) { document.getElementById('spreadsheetStatus').innerHTML = errorBox(err); });
+  }
+
+  document.getElementById('spreadsheetIdForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var input = document.getElementById('spreadsheetIdInput').value.trim();
+    if (!input) return;
+    withSpin(callServer('setSpreadsheetId', input)).then(function (info) {
+      document.getElementById('spreadsheetIdInput').value = '';
+      loadSpreadsheetStatus_();
+      alert('✅ 已切換資料庫為「' + info.name + '」，重新整理各頁籤即可看到該檔案裡的資料。');
     }).catch(function (err) { alert(err.message || err); });
   });
 

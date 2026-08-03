@@ -294,6 +294,20 @@
           </div>
 
           <div class="admin-section">
+            <h3>資料庫 Spreadsheet</h3>
+            <div class="meta-bar">
+              History／Reports／Portfolio／AiDiagnosis 這些分頁實際存在哪一個 Google Sheets 檔案裡。
+              正常情況下不需要碰這裡；只有在下面顯示「⚠️ 無法開啟」或戰報／持股資料無故消失時，
+              才需要貼上原本資料庫檔案的網址或 ID 手動復原指向。
+            </div>
+            <div id="spreadsheetStatus" class="meta-bar"></div>
+            <form id="spreadsheetIdForm" class="inline-form">
+              <input type="text" id="spreadsheetIdInput" placeholder="貼上 Google Sheets 網址或 ID">
+              <button type="submit" class="btn-primary">設為資料庫</button>
+            </form>
+          </div>
+
+          <div class="admin-section">
             <h3>BigQuery 用量與預估費用</h3>
             <div class="meta-bar">
               每次呼叫 BigQuery（因子迴歸、external 模式下的歷史查詢等）掃描的位元組數都記在這裡，
