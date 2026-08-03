@@ -445,18 +445,26 @@ function runAnalysisAndSave() {
   var result = runAnalysis();
   // 篩選漏斗一律快取，即使這次連 latestDate 都沒有（scanRows 是空的）——這樣「查看篩選漏斗
   // 明細」在「完全查無資料」的情況下也能立刻顯示原因，不用另外重新讀一次歷史資料。
-  // savedToReport=true 標記這份漏斗統計是「真的存過 Reports 分頁」算出來的，跟
-  // getScreeningDiagnostics() 自己臨時查詢（不會存檔）算出來的漏斗要分清楚——不然使用者
-  // 會看到漏斗顯示「有 N 檔訊號」，回戰報頁卻還是「目前沒有任何戰報」，搞不清楚哪裡出問題
-  // （這份統計其實是另一次「只查不存」的呼叫算出來的，不是這次已經存檔的結果）。
+  if (!result.latestDate) {
+    if (result.diagnostics) {
+      result.diagnostics.savedToReport = false; // 沒有可用資料，根本沒機會嘗試寫入 Reports 分頁
+      cacheScreeningDiagnostics_(result.diagnostics);
+    }
+    return result;
+  }
+
+  var sheet = getReportsSheet_();
+  upsertRowsByDate_(sheet, CONFIG.REPORT_COLUMNS, result.report);
+
+  // savedToReport=true 一定要等 upsertRowsByDate_ 真的跑完（沒有拋例外）才能標記，絕對不能
+  // 在寫入之前就先樂觀地標成 true——之前的寫法是不管寫入結果如何、一律在最前面就標 true 並
+  // 存進快取，萬一 upsertRowsByDate_ 中途失敗（例如試算表暫時性錯誤），快取裡還是會留著
+  // 「已經存檔」這個錯誤訊號，導致「查看篩選漏斗明細」不會跳出「還沒存檔」的警告，使用者
+  // 完全看不出戰報頁其實是空的、也不知道背後那次寫入其實失敗了。
   if (result.diagnostics) {
     result.diagnostics.savedToReport = true;
     cacheScreeningDiagnostics_(result.diagnostics);
   }
-  if (!result.latestDate) return result;
-
-  var sheet = getReportsSheet_();
-  upsertRowsByDate_(sheet, CONFIG.REPORT_COLUMNS, result.report);
 
   try {
     exportReportToDrive_(result.fullReport, result.latestDate);
