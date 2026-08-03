@@ -37,7 +37,8 @@ var CONFIG = {
     MATERIALIZE_JOB_STATE: 'MATERIALIZE_JOB_STATE', // 「立即重新整理」（materialized 模式）背景 job 的目前狀態（見 BigQuerySync.gs）
     BACKTEST_JOB_STATE: 'BACKTEST_JOB_STATE', // 「開始回測歷史戰報」背景 job 的目前狀態（見 Backtest.gs）
     AI_DIAGNOSIS_JOB_STATE: 'AI_DIAGNOSIS_JOB_STATE', // AI 診斷/續抱診斷/Top3 背景 job 的目前狀態（見 AiDiagnosis.gs）
-    SCREENING_STRATEGY: 'SCREENING_STRATEGY' // 目前生效的「新進場訊號」篩選邏輯版本（見 Analysis.gs SCREENING_STRATEGIES）
+    SCREENING_STRATEGY: 'SCREENING_STRATEGY', // 目前生效的「新進場訊號」篩選邏輯版本（見 Analysis.gs SCREENING_STRATEGIES）
+    LAST_SCHEDULED_RUN: 'LAST_SCHEDULED_RUN' // 最近一次「每日自動排程」依序執行的每個步驟起訖時間/狀態（見 DataFetch.gs scheduledDailyFetch）
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，

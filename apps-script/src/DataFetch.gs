@@ -414,6 +414,27 @@ function runManualFetchToday() {
   }
 }
 
+/** 每日排程「最近一次執行」步驟時間軸用：記一筆某個步驟的起訖時間/狀態/摘要進 steps 陣列。
+ *  startedAt 由呼叫端在該步驟開始時先記下 Date.now()，這裡結束時才 push，這樣即使該步驟
+ *  中途拋例外，只要外層有 try/catch 接住還是能正確記到「這步驟花了多久」。 */
+function recordScheduledStep_(steps, label, status, detail, startedAt) {
+  steps.push({ label: label, status: status, detail: detail || '', startedAt: startedAt, endedAt: Date.now() });
+}
+
+/** 供前端「每日自動排程」區塊顯示：最近一次 scheduledDailyFetch() 依序執行的每個步驟
+ *  起訖時間、狀態、摘要——不用只看 RunLog 裡零散的幾筆訊息自己拼湊「到底跑到哪一步、
+ *  卡在哪裡、花了多久」，一次看到完整時間軸。每次執行都會整包覆蓋，只保留最近一次。 */
+function getLastScheduledRunSteps() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveLastScheduledRunSteps_(steps, overallStatus, summary, startedAt) {
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN, JSON.stringify({
+    steps: steps, overallStatus: overallStatus, summary: summary, startedAt: startedAt, endedAt: Date.now()
+  }));
+}
+
 /**
  * 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。
  * 執行順序：
@@ -425,13 +446,17 @@ function runManualFetchToday() {
  *   5. 完成後，跑每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較，見 runDailyAiDiagnosisForTopPicks 的說明）
  * 即使第 2 步有某幾天抓取失敗，仍然照常往下跑 3~5 步、沿用目前既有的歷史資料——理由跟
  * runManualFullUpdate() 一樣：不該因為某一天抓不到就完全沒有戰報可看。
+ * 每個步驟的起訖時間/狀態都會記進 steps，執行完（或中途略過）整包存進
+ * CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN，供「每日自動排程」區塊顯示時間軸。
  */
 function scheduledDailyFetch() {
   var startTime = Date.now();
+  var steps = [];
   var today = new Date();
   var skip = shouldSkipToday_(today);
   if (skip.skip) {
     logRun_('每日排程', '略過', skip.reason, 0);
+    saveLastScheduledRunSteps_(steps, 'skipped', skip.reason, startTime);
     return;
   }
 
@@ -440,6 +465,7 @@ function scheduledDailyFetch() {
 
   // 1. 檢查大表目前最新資料日期，決定要從哪一天開始補抓；抓不到既有最新日期時
   //    （例如全新安裝、或查詢本身失敗）退回只抓「今天」，維持排程不中斷。
+  var step1Start = Date.now();
   var cursor = null;
   try {
     var overview = getHistoryOverview();
@@ -448,14 +474,18 @@ function scheduledDailyFetch() {
       next.setDate(next.getDate() + 1);
       cursor = new Date(next.getFullYear(), next.getMonth(), next.getDate());
     }
+    recordScheduledStep_(steps, '檢查最新資料日期', 'success',
+      overview && overview.max ? '目前最新資料：' + overview.max : '查無既有資料，改抓今天', step1Start);
   } catch (overviewErr) {
     logRun_('每日排程-檢查最新日期', '失敗', String(overviewErr.message || overviewErr), 0);
+    recordScheduledStep_(steps, '檢查最新資料日期', 'failed', String(overviewErr.message || overviewErr), step1Start);
   }
   if (!cursor || cursor > todayOnly) cursor = todayOnly;
 
   // 2. 逐天抓到今天為止（含）。單次執行最多補 MAX_CATCHUP_DAYS 天，避免缺口太大時
   //    觸發器執行時間超過上限；缺口更大時請改用「資料總覽」的「重新抓取/合併此區間」
   //    背景 job（分批續跑、不受單次執行時間限制）。
+  var step2Start = Date.now();
   var MAX_CATCHUP_DAYS = 14;
   var succeeded = [], skipped = [], failed = [], truncated = false, processedDays = 0;
   while (cursor <= todayOnly) {
@@ -472,35 +502,57 @@ function scheduledDailyFetch() {
       '資料缺口超過 ' + MAX_CATCHUP_DAYS + ' 天，本次只補到 ' + (succeeded[succeeded.length - 1] || skipped[skipped.length - 1] || '（無）') +
       '，剩餘天數請用「資料總覽」的「重新抓取/合併此區間」補齊', 0);
   }
+  var backfillSummary = '成功 ' + succeeded.length + ' 天' + (skipped.length ? '、略過 ' + skipped.length + ' 天' : '') +
+    (failed.length ? '、失敗 ' + failed.length + ' 天（' + failed.join('; ') + '）' : '') + (truncated ? '（缺口過大，已截斷）' : '');
+  recordScheduledStep_(steps, '補抓資料', truncated || failed.length ? 'partial' : 'success', backfillSummary, step2Start);
 
   // 3. materialized 模式下，剛寫進去的新資料要先重新整理進 BigQuery 原生表，不然下一步的
   //    分析可能讀到「重新整理間隔還沒到」的舊版本，漏掉剛補上的資料。
+  var step3Start = Date.now();
   try {
     var bqSettings = getBigQuerySettings();
     if (bqSettings.projectId && bqSettings.sourceMode === 'materialized') {
       materializeHistoryTableIfStale_(0);
+      recordScheduledStep_(steps, 'BigQuery整理', 'success', '', step3Start);
+    } else {
+      recordScheduledStep_(steps, 'BigQuery整理', 'skipped', '非 materialized 模式，略過', step3Start);
     }
   } catch (materializeErr) {
     logRun_('每日排程-BigQuery整理', '失敗', String(materializeErr.message || materializeErr), 0);
+    recordScheduledStep_(steps, 'BigQuery整理', 'failed', String(materializeErr.message || materializeErr), step3Start);
   }
 
   // 4. 重新計算戰報
+  var step4Start = Date.now();
   try {
     runAnalysisAndSave();
+    recordScheduledStep_(steps, '重新計算戰報', 'success', '', step4Start);
   } catch (analysisErr) {
     logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);
+    recordScheduledStep_(steps, '重新計算戰報', 'failed', String(analysisErr.message || analysisErr), step4Start);
   }
 
-  // 5. 每日自動 AI 診斷
+  // 5. 每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較）
+  var step5Start = Date.now();
   try {
-    runDailyAiDiagnosisForTopPicks();
+    var aiResult = runDailyAiDiagnosisForTopPicks();
+    if (aiResult.skipped) {
+      recordScheduledStep_(steps, '每日自動 AI 診斷', 'skipped', aiResult.reason, step5Start);
+    } else {
+      var aiDetail = '候選名單深度診斷：' + (aiResult.shortlist.ok ? '成功' : '失敗（' + aiResult.shortlist.error + '）') +
+        '　Top3 橫向比較：' + (aiResult.topPicks.ok ? '成功' : '失敗（' + aiResult.topPicks.error + '）');
+      recordScheduledStep_(steps, '每日自動 AI 診斷', (aiResult.shortlist.ok && aiResult.topPicks.ok) ? 'success' : 'partial', aiDetail, step5Start);
+    }
   } catch (aiErr) {
     logRun_('每日排程-AI診斷', '失敗', String(aiErr.message || aiErr), 0);
+    recordScheduledStep_(steps, '每日自動 AI 診斷', 'failed', String(aiErr.message || aiErr), step5Start);
   }
 
   var dur = Math.round((Date.now() - startTime) / 1000);
   var summary = '成功 ' + succeeded.length + ' 天' + (succeeded.length ? '（' + succeeded.join(', ') + '）' : '');
   if (skipped.length) summary += '、略過 ' + skipped.length + ' 天';
   if (failed.length) summary += '、失敗 ' + failed.length + ' 天（' + failed.join('; ') + '）';
-  logRun_('每日排程', (succeeded.length === 0 && failed.length > 0) ? '失敗' : '成功', summary, dur);
+  var overallStatus = (succeeded.length === 0 && failed.length > 0) ? 'failed' : 'success';
+  logRun_('每日排程', overallStatus === 'failed' ? '失敗' : '成功', summary, dur);
+  saveLastScheduledRunSteps_(steps, overallStatus, summary, startTime);
 }

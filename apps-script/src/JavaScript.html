@@ -1270,7 +1270,7 @@
     populateTimeSelects();
     document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
     return Promise.all([
-      loadScheduleSettings(), loadRunLog(), loadFileList(currentFolder),
+      loadScheduleSettings(), loadLastScheduledRunSteps_(), loadRunLog(), loadFileList(currentFolder),
       loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
       loadHistoryFolderStatus_(),
       loadBqSettings_(), loadBqMaterializedStatus_(),
@@ -1991,6 +1991,35 @@
         : '目前排程：尚未啟用自動排程';
       renderSkipDates(s.skipDates);
     });
+  }
+
+  var SCHEDULED_STEP_STATUS_ICON_ = { success: '✅', partial: '⚠️', failed: '❌', skipped: '⏭️' };
+
+  /** 「每日自動排程」區塊：最近一次 scheduledDailyFetch() 依序執行的每個步驟起訖時間/狀態，
+   *  不用只看 RunLog 裡零散的幾筆訊息自己拼湊「到底跑到哪一步、卡在哪裡、花了多久」。 */
+  function loadLastScheduledRunSteps_() {
+    return callServer('getLastScheduledRunSteps').then(renderLastScheduledRun_)
+      .catch(function (err) { document.getElementById('lastScheduledRun').innerHTML = errorBox(err); });
+  }
+
+  function renderLastScheduledRun_(run) {
+    var el = document.getElementById('lastScheduledRun');
+    if (!run) { el.innerHTML = '<div class="empty-hint">尚未執行過</div>'; return; }
+    var totalSec = Math.round((run.endedAt - run.startedAt) / 1000);
+    var header = '<div class="meta-bar">整體：' + (SCHEDULED_STEP_STATUS_ICON_[run.overallStatus] || '') + ' ' +
+      escapeHtml(run.summary || '') + '　' + new Date(run.startedAt).toLocaleString('zh-TW') + ' ～ ' +
+      new Date(run.endedAt).toLocaleTimeString('zh-TW') + '（共 ' + totalSec + ' 秒）</div>';
+    if (!run.steps || !run.steps.length) { el.innerHTML = header; return; }
+    var stepsHtml = '<div class="md-table-cards">' + run.steps.map(function (s, i) {
+      var sec = Math.round((s.endedAt - s.startedAt) / 1000);
+      return '<div class="md-table-card">' +
+        '<div class="md-table-card-title">' + (i + 1) + '. ' + escapeHtml(s.label) + ' ' + (SCHEDULED_STEP_STATUS_ICON_[s.status] || '') + '</div>' +
+        '<div class="kv-row"><span class="kv-label">時間</span><span class="kv-value">' +
+        new Date(s.startedAt).toLocaleTimeString('zh-TW') + ' ～ ' + new Date(s.endedAt).toLocaleTimeString('zh-TW') + '（' + sec + ' 秒）</span></div>' +
+        (s.detail ? '<div class="kv-row"><span class="kv-label">摘要</span><span class="kv-value">' + escapeHtml(s.detail) + '</span></div>' : '') +
+        '</div>';
+    }).join('') + '</div>';
+    el.innerHTML = header + stepsHtml;
   }
 
   function renderSkipDates(dates) {
