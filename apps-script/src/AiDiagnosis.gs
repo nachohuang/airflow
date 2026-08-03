@@ -300,27 +300,55 @@ function callClaude_(systemPrompt, userPrompt) {
 }
 
 /**
- * Gemini（Generative Language API / Google AI Studio 的 key）呼叫。
- * 有開啟 google_search grounding，讓模型自己也能查即時資訊，不是只靠我們餵的 Goodinfo 摘要。
- * 如果 CONFIG.GEMINI_MODEL 這個模型名稱被 Google 淘汰導致 404，去
- * https://ai.google.dev/gemini-api/docs/models 查目前可用的模型名稱，改 Config.gs 就好。
+ * Gemini（Generative Language API / Google AI Studio 的 key）呼叫，帶重試/降級機制。
+ *
+ * 已知問題：gemini-2.5-flash 開啟 google_search grounding 時，Google API 端偶爾會回傳
+ * finishReason: STOP 但 content 完全沒有 parts、usageMetadata 裡也沒多出任何 token（連思考
+ * token 都沒有）——這是 Google 那邊尚未修好的已知瑕疵（Gemini API 開發者論壇上多筆回報都是
+ * grounding 搭配 2.5 系列模型才會出現），不是我們的 prompt 太長或 maxOutputTokens 不夠。
+ *
+ * 處理方式：最多重試 3 次，前兩次維持開啟 grounding（多數情況下重試就會成功，維持模型能自己
+ * 查即時資訊的能力）；如果連續兩次都是這個「空內容」失敗，第 3 次改成關掉 grounding 再試一次
+ * （拿掉觸發源頭，換取穩定拿到回應）。回傳物件會多一個 groundingDisabled 欄位，前端會在報告
+ * 上標示「本次已停用即時搜尋」，讓使用者知道這次判斷純粹依賴我們餵的官方財報/Goodinfo 資料，
+ * AI 沒有額外查證即時新聞。HTTP 錯誤／API 金鑰錯誤這類跟 grounding 無關的失敗不重試，直接拋出。
  */
 function callGemini_(systemPrompt, userPrompt) {
   var apiKey = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.GEMINI_API_KEY);
   if (!apiKey) throw new Error('尚未設定 Gemini API 金鑰，請先到後台管理輸入。');
 
+  var maxAttempts = 3;
+  var lastError = null;
+  for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+    var useGrounding = attempt < maxAttempts; // 最後一次（第 3 次）才關掉 grounding
+    try {
+      var result = callGeminiOnce_(apiKey, systemPrompt, userPrompt, useGrounding);
+      result.groundingDisabled = !useGrounding;
+      return result;
+    } catch (e) {
+      lastError = e;
+      if (!/回傳格式異常/.test(String(e.message || e))) throw e; // 非「空內容」類型的失敗不重試
+      if (attempt < maxAttempts) Utilities.sleep(1500);
+    }
+  }
+  throw lastError;
+}
+
+function callGeminiOnce_(apiKey, systemPrompt, userPrompt, useGrounding) {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + CONFIG.GEMINI_MODEL +
     ':generateContent?key=' + encodeURIComponent(apiKey);
+
+  var payload = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    generationConfig: { maxOutputTokens: CONFIG.GEMINI_MAX_TOKENS }
+  };
+  if (useGrounding) payload.tools = [{ google_search: {} }];
 
   var resp = UrlFetchApp.fetch(url, {
     method: 'post',
     contentType: 'application/json',
-    payload: JSON.stringify({
-      system_instruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-      tools: [{ google_search: {} }],
-      generationConfig: { maxOutputTokens: CONFIG.GEMINI_MAX_TOKENS }
-    }),
+    payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
 
@@ -333,15 +361,8 @@ function callGemini_(systemPrompt, userPrompt) {
   var candidate = (json.candidates || [])[0];
   if (!candidate || !candidate.content || !candidate.content.parts) {
     var finishReason = candidate && candidate.finishReason;
-    // finishReason 是 STOP、但 content 沒有 parts：最常見的原因是 gemini-2.5-flash 的「思考」
-    // token 跟最終答案共用同一個 maxOutputTokens 額度，prompt 比較長/複雜時思考會把額度用完，
-    // 最終答案是空的——不是安全過濾（那會是 finishReason: SAFETY）也不是真的無回應，
-    // 提高 CONFIG.GEMINI_MAX_TOKENS 通常就能解決，訊息裡直接講清楚，不用每次都貼原始 JSON 來問。
-    var hint = finishReason === 'STOP'
-      ? '（finishReason 是 STOP 但沒有內容，最常見原因是 gemini-2.5-flash 的思考 token 把 ' +
-        'maxOutputTokens 額度用完、留給最終答案的額度是 0，可以到 Config.gs 把 GEMINI_MAX_TOKENS 調高）'
-      : '（finishReason：' + (finishReason || '未知') + '，可能被安全過濾擋下或模型無回應）';
-    throw new Error('Gemini 回傳格式異常' + hint + '：' + body.slice(0, 300));
+    throw new Error('Gemini 回傳格式異常（finishReason：' + (finishReason || '未知') +
+      '，grounding：' + (useGrounding ? '開啟' : '關閉') + '）：' + body.slice(0, 300));
   }
   var text = candidate.content.parts.map(function (p) { return p.text || ''; }).join('');
   var usage = json.usageMetadata || {};
@@ -571,7 +592,7 @@ function runAiDiagnosis(codes) {
       var dur = Math.round((Date.now() - startTime) / 1000);
       logRun_('AI診斷', '成功', code + ' ' + (row['證券名稱'] || '') + ' -> ' + verdict +
         '（約 $' + round_(cost, 4) + '）', dur);
-      results.push({ ok: true, code: code, name: row['證券名稱'], verdict: verdict, text: diagnosisText, cost: round_(cost, 4) });
+      results.push({ ok: true, code: code, name: row['證券名稱'], verdict: verdict, text: diagnosisText, cost: round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
     } catch (e) {
       var dur2 = Math.round((Date.now() - startTime) / 1000);
       logRun_('AI診斷', '失敗', code + '：' + String(e.message || e), dur2);
@@ -721,7 +742,7 @@ function runPortfolioHoldDiagnosis(code) {
     var dur = Math.round((Date.now() - startTime) / 1000);
     logRun_('持股續抱診斷', '成功', code + ' ' + (row['證券名稱'] || '') + ' -> ' + verdict +
       '（約 $' + round_(cost, 4) + '）', dur);
-    return { ok: true, code: code, name: row['證券名稱'], verdict: verdict, text: diagnosisText, cost: round_(cost, 4) };
+    return { ok: true, code: code, name: row['證券名稱'], verdict: verdict, text: diagnosisText, cost: round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled };
   } catch (e) {
     var dur2 = Math.round((Date.now() - startTime) / 1000);
     logRun_('持股續抱診斷', '失敗', code + '：' + String(e.message || e), dur2);
@@ -853,7 +874,7 @@ function runAiShortlist_(count) {
 
     var dur = Math.round((Date.now() - startTime) / 1000);
     logRun_('AI每日候選名單', '成功', '掃描 ' + candidates.length + ' 檔候選（' + latestDate + '），篩出 ' + count + ' 檔，約 $' + round_(cost, 4), dur);
-    return { ok: true, date: latestDate, candidateCount: candidates.length, text: llmResult.text, cost: round_(cost, 4) };
+    return { ok: true, date: latestDate, candidateCount: candidates.length, text: llmResult.text, cost: round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled };
   } catch (e) {
     var dur2 = Math.round((Date.now() - startTime) / 1000);
     logRun_('AI每日候選名單', '失敗', String(e.message || e), dur2);
@@ -1004,7 +1025,7 @@ function runAiTopPicks() {
 
     var dur = Math.round((Date.now() - startTime) / 1000);
     logRun_('AI Top3 推薦', '成功', '掃描 ' + candidates.length + ' 檔候選（' + latestDate + '），約 $' + round_(cost, 4), dur);
-    return { ok: true, date: latestDate, candidateCount: candidates.length, text: llmResult.text, cost: round_(cost, 4) };
+    return { ok: true, date: latestDate, candidateCount: candidates.length, text: llmResult.text, cost: round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled };
   } catch (e) {
     var dur2 = Math.round((Date.now() - startTime) / 1000);
     logRun_('AI Top3 推薦', '失敗', String(e.message || e), dur2);

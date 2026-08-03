@@ -525,7 +525,10 @@
     var btnLabel = entry ? '🔄 重新花費 API 重新分析' : primaryLabel;
     var resultHtml = '';
     if (entry) {
-      resultHtml = renderAiDiagnosisReport_(entry, entry.fresh ? {} : { cacheLabel: '📅 歷史診斷紀錄（' + entry.timestamp + ' 產出）' });
+      var opts = entry.fresh
+        ? (entry.groundingDisabled ? { metaExtra: '⚠️ 這次已停用即時搜尋（Google Search grounding 連續失敗後改用純資料判斷）' } : {})
+        : { cacheLabel: '📅 歷史診斷紀錄（' + entry.timestamp + ' 產出）' };
+      resultHtml = renderAiDiagnosisReport_(entry, opts);
     }
     containerEl.innerHTML =
       '<div class="form-actions"><button type="button" class="' + (entry ? 'btn-secondary' : 'btn-primary') + ' ai-run-btn">' + escapeHtml(btnLabel) + '</button></div>' +
@@ -542,7 +545,7 @@
     containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">⏳ 背景執行 AI 診斷中（要呼叫 ' + providerLabel + ' + 抓 Goodinfo），可以切到別的畫面，不會中斷這個工作，通常十幾秒到一分鐘...</div>';
     withSpin(runFn()).then(function (res) {
       if (!res.ok) { containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(res.error); if (runBtn) runBtn.disabled = false; return; }
-      renderAiDiagnosisSection_(containerEl, primaryLabel, { verdict: res.verdict, text: res.text, cost: res.cost, fresh: true }, runFn);
+      renderAiDiagnosisSection_(containerEl, primaryLabel, { verdict: res.verdict, text: res.text, cost: res.cost, fresh: true, groundingDisabled: res.groundingDisabled }, runFn);
     }).catch(function (err) {
       containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(err);
       if (runBtn) runBtn.disabled = false;
@@ -578,7 +581,11 @@
     var resultHtml = '';
     if (entry) {
       var opts = entry.fresh
-        ? { metaExtra: '掃描 ' + fmtNum(entry.candidateCount, 0) + ' 檔候選（' + entry.date + '）', cost: entry.cost }
+        ? {
+            metaExtra: '掃描 ' + fmtNum(entry.candidateCount, 0) + ' 檔候選（' + entry.date + '）' +
+              (entry.groundingDisabled ? '　⚠️ 已停用即時搜尋' : ''),
+            cost: entry.cost
+          }
         : { cacheLabel: '📅 歷史推薦紀錄（' + entry.timestamp + ' 產出）' };
       resultHtml = renderAiDiagnosisReport_({ text: entry.text, cost: entry.fresh ? entry.cost : undefined }, opts);
     }
@@ -597,7 +604,7 @@
     if (btn) btn.disabled = true;
     containerEl.querySelector('.ai-result-slot').innerHTML = '<div class="loading">⏳ 背景執行 AI 掃描全部候選中（要呼叫 ' + providerLabel + '），可以切到別的畫面，不會中斷這個工作...</div>';
     withSpin(runAiTaskAsJob_('topPicks', null)).then(function (res) {
-      renderTopPicksSection_(containerEl, { text: res.text, cost: res.cost, candidateCount: res.candidateCount, date: res.date, fresh: true });
+      renderTopPicksSection_(containerEl, { text: res.text, cost: res.cost, candidateCount: res.candidateCount, date: res.date, fresh: true, groundingDisabled: res.groundingDisabled });
     }).catch(function (err) {
       containerEl.querySelector('.ai-result-slot').innerHTML = errorBox(err);
       if (btn) btn.disabled = false;
