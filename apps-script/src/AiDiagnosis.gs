@@ -332,7 +332,16 @@ function callGemini_(systemPrompt, userPrompt) {
   var json = JSON.parse(body);
   var candidate = (json.candidates || [])[0];
   if (!candidate || !candidate.content || !candidate.content.parts) {
-    throw new Error('Gemini 回傳格式異常（可能被安全過濾擋下或模型無回應）：' + body.slice(0, 300));
+    var finishReason = candidate && candidate.finishReason;
+    // finishReason 是 STOP、但 content 沒有 parts：最常見的原因是 gemini-2.5-flash 的「思考」
+    // token 跟最終答案共用同一個 maxOutputTokens 額度，prompt 比較長/複雜時思考會把額度用完，
+    // 最終答案是空的——不是安全過濾（那會是 finishReason: SAFETY）也不是真的無回應，
+    // 提高 CONFIG.GEMINI_MAX_TOKENS 通常就能解決，訊息裡直接講清楚，不用每次都貼原始 JSON 來問。
+    var hint = finishReason === 'STOP'
+      ? '（finishReason 是 STOP 但沒有內容，最常見原因是 gemini-2.5-flash 的思考 token 把 ' +
+        'maxOutputTokens 額度用完、留給最終答案的額度是 0，可以到 Config.gs 把 GEMINI_MAX_TOKENS 調高）'
+      : '（finishReason：' + (finishReason || '未知') + '，可能被安全過濾擋下或模型無回應）';
+    throw new Error('Gemini 回傳格式異常' + hint + '：' + body.slice(0, 300));
   }
   var text = candidate.content.parts.map(function (p) { return p.text || ''; }).join('');
   var usage = json.usageMetadata || {};

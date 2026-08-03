@@ -88,7 +88,12 @@ var CONFIG = {
   // 模型名稱 Google 三不五時會更新/淘汰，如果呼叫失敗（HTTP 404）記得去
   // https://ai.google.dev/gemini-api/docs/models 查目前可用的模型名稱換掉。
   GEMINI_MODEL: 'gemini-2.5-flash',
-  GEMINI_MAX_TOKENS: 3000,
+  // gemini-2.5-flash 預設會用「思考」token，這些 token 跟最終答案共用同一個 maxOutputTokens
+  // 額度——prompt 變長/變複雜（例如新增證交所官方財報資料後）会讓模型思考得更多，
+  // 額度不夠時思考會把整個額度用完，最終答案是空的，回應會出現 finishReason: STOP
+  // 但 content 沒有 parts（見 callGemini_ 的錯誤訊息）。3000 對這份診斷 prompt 的輸出格式
+  // （財務表格＋三大流派辯證＋CoVE＋最終決策，本身就要上千字）太緊繃，提高到 8192 留夠空間。
+  GEMINI_MAX_TOKENS: 8192,
 
   // 費用估算用的「參考單價」（USD / 每百萬 tokens）。這些是概略預設值，不是即時公告的官方價格，
   // 一定會跟你實際帳單有落差，請自行到官方頁面核對後在「後台管理」修改：
