@@ -160,293 +160,332 @@
       </section>
 
       <section id="tab-admin" class="tab-panel">
-        <div class="admin-section">
-          <h3>資料庫狀態</h3>
-          <div class="meta-bar">
-            GCP 專案 ID 與資料來源模式（native / external / materialized）：這一組設定同時影響
-            最新戰報、持股燈號、個股分析、回測研究、因子相關性掃描、因子回歸模型全部功能實際
-            從哪裡讀資料，是選用的進階功能，不設定的話維持讀 Drive 月份檔案（native 行為）。
-          </div>
-
-          <form id="bqSettingsForm" class="inline-form">
-            <input type="text" id="bqProjectIdInput" placeholder="GCP 專案 ID（例如 my-project-12345）">
-            <input type="text" id="bqDatasetInput" placeholder="Dataset 名稱（預設 twse_factor_model）">
-            <button type="submit" class="btn-primary">儲存</button>
-          </form>
-          <div id="bqSettingsStatus" class="meta-bar"></div>
-
-          <label style="display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--text-muted); margin:10px 0;">
-            資料來源模式
-            <select id="bqSourceModeSelect">
-              <option value="native">同步進 BigQuery（native，查詢快，需要先匯入成月份檔案）</option>
-              <option value="external">直接讀 Drive 檔案（external，免匯入，查詢較慢，欄位順序要跟系統一致）</option>
-              <option value="materialized">自動整理進 BigQuery（materialized，推薦：免匯入＋查詢快＋用欄名比對）</option>
-            </select>
-          </label>
-          <div class="meta-bar">
-            <b>external（即時讀取）</b>：不用先匯入，執行任何一項查詢前都會自動把 BigQuery 外部資料表
-            重新指向歷史資料夾裡「目前所有」CSV 檔案，Apps Script 完全不會讀取檔案內容。
-            <b>缺點：</b>每次查詢都要即時讀 Drive，比較慢；且用「欄位順序」對應 schema，
-            如果 Drive 上 CSV 的實際欄位順序跟系統不一樣，資料會整個對錯欄卻不會報錯。
-          </div>
-          <div class="meta-bar">
-            <b>materialized（推薦）</b>：一樣不用匯入，但改用「欄位名稱」對應（BigQuery 自動辨識 CSV
-            標題列文字當欄名，不管來源檔案欄位順序如何都不影響，對不上名字會直接報錯，不會靜默算錯）。
-            執行查詢前只有「超過設定的重新整理間隔（預設 6 小時）沒整理過」才會真的重新整理一次
-            （複製資料進 BigQuery 原生表），其餘時候直接沿用，速度接近 native 模式；每天排程抓完
-            當天資料後也會自動強制重新整理一次，正常情況下完全不用手動按任何按鈕。
-          </div>
-          <div id="bqMaterializedStatus" class="meta-bar"></div>
-
-          <div class="form-actions" style="margin-top:10px;">
-            <button type="button" id="bqSyncBtn" class="btn-secondary">同步歷史資料到 BigQuery（native 模式用）</button>
-            <button type="button" id="bqRepointBtn" class="btn-secondary">重新整理外部資料表（external 模式用）</button>
-            <button type="button" id="bqMaterializeBtn" class="btn-secondary">立即重新整理（materialized 模式用）</button>
-          </div>
-          <div id="bqDbActionResult"></div>
+        <div class="sub-tabs">
+          <button type="button" class="sub-tab-btn active" data-target="subtab-schedule">⏱️ 排程與監控</button>
+          <button type="button" class="sub-tab-btn" data-target="subtab-database">🗂️ 資料庫與模式</button>
+          <button type="button" class="sub-tab-btn" data-target="subtab-datafix">🛠️ 資料修復與工具</button>
+          <button type="button" class="sub-tab-btn" data-target="subtab-sysconfig">🔑 系統與 AI 設定</button>
         </div>
 
-        <div class="admin-section">
-          <h3>排程佇列</h3>
-          <div class="meta-bar">
-            這裡的四種背景工作（重新計算戰報／資料範圍重新彙整／因子迴歸模型／立即重新整理）
-            都是排時間觸發器在背景執行，不管在哪個分頁、哪台裝置觸發的都看得到目前狀態；卡在
-            「執行中」太久或變成「錯誤」，可以直接在這裡重新啟動，不用回到各自的頁籤重新操作一次。
-          </div>
-          <div class="form-actions">
-            <button type="button" id="jobQueueRefreshBtn" class="btn-secondary">重新整理</button>
-            <button type="button" id="stopAllJobsBtn" class="btn-danger">🛑 強制清空所有背景工作</button>
-          </div>
-          <div id="stopAllJobsResult" style="margin-top:6px;"></div>
-          <div id="jobQueueList" class="card-list"></div>
-        </div>
-
-        <div class="admin-section">
-          <h3>疑難排解</h3>
-          <div class="meta-bar">
-            「戰報與個股」頁面顯示的內容，就是直接讀 Reports 分頁目前的實際內容——如果按下去
-            顯示有資料，但戰報頁還是顯示「目前還沒有任何戰報」，代表問題在前端那一段；如果這裡
-            也是 0 列，代表問題出在「重新計算戰報」寫入這一段。「測試伺服器連線」是最單純的
-            google.script.run 往返測試，不碰任何試算表/BigQuery；「列出已註冊的觸發器」可以
-            看有沒有預期外堆積的孤兒觸發器（例如已經不存在的函式名稱、或同一個工作被重複註冊）。
-          </div>
-          <div class="form-actions">
-            <button type="button" id="reportsDebugBtn" class="btn-secondary">檢查 Reports 分頁實際內容</button>
-            <button type="button" id="pingServerBtn" class="btn-secondary">測試伺服器連線</button>
-            <button type="button" id="listTriggersBtn" class="btn-secondary">列出已註冊的觸發器</button>
-          </div>
-          <div id="reportsDebugResult"></div>
-          <div id="pingServerResult" style="margin-top:10px;"></div>
-          <div id="listTriggersResult" style="margin-top:10px;"></div>
-        </div>
-
-        <div class="admin-section">
-          <h3>資料總覽</h3>
-          <div class="meta-bar">目前資料來源模式下的歷史資料範圍。</div>
-          <div class="form-actions">
-            <button type="button" id="overviewRefreshBtn" class="btn-secondary">重新整理統計</button>
-            <button type="button" id="stockIdQualityBtn" class="btn-secondary">檢查股票代號格式</button>
-            <button type="button" id="malformedDateCheckBtn" class="btn-secondary">檢查日期格式</button>
-          </div>
-          <div id="historyOverviewResult"></div>
-          <div id="stockIdQualityResult" style="margin-top:10px;"></div>
-          <div id="malformedDateResult" style="margin-top:10px;"></div>
-        </div>
-
-        <div class="admin-section">
-          <h3>BigQuery 用量與預估費用</h3>
-          <div class="meta-bar">
-            每次呼叫 BigQuery（因子迴歸、external 模式下的歷史查詢等）掃描的位元組數都記在這裡，
-            費用是用下面的「參考單價」概算出來的，不是 Google Cloud 官方帳單金額，也沒有扣掉每月
-            前 1TB 的免費額度，正常使用量下這裡估的費用通常會比實際帳單（$0）高，只供看掃描量趨勢用，
-            正確費用請以 Google Cloud 帳單為準。
-          </div>
-          <div id="bqUsageSummary" class="meta-bar"></div>
-          <div id="bqUsageTable"></div>
-
-          <form id="bqPricingForm" class="form-card" style="margin-top:10px;">
-            <h4 style="margin:0 0 4px 0;">參考單價（USD / TB 掃描量）</h4>
-            <label>單價 <input id="bqPricePerTb" type="number" step="0.01"></label>
-            <div class="form-actions">
-              <button type="submit" class="btn-primary">儲存單價</button>
-            </div>
-          </form>
-        </div>
-
-        <div class="admin-section">
-          <h3>手動抓取 / 重新彙整區間</h3>
-          <div class="meta-bar">
-            選定日期區間，重新向證交所抓取並覆蓋該區間的資料（適合補救某幾天抓取失敗或資料異常的情況，
-            也可以用來手動補一段區間而不用等每日排程）。區間內遇到「六日不執行」或「臨時停跑日」設定的
-            日期，跟每日排程一樣會自動跳過。
-          </div>
-          <form id="remergeForm" class="form-card">
-            <label>起始日 <input id="remergeStart" type="date" required></label>
-            <label>結束日 <input id="remergeEnd" type="date" required></label>
-            <div class="form-actions">
-              <button type="submit" class="btn-primary">重新抓取 / 合併此區間</button>
-            </div>
-          </form>
-          <div id="remergeResult"></div>
-        </div>
-
-        <div class="admin-section">
-          <h3>每日自動排程</h3>
-          <form id="scheduleForm" class="form-card" style="margin-bottom:0;">
-            <label>啟動時間
-              <div class="time-row">
-                <select id="schHour"></select> <span>:</span> <select id="schMinute"></select>
+        <div id="subtab-schedule" class="sub-tab-panel active">
+          <div class="admin-section">
+            <h3>每日自動排程</h3>
+            <form id="scheduleForm" class="form-card" style="margin-bottom:0;">
+              <label>啟動時間
+                <div class="time-row">
+                  <select id="schHour"></select> <span>:</span> <select id="schMinute"></select>
+                </div>
+              </label>
+              <label class="checkbox-row"><input type="checkbox" id="schSkipWeekend"> 六日不執行</label>
+              <div class="form-actions">
+                <button type="submit" class="btn-primary">儲存排程</button>
+                <button type="button" id="schDisableBtn" class="btn-secondary">停用自動排程</button>
               </div>
+            </form>
+            <div id="scheduleStatus" class="meta-bar"></div>
+
+            <h4>📋 預計執行步驟（依序）</h4>
+            <div class="md-table-cards">
+              <div class="md-table-card">
+                <div class="md-table-card-title">1. 檢查最新資料日期</div>
+                確認資料庫目前抓到哪一天，決定要從哪天開始補抓。
+              </div>
+              <div class="md-table-card">
+                <div class="md-table-card-title">2. 補抓資料</div>
+                向證交所逐日抓取三大法人買賣超、收盤價等資料，寫入資料庫（Drive 月份 CSV 或 BigQuery，視資料來源模式而定）。
+              </div>
+              <div class="md-table-card">
+                <div class="md-table-card-title">3. BigQuery 整理</div>
+                materialized 模式下，把剛寫入的新資料重新整理進 BigQuery 原生表；其他模式略過這步。
+              </div>
+              <div class="md-table-card">
+                <div class="md-table-card-title">4. 重新計算戰報</div>
+                用最新資料重新計算量化因子與 Armor_Score，產出當日戰報。
+              </div>
+              <div class="md-table-card">
+                <div class="md-table-card-title">5. 每日自動 AI 診斷</div>
+                候選名單深度診斷＋Top3 橫向比較（需開啟下面「AI 與系統」分頁的「每日排程自動產生 AI 診斷」）。
+              </div>
+            </div>
+
+            <h4>最近一次排程執行</h4>
+            <div id="lastScheduledRun"></div>
+
+            <h4>臨時停跑日（例如颱風假）</h4>
+            <form id="skipDateForm" class="inline-form">
+              <input type="date" id="skipDateInput" required>
+              <input type="text" id="skipDateReason" placeholder="原因（選填）">
+              <button type="submit" class="btn-secondary">新增</button>
+            </form>
+            <div id="skipDateList" class="chip-list"></div>
+
+            <div class="form-actions">
+              <button type="button" id="manualRunBtn" class="btn-primary">🚀 立即測試執行（抓今日資料＋重跑分析）</button>
+            </div>
+            <div id="manualRunResult"></div>
+          </div>
+
+          <div class="admin-section">
+            <h3>排程佇列</h3>
+            <div class="meta-bar">
+              這裡的背景工作（重新計算戰報／資料範圍重新彙整／因子迴歸模型／立即重新整理／v17.0 策略回測／
+              AI 診斷）都是排時間觸發器在背景執行，不管在哪個分頁、哪台裝置觸發的都看得到目前狀態；卡在
+              「執行中」太久或變成「錯誤」，可以直接在這裡重新啟動，不用回到各自的頁籤重新操作一次。
+            </div>
+            <div class="form-actions">
+              <button type="button" id="jobQueueRefreshBtn" class="btn-secondary">重新整理</button>
+              <button type="button" id="stopAllJobsBtn" class="btn-danger">🛑 強制清空所有背景工作</button>
+            </div>
+            <div id="stopAllJobsResult" style="margin-top:6px;"></div>
+            <div id="jobQueueList" class="card-list"></div>
+          </div>
+
+          <div class="admin-section">
+            <h3>執行紀錄</h3>
+            <div id="runLogList" class="log-list"></div>
+          </div>
+        </div>
+
+        <div id="subtab-database" class="sub-tab-panel">
+          <div class="admin-section">
+            <h3>資料庫狀態</h3>
+            <div class="meta-bar">
+              GCP 專案 ID 與資料來源模式（native / external / materialized）：這一組設定同時影響
+              最新戰報、持股燈號、個股分析、回測研究、因子相關性掃描、因子回歸模型全部功能實際
+              從哪裡讀資料，是選用的進階功能，不設定的話維持讀 Drive 月份檔案（native 行為）。
+            </div>
+
+            <form id="bqSettingsForm" class="inline-form">
+              <input type="text" id="bqProjectIdInput" placeholder="GCP 專案 ID（例如 my-project-12345）">
+              <input type="text" id="bqDatasetInput" placeholder="Dataset 名稱（預設 twse_factor_model）">
+              <button type="submit" class="btn-primary">儲存</button>
+            </form>
+            <div id="bqSettingsStatus" class="meta-bar"></div>
+
+            <label style="display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--text-muted); margin:10px 0;">
+              資料來源模式
+              <select id="bqSourceModeSelect">
+                <option value="native">同步進 BigQuery（native，查詢快，需要先匯入成月份檔案）</option>
+                <option value="external">直接讀 Drive 檔案（external，免匯入，查詢較慢，欄位順序要跟系統一致）</option>
+                <option value="materialized">自動整理進 BigQuery（materialized，推薦：免匯入＋查詢快＋用欄名比對）</option>
+              </select>
             </label>
-            <label class="checkbox-row"><input type="checkbox" id="schSkipWeekend"> 六日不執行</label>
-            <div class="form-actions">
-              <button type="submit" class="btn-primary">儲存排程</button>
-              <button type="button" id="schDisableBtn" class="btn-secondary">停用自動排程</button>
+            <div class="meta-bar">
+              <b>external（即時讀取）</b>：不用先匯入，執行任何一項查詢前都會自動把 BigQuery 外部資料表
+              重新指向歷史資料夾裡「目前所有」CSV 檔案，Apps Script 完全不會讀取檔案內容。
+              <b>缺點：</b>每次查詢都要即時讀 Drive，比較慢；且用「欄位順序」對應 schema，
+              如果 Drive 上 CSV 的實際欄位順序跟系統不一樣，資料會整個對錯欄卻不會報錯。
             </div>
-          </form>
-          <div id="scheduleStatus" class="meta-bar"></div>
+            <div class="meta-bar">
+              <b>materialized（推薦）</b>：一樣不用匯入，但改用「欄位名稱」對應（BigQuery 自動辨識 CSV
+              標題列文字當欄名，不管來源檔案欄位順序如何都不影響，對不上名字會直接報錯，不會靜默算錯）。
+              執行查詢前只有「超過設定的重新整理間隔（預設 6 小時）沒整理過」才會真的重新整理一次
+              （複製資料進 BigQuery 原生表），其餘時候直接沿用，速度接近 native 模式；每天排程抓完
+              當天資料後也會自動強制重新整理一次，正常情況下完全不用手動按任何按鈕。
+            </div>
+            <div id="bqMaterializedStatus" class="meta-bar"></div>
 
-          <h4>最近一次排程執行</h4>
-          <div id="lastScheduledRun"></div>
-
-          <h4>臨時停跑日（例如颱風假）</h4>
-          <form id="skipDateForm" class="inline-form">
-            <input type="date" id="skipDateInput" required>
-            <input type="text" id="skipDateReason" placeholder="原因（選填）">
-            <button type="submit" class="btn-secondary">新增</button>
-          </form>
-          <div id="skipDateList" class="chip-list"></div>
-
-          <div class="form-actions">
-            <button type="button" id="manualRunBtn" class="btn-primary">立即測試執行（抓今日資料＋重跑分析）</button>
+            <div class="form-actions" style="margin-top:10px;">
+              <button type="button" id="bqSyncBtn" class="btn-secondary">同步歷史資料到 BigQuery（native 模式用）</button>
+              <button type="button" id="bqRepointBtn" class="btn-secondary">重新整理外部資料表（external 模式用）</button>
+              <button type="button" id="bqMaterializeBtn" class="btn-secondary">立即重新整理（materialized 模式用）</button>
+            </div>
+            <div id="bqDbActionResult"></div>
           </div>
-          <div id="manualRunResult"></div>
+
+          <div class="admin-section">
+            <h3>BigQuery 用量與預估費用</h3>
+            <div class="meta-bar">
+              每次呼叫 BigQuery（因子迴歸、external 模式下的歷史查詢等）掃描的位元組數都記在這裡，
+              費用是用下面的「參考單價」概算出來的，不是 Google Cloud 官方帳單金額，也沒有扣掉每月
+              前 1TB 的免費額度，正常使用量下這裡估的費用通常會比實際帳單（$0）高，只供看掃描量趨勢用，
+              正確費用請以 Google Cloud 帳單為準。
+            </div>
+            <div id="bqUsageSummary" class="meta-bar"></div>
+            <div id="bqUsageTable"></div>
+
+            <form id="bqPricingForm" class="form-card" style="margin-top:10px;">
+              <h4 style="margin:0 0 4px 0;">參考單價（USD / TB 掃描量）</h4>
+              <label>單價 <input id="bqPricePerTb" type="number" step="0.01"></label>
+              <div class="form-actions">
+                <button type="submit" class="btn-primary">儲存單價</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="admin-section">
+            <h3>歷史資料夾</h3>
+            <div class="meta-bar">
+              每天自動抓取、資料範圍重新彙整、下面的匯入功能，都是讀寫這個 Drive 資料夾裡「每月一份」的
+              ALL_COMBINED CSV。換成別的資料夾之後，這裡跟 BigQuery 同步都會改抓新資料夾。
+            </div>
+            <div id="historyFolderStatus" class="meta-bar"></div>
+            <form id="historyFolderForm" class="inline-form">
+              <input type="text" id="historyFolderIdInput" placeholder="貼上 Drive 資料夾連結或 ID">
+              <button type="submit" class="btn-primary">設為歷史資料夾</button>
+            </form>
+          </div>
         </div>
 
-        <div class="admin-section">
-          <h3>歷史資料夾</h3>
-          <div class="meta-bar">
-            每天自動抓取、資料範圍重新彙整、下面的匯入功能，都是讀寫這個 Drive 資料夾裡「每月一份」的
-            ALL_COMBINED CSV。換成別的資料夾之後，這裡跟 BigQuery 同步都會改抓新資料夾。
+        <div id="subtab-datafix" class="sub-tab-panel">
+          <div class="admin-section">
+            <h3>疑難排解</h3>
+            <div class="meta-bar">
+              「戰報與個股」頁面顯示的內容，就是直接讀 Reports 分頁目前的實際內容——如果按下去
+              顯示有資料，但戰報頁還是顯示「目前還沒有任何戰報」，代表問題在前端那一段；如果這裡
+              也是 0 列，代表問題出在「重新計算戰報」寫入這一段。「測試伺服器連線」是最單純的
+              google.script.run 往返測試，不碰任何試算表/BigQuery；「列出已註冊的觸發器」可以
+              看有沒有預期外堆積的孤兒觸發器（例如已經不存在的函式名稱、或同一個工作被重複註冊）。
+            </div>
+            <div class="form-actions">
+              <button type="button" id="reportsDebugBtn" class="btn-secondary">檢查 Reports 分頁實際內容</button>
+              <button type="button" id="pingServerBtn" class="btn-secondary">測試伺服器連線</button>
+              <button type="button" id="listTriggersBtn" class="btn-secondary">列出已註冊的觸發器</button>
+            </div>
+            <div id="reportsDebugResult"></div>
+            <div id="pingServerResult" style="margin-top:10px;"></div>
+            <div id="listTriggersResult" style="margin-top:10px;"></div>
           </div>
-          <div id="historyFolderStatus" class="meta-bar"></div>
-          <form id="historyFolderForm" class="inline-form">
-            <input type="text" id="historyFolderIdInput" placeholder="貼上 Drive 資料夾連結或 ID">
-            <button type="submit" class="btn-primary">設為歷史資料夾</button>
-          </form>
+
+          <div class="admin-section">
+            <h3>資料總覽</h3>
+            <div class="meta-bar">目前資料來源模式下的歷史資料範圍。</div>
+            <div class="form-actions">
+              <button type="button" id="overviewRefreshBtn" class="btn-secondary">重新整理統計</button>
+              <button type="button" id="stockIdQualityBtn" class="btn-secondary">檢查股票代號格式</button>
+              <button type="button" id="malformedDateCheckBtn" class="btn-secondary">檢查日期格式</button>
+            </div>
+            <div id="historyOverviewResult"></div>
+            <div id="stockIdQualityResult" style="margin-top:10px;"></div>
+            <div id="malformedDateResult" style="margin-top:10px;"></div>
+          </div>
+
+          <div class="admin-section">
+            <h3>手動抓取 / 重新彙整區間</h3>
+            <div class="meta-bar">
+              選定日期區間，重新向證交所抓取並覆蓋該區間的資料（適合補救某幾天抓取失敗或資料異常的情況，
+              也可以用來手動補一段區間而不用等每日排程）。區間內遇到「六日不執行」或「臨時停跑日」設定的
+              日期，跟每日排程一樣會自動跳過。
+            </div>
+            <form id="remergeForm" class="form-card">
+              <label>起始日 <input id="remergeStart" type="date" required></label>
+              <label>結束日 <input id="remergeEnd" type="date" required></label>
+              <div class="form-actions">
+                <button type="submit" class="btn-primary">重新抓取 / 合併此區間</button>
+              </div>
+            </form>
+            <div id="remergeResult"></div>
+          </div>
+
+          <div class="admin-section">
+            <h3>匯入既有彙整表</h3>
+            <div class="meta-bar">
+              如果你已經有先前累積的彙整表（例如原本 Colab 產出的 ALL_COMBINED.csv），
+              匯入後就會以它為基礎繼續往後疊加，不用重新一天一天補抓。支援 CSV 或 Google 試算表，不支援 .xlsx。
+            </div>
+
+            <form id="importUploadForm" class="inline-form">
+              <input type="file" id="importUploadInput" accept=".csv,text/csv" required>
+              <button type="submit" class="btn-primary">直接上傳 CSV 並匯入</button>
+            </form>
+
+            <div class="meta-bar" style="margin-top:10px;">或者，如果檔案已經在 Google Drive 上：</div>
+            <form id="importHistoryForm" class="inline-form">
+              <input type="text" id="importFileInput" placeholder="貼上 Drive 連結或檔案 ID">
+              <button type="submit" class="btn-secondary">用 Drive 連結匯入</button>
+            </form>
+
+            <div class="meta-bar" style="margin-top:10px;">
+              或者，資料夾裡有好幾個候選檔案，讓系統自動挑「日期最新」的那個（優先看檔名裡的日期，
+              抓不到才用 Drive 最後修改時間）匯入：
+            </div>
+            <div class="form-actions">
+              <button type="button" id="importLatestBtn" class="btn-secondary">列出歷史資料夾裡的檔案</button>
+            </div>
+            <div id="importLatestCandidates"></div>
+
+            <div id="importHistoryResult"></div>
+          </div>
         </div>
 
-        <div class="admin-section">
-          <h3>匯入既有彙整表</h3>
-          <div class="meta-bar">
-            如果你已經有先前累積的彙整表（例如原本 Colab 產出的 ALL_COMBINED.csv），
-            匯入後就會以它為基礎繼續往後疊加，不用重新一天一天補抓。支援 CSV 或 Google 試算表，不支援 .xlsx。
-          </div>
+        <div id="subtab-sysconfig" class="sub-tab-panel">
+          <div class="admin-section">
+            <h3>AI 深度診斷設定</h3>
+            <div class="meta-bar">
+              對戰報裡的個股呼叫 AI 做財報/籌碼/技術面的第二層深度診斷。可以選 Claude 或 Gemini，
+              兩邊都設定金鑰的話可以隨時切換比較。每次診斷會產生實際 API 費用
+              （Claude 沒有免費額度；Gemini 透過 Google AI Studio 申請的 key 通常有免費額度）。
+            </div>
 
-          <form id="importUploadForm" class="inline-form">
-            <input type="file" id="importUploadInput" accept=".csv,text/csv" required>
-            <button type="submit" class="btn-primary">直接上傳 CSV 並匯入</button>
-          </form>
-
-          <div class="meta-bar" style="margin-top:10px;">或者，如果檔案已經在 Google Drive 上：</div>
-          <form id="importHistoryForm" class="inline-form">
-            <input type="text" id="importFileInput" placeholder="貼上 Drive 連結或檔案 ID">
-            <button type="submit" class="btn-secondary">用 Drive 連結匯入</button>
-          </form>
-
-          <div class="meta-bar" style="margin-top:10px;">
-            或者，資料夾裡有好幾個候選檔案，讓系統自動挑「日期最新」的那個（優先看檔名裡的日期，
-            抓不到才用 Drive 最後修改時間）匯入：
-          </div>
-          <div class="form-actions">
-            <button type="button" id="importLatestBtn" class="btn-secondary">列出歷史資料夾裡的檔案</button>
-          </div>
-          <div id="importLatestCandidates"></div>
-
-          <div id="importHistoryResult"></div>
-        </div>
-
-        <div class="admin-section">
-          <h3>AI 深度診斷設定</h3>
-          <div class="meta-bar">
-            對戰報裡的個股呼叫 AI 做財報/籌碼/技術面的第二層深度診斷。可以選 Claude 或 Gemini，
-            兩邊都設定金鑰的話可以隨時切換比較。每次診斷會產生實際 API 費用
-            （Claude 沒有免費額度；Gemini 透過 Google AI Studio 申請的 key 通常有免費額度）。
-          </div>
-
-          <label style="display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--text-muted); margin-bottom:10px;">
-            目前使用的 AI
-            <select id="aiProviderSelect">
-              <option value="claude">Claude（Anthropic）</option>
-              <option value="gemini">Gemini（Google，含即時搜尋）</option>
-            </select>
-          </label>
-
-          <div class="meta-bar">Claude API 金鑰</div>
-          <form id="aiKeyForm" class="inline-form">
-            <input type="password" id="aiKeyInput" placeholder="貼上 Anthropic API 金鑰（sk-ant-...）">
-            <button type="submit" class="btn-primary">儲存</button>
-          </form>
-          <div id="aiKeyStatus" class="meta-bar"></div>
-
-          <div class="meta-bar" style="margin-top:10px;">Gemini API 金鑰（去 aistudio.google.com/apikey 申請）</div>
-          <form id="geminiKeyForm" class="inline-form">
-            <input type="password" id="geminiKeyInput" placeholder="貼上 Gemini API 金鑰（AIza...）">
-            <button type="submit" class="btn-primary">儲存</button>
-          </form>
-          <div id="geminiKeyStatus" class="meta-bar"></div>
-
-          <form id="aiDailyForm" class="form-card" style="margin-top:10px;">
-            <label class="checkbox-row"><input type="checkbox" id="aiDailyEnabled"> 每日排程自動產生 AI 診斷（含候選名單深度診斷＋Top3 橫向比較）</label>
-            <label>每日候選名單大小（AI 先橫向比較篩選，全部再逐檔深度診斷；Top3 橫向比較固定跑，不受這個數字影響）
-              <input id="aiDailyTopN" type="number" min="3" max="10" value="5">
+            <label style="display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--text-muted); margin-bottom:10px;">
+              目前使用的 AI
+              <select id="aiProviderSelect">
+                <option value="claude">Claude（Anthropic）</option>
+                <option value="gemini">Gemini（Google，含即時搜尋）</option>
+              </select>
             </label>
-            <div class="form-actions">
-              <button type="submit" class="btn-primary">儲存設定</button>
-            </div>
-          </form>
-        </div>
 
-        <div class="admin-section">
-          <h3>AI 使用量與預估費用</h3>
-          <div class="meta-bar">
-            費用是用下面的「參考單價」概算出來的，不是 Anthropic / Google 官方帳單金額，
-            正確費用請以你各自帳號後台的用量頁面為準；單價不對可以自己改，改完估算才會準。
+            <div class="meta-bar">Claude API 金鑰</div>
+            <form id="aiKeyForm" class="inline-form">
+              <input type="password" id="aiKeyInput" placeholder="貼上 Anthropic API 金鑰（sk-ant-...）">
+              <button type="submit" class="btn-primary">儲存</button>
+            </form>
+            <div id="aiKeyStatus" class="meta-bar"></div>
+
+            <div class="meta-bar" style="margin-top:10px;">Gemini API 金鑰（去 aistudio.google.com/apikey 申請）</div>
+            <form id="geminiKeyForm" class="inline-form">
+              <input type="password" id="geminiKeyInput" placeholder="貼上 Gemini API 金鑰（AIza...）">
+              <button type="submit" class="btn-primary">儲存</button>
+            </form>
+            <div id="geminiKeyStatus" class="meta-bar"></div>
+
+            <form id="aiDailyForm" class="form-card" style="margin-top:10px;">
+              <label class="checkbox-row"><input type="checkbox" id="aiDailyEnabled"> 每日排程自動產生 AI 診斷（含候選名單深度診斷＋Top3 橫向比較）</label>
+              <label>每日候選名單大小（AI 先橫向比較篩選，全部再逐檔深度診斷；Top3 橫向比較固定跑，不受這個數字影響）
+                <input id="aiDailyTopN" type="number" min="3" max="10" value="5">
+              </label>
+              <div class="form-actions">
+                <button type="submit" class="btn-primary">儲存設定</button>
+              </div>
+            </form>
           </div>
-          <div id="aiUsageSummary" class="meta-bar"></div>
-          <div id="aiUsageTable"></div>
 
-          <form id="aiPricingForm" class="form-card" style="margin-top:10px;">
-            <h4 style="margin:0 0 4px 0;">參考單價（USD / 每百萬 tokens）</h4>
-            <label>Claude 輸入 <input id="priceClaudeIn" type="number" step="0.01"></label>
-            <label>Claude 輸出 <input id="priceClaudeOut" type="number" step="0.01"></label>
-            <label>Gemini 輸入 <input id="priceGeminiIn" type="number" step="0.01"></label>
-            <label>Gemini 輸出 <input id="priceGeminiOut" type="number" step="0.01"></label>
-            <div class="form-actions">
-              <button type="submit" class="btn-primary">儲存單價</button>
+          <div class="admin-section">
+            <h3>AI 使用量與預估費用</h3>
+            <div class="meta-bar">
+              費用是用下面的「參考單價」概算出來的，不是 Anthropic / Google 官方帳單金額，
+              正確費用請以你各自帳號後台的用量頁面為準；單價不對可以自己改，改完估算才會準。
             </div>
-          </form>
-        </div>
+            <div id="aiUsageSummary" class="meta-bar"></div>
+            <div id="aiUsageTable"></div>
 
-        <div class="admin-section">
-          <h3>執行紀錄</h3>
-          <div id="runLogList" class="log-list"></div>
-        </div>
-
-        <div class="admin-section">
-          <h3>檔案管理</h3>
-          <div class="folder-tabs">
-            <button class="folder-tab-btn active" data-folder="archive">歷史資料</button>
-            <button class="folder-tab-btn" data-folder="reports">每日戰報</button>
-            <button class="folder-tab-btn" data-folder="regression">回測/研究</button>
+            <form id="aiPricingForm" class="form-card" style="margin-top:10px;">
+              <h4 style="margin:0 0 4px 0;">參考單價（USD / 每百萬 tokens）</h4>
+              <label>Claude 輸入 <input id="priceClaudeIn" type="number" step="0.01"></label>
+              <label>Claude 輸出 <input id="priceClaudeOut" type="number" step="0.01"></label>
+              <label>Gemini 輸入 <input id="priceGeminiIn" type="number" step="0.01"></label>
+              <label>Gemini 輸出 <input id="priceGeminiOut" type="number" step="0.01"></label>
+              <div class="form-actions">
+                <button type="submit" class="btn-primary">儲存單價</button>
+              </div>
+            </form>
           </div>
-          <div class="meta-bar">「歷史資料」放的是舊有的每月一份 ALL_COMBINED CSV 檔案。如果有設定 BigQuery 專案，每天自動抓取／補抓的新資料現在會直接寫進 BigQuery（不會再更新這裡的月份檔案）；沒有設定 BigQuery 才會繼續更新這裡的月份檔案。</div>
-          <div id="fileList" class="file-list"></div>
-        </div>
 
-        <div class="admin-section">
-          <div><a id="spreadsheetLink" href="#">在 Google Sheets 開啟資料庫</a></div>
-          <div style="margin-top:6px;"><a id="historyFolderLink" href="#">在 Google Drive 開啟歷史資料資料夾</a></div>
+          <div class="admin-section">
+            <h3>檔案管理</h3>
+            <div class="folder-tabs">
+              <button class="folder-tab-btn active" data-folder="archive">歷史資料</button>
+              <button class="folder-tab-btn" data-folder="reports">每日戰報</button>
+              <button class="folder-tab-btn" data-folder="regression">回測/研究</button>
+            </div>
+            <div class="meta-bar">「歷史資料」放的是舊有的每月一份 ALL_COMBINED CSV 檔案。如果有設定 BigQuery 專案，每天自動抓取／補抓的新資料現在會直接寫進 BigQuery（不會再更新這裡的月份檔案）；沒有設定 BigQuery 才會繼續更新這裡的月份檔案。</div>
+            <div id="fileList" class="file-list"></div>
+          </div>
+
+          <div class="admin-section">
+            <div><a id="spreadsheetLink" href="#">在 Google Sheets 開啟資料庫</a></div>
+            <div style="margin-top:6px;"><a id="historyFolderLink" href="#">在 Google Drive 開啟歷史資料資料夾</a></div>
+          </div>
         </div>
       </section>
 

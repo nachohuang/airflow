@@ -263,7 +263,7 @@ function backfillOneDay_(cur, settings) {
   try {
     var rows = fetchAndMergeOneDay_(ymd, slash);
     upsertHistoryRows_(rows);
-    return { kind: 'succeeded', date: ymd };
+    return { kind: 'succeeded', date: ymd, rowCount: rows.length };
   } catch (e) {
     return { kind: 'failed', date: ymd, error: String(e.message || e) };
   }
@@ -487,11 +487,11 @@ function scheduledDailyFetch() {
   //    背景 job（分批續跑、不受單次執行時間限制）。
   var step2Start = Date.now();
   var MAX_CATCHUP_DAYS = 14;
-  var succeeded = [], skipped = [], failed = [], truncated = false, processedDays = 0;
+  var succeeded = [], skipped = [], failed = [], truncated = false, processedDays = 0, totalRowCount = 0;
   while (cursor <= todayOnly) {
     if (processedDays >= MAX_CATCHUP_DAYS) { truncated = true; break; }
     var dayResult = backfillOneDay_(cursor, settings);
-    if (dayResult.kind === 'succeeded') succeeded.push(dayResult.date);
+    if (dayResult.kind === 'succeeded') { succeeded.push(dayResult.date); totalRowCount += dayResult.rowCount || 0; }
     else if (dayResult.kind === 'skipped') skipped.push(dayResult.date);
     else failed.push(dayResult.date + '：' + dayResult.error);
     processedDays++;
@@ -502,7 +502,8 @@ function scheduledDailyFetch() {
       '資料缺口超過 ' + MAX_CATCHUP_DAYS + ' 天，本次只補到 ' + (succeeded[succeeded.length - 1] || skipped[skipped.length - 1] || '（無）') +
       '，剩餘天數請用「資料總覽」的「重新抓取/合併此區間」補齊', 0);
   }
-  var backfillSummary = '成功 ' + succeeded.length + ' 天' + (skipped.length ? '、略過 ' + skipped.length + ' 天' : '') +
+  var backfillSummary = '成功 ' + succeeded.length + ' 天' + (succeeded.length ? '，共 ' + totalRowCount + ' 筆' : '') +
+    (skipped.length ? '、略過 ' + skipped.length + ' 天' : '') +
     (failed.length ? '、失敗 ' + failed.length + ' 天（' + failed.join('; ') + '）' : '') + (truncated ? '（缺口過大，已截斷）' : '');
   recordScheduledStep_(steps, '補抓資料', truncated || failed.length ? 'partial' : 'success', backfillSummary, step2Start);
 
@@ -525,8 +526,12 @@ function scheduledDailyFetch() {
   // 4. 重新計算戰報
   var step4Start = Date.now();
   try {
-    runAnalysisAndSave();
-    recordScheduledStep_(steps, '重新計算戰報', 'success', '', step4Start);
+    var analysisResult = runAnalysisAndSave();
+    var analysisDetail = analysisResult && analysisResult.latestDate
+      ? '戰報日期 ' + analysisResult.latestDate + '，' + analysisResult.report.length + ' 檔訊號' +
+        (analysisResult.diagnostics && analysisResult.diagnostics.totalStocks !== undefined ? '（共掃描 ' + analysisResult.diagnostics.totalStocks + ' 檔）' : '')
+      : '沒有可用的歷史資料，查無戰報';
+    recordScheduledStep_(steps, '重新計算戰報', 'success', analysisDetail, step4Start);
   } catch (analysisErr) {
     logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);
     recordScheduledStep_(steps, '重新計算戰報', 'failed', String(analysisErr.message || analysisErr), step4Start);
