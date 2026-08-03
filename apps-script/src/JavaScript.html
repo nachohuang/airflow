@@ -664,7 +664,9 @@
     pfForm.reset();
     document.getElementById('portfolioFormTitle').textContent = '新增持股';
     document.getElementById('pfLotId').value = '';
-    document.getElementById('pfSubmitBtn').textContent = '＋ 新增這筆持有';
+    var submitBtn = document.getElementById('pfSubmitBtn');
+    submitBtn.textContent = '＋ 新增這筆持有';
+    submitBtn.disabled = false;
   }
 
   /** 「＋ 加碼買進」：代號/名稱鎖定成這檔股票，其餘欄位清空讓使用者填這筆新的買進紀錄。 */
@@ -699,6 +701,10 @@
 
   pfForm.addEventListener('submit', function (e) {
     e.preventDefault();
+    var submitBtn = document.getElementById('pfSubmitBtn');
+    // 送出中按鈕會被 disable，這裡再擋一次是防呆——避免使用者在等回應（尤其網路不穩、
+    // 連線被中斷看起來像「沒反應」時）又點一次，結果同一筆買進被送出兩次以上。
+    if (submitBtn.disabled) return;
     var item = {
       lotId: document.getElementById('pfLotId').value || '',
       code: document.getElementById('pfCode').value.trim(),
@@ -708,10 +714,17 @@
       shares: parseFloat(document.getElementById('pfShares').value),
       note: document.getElementById('pfNote').value.trim()
     };
+    var savingLabel = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '儲存中...';
     callServer('savePortfolioItem', item).then(function () {
       resetPortfolioForm_();
       loadPortfolio();
-    }).catch(function (err) { alert(err.message || err); });
+    }).catch(function (err) {
+      alert(err.message || err);
+      submitBtn.disabled = false;
+      submitBtn.textContent = savingLabel;
+    });
   });
 
   // ---------- 持股結案（標示已賣出）與歷史結案紀錄 ----------
@@ -809,6 +822,19 @@
   wireStockAutocomplete_(pfNameInput, document.getElementById('pfNameResults'), function (code, name) {
     pfCodeInput.value = code;
     pfNameInput.value = name;
+  });
+
+  /** 使用者直接打完代號就按 tab/點別的欄位（沒有點自動完成下拉選單）時，離開代號欄位就順便
+   *  查一次代號對應的名稱幫忙帶出來，供輸入時確認是不是要買的那一檔——跟自動完成下拉選單是
+   *  互補的兩種填法，不是取代。查不到就不動，不強行清空或改寫使用者已經打的代號。 */
+  pfCodeInput.addEventListener('blur', function () {
+    var raw = pfCodeInput.value.trim();
+    if (!raw || pfNameInput.value.trim()) return;
+    var padded = raw.length < 4 ? ('0000' + raw).slice(-4) : raw;
+    callServer('searchStockCodes', raw).then(function (results) {
+      var exact = results.filter(function (r) { return r.code === padded; })[0];
+      if (exact) { pfCodeInput.value = exact.code; pfNameInput.value = exact.name; }
+    }).catch(function () { /* 查不到就算了，不影響使用者自己填代號/名稱 */ });
   });
 
   /**
