@@ -167,6 +167,11 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('LEFT JOIN `proj.ds.industry_map` im ON h.stock_id = im.stock_id') !== -1);
   assert.ok(sql.indexOf('industry_inst_net_sum - inst_net') !== -1, '產業資金流向要排除自己，不是單純的產業總和');
   assert.ok(sql.indexOf('industry_stock_count - 1') !== -1);
+  // 最終 SELECT 一定要用 COALESCE(...,0) 包住，不能讓查不到產業別的列（ETF、industry_map
+  // 還沒同步過）因為這一欄是 NULL，被 buildTrainModelSql_ 的 NOT NULL 條件整列排除掉——
+  // 實測真的發生過 industry_map 是空的時候，訓練查詢因此回傳 0 列直接失敗。
+  assert.ok(sql.indexOf('COALESCE(industry_capital_flow, 0) AS industry_capital_flow') !== -1,
+    'industry_capital_flow 缺值時要 COALESCE 成 0，不能讓 NULL 拖累整列被排除在訓練資料外');
   console.log('Test buildFeatureViewSql_ passed.');
 }
 

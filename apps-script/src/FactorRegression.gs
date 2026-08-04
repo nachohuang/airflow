@@ -110,7 +110,14 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '  stock_id, stock_name, dt AS date,',
     '  inst_participation, inst_part_ma5, ibf_20d, trend_score, ma20_slope, vol_ratio, bias60,',
     '  dividend_yield_f AS dividend_yield, pe_ratio_f AS pe_ratio, pb_ratio_f AS pb_ratio,',
-    '  industry_capital_flow,',
+    // COALESCE 成 0（不是留 NULL）：buildTrainModelSql_ 要求所有候選因子都 NOT NULL 才會拿去
+    // 訓練，任何一列只要有一個因子是 NULL 就整列被排除。查不到產業別的股票（ETF、上櫃、
+    // industry_map 還沒同步過）每天都會是 NULL，如果照其他因子一樣留 NULL，只要 industry_map
+    // 覆蓋率沒有 100%，就會把大量列擋在訓練資料外——實測甚至遇過 industry_map 剛好是空的，
+    // 導致「整批」被排除、訓練查詢直接回傳 0 列失敗（Input data doesn't contain any rows.）。
+    // 用 0（=「沒有明顯的同業買賣超訊號」，是這個量本身合理的中性值）取代 NULL，其他因子
+    // 都正常時這一列還是能拿去訓練，這個因子頂多在缺資料的列上貢獻中性訊號，不會拖累整批。
+    '  COALESCE(industry_capital_flow, 0) AS industry_capital_flow,',
     '  label_return_1m, label_downside_resistance',
     'FROM labeled'
   ].join('\n');
