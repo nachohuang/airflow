@@ -17,24 +17,39 @@
 
 // ---- 純函式：SQL 組字串 + 結果整理（不呼叫 BigQuery，可在 Node.js 測試）----
 
-/** 因子特徵 + 兩個預測目標的 BigQuery view SQL。 */
-function buildFeatureViewSql_(rawTableRef, viewRef) {
+/**
+ * 因子特徵 + 兩個預測目標的 BigQuery view SQL。
+ *
+ * industryMapTableRef：Phase 3 新增，IndustryMap.gs 同步過去的「股票代號→產業別」小型參考表
+ * （見 BigQuerySync.gs syncIndustryMapToBigQuery_）。LEFT JOIN 進來只用來算 industry_capital_flow
+ * 這一個候選因子——查不到產業別（例如 ETF、上櫃股票，見 IndustryMap.gs 說明）的股票這個
+ * 因子就是 NULL，不影響其他因子照常計算。
+ *
+ * industry_capital_flow 定義：「同產業其他股票（排除自己）當天法人買賣超的平均值」，不是
+ * 單純把同產業全部股票的買賣超加總——加總的話會把「這檔股票自己的買賣超」也算進它自己的
+ * 因子值裡，變成自己預測自己的循環相關，訓練出來的權重會失真；排除自己、只看「同業其他
+ * 人在幹嘛」才是乾淨的橫斷面訊號。用 SAFE_DIVIDE 處理「這個產業當天只有這一檔股票」的
+ * 邊界情況（分母是 0），這種情況因子值就是 NULL，不會撞到除以 0 的錯誤。
+ */
+function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
   return [
     'CREATE OR REPLACE VIEW `' + viewRef + '` AS',
     'WITH base AS (',
     '  SELECT',
-    '    stock_id, stock_name,',
-    '    SAFE_CAST(date_str AS DATE) AS dt,',
-    '    SAFE_CAST(close_price AS FLOAT64) AS close,',
-    '    SAFE_CAST(volume_shares AS FLOAT64) AS vol,',
-    '    SAFE_CAST(foreign_net AS FLOAT64) AS foreign_v,',
-    '    SAFE_CAST(trust_net AS FLOAT64) AS trust_v,',
-    '    SAFE_CAST(dealer_net AS FLOAT64) AS dealer_v,',
-    '    SAFE_CAST(dividend_yield AS FLOAT64) AS dividend_yield_f,',
-    '    SAFE_CAST(pe_ratio AS FLOAT64) AS pe_ratio_f,',
-    '    SAFE_CAST(pb_ratio AS FLOAT64) AS pb_ratio_f',
-    '  FROM `' + rawTableRef + '`',
-    '  WHERE LENGTH(stock_id) = 4',
+    '    h.stock_id, h.stock_name,',
+    '    SAFE_CAST(h.date_str AS DATE) AS dt,',
+    '    SAFE_CAST(h.close_price AS FLOAT64) AS close,',
+    '    SAFE_CAST(h.volume_shares AS FLOAT64) AS vol,',
+    '    SAFE_CAST(h.foreign_net AS FLOAT64) AS foreign_v,',
+    '    SAFE_CAST(h.trust_net AS FLOAT64) AS trust_v,',
+    '    SAFE_CAST(h.dealer_net AS FLOAT64) AS dealer_v,',
+    '    SAFE_CAST(h.dividend_yield AS FLOAT64) AS dividend_yield_f,',
+    '    SAFE_CAST(h.pe_ratio AS FLOAT64) AS pe_ratio_f,',
+    '    SAFE_CAST(h.pb_ratio AS FLOAT64) AS pb_ratio_f,',
+    '    im.industry AS industry',
+    '  FROM `' + rawTableRef + '` h',
+    '  LEFT JOIN `' + industryMapTableRef + '` im ON h.stock_id = im.stock_id',
+    '  WHERE LENGTH(h.stock_id) = 4',
     '),',
     'step1 AS (',
     '  SELECT *,',
@@ -53,14 +68,18 @@ function buildFeatureViewSql_(rawTableRef, viewRef) {
     '    CASE WHEN daily_return < 0 AND inst_net > 0 THEN 1 ELSE 0 END AS is_inst_buy_on_drop,',
     '    SAFE_DIVIDE(vol, vol_ma20) AS vol_ratio,',
     '    SAFE_DIVIDE(close - ma60, ma60) AS bias60,',
-    '    LAG(ma20, 3) OVER (PARTITION BY stock_id ORDER BY dt) AS ma20_3ago',
+    '    LAG(ma20, 3) OVER (PARTITION BY stock_id ORDER BY dt) AS ma20_3ago,',
+    '    SUM(inst_net) OVER (PARTITION BY industry, dt) AS industry_inst_net_sum,',
+    '    COUNT(*) OVER (PARTITION BY industry, dt) AS industry_stock_count',
     '  FROM step1',
     '),',
     'step3 AS (',
     '  SELECT *,',
     '    (ma20 - ma20_3ago) AS ma20_slope,',
     '    SUM(is_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS drop_count_20,',
-    '    SUM(is_inst_buy_on_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS buy_on_drop_20',
+    '    SUM(is_inst_buy_on_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS buy_on_drop_20,',
+    '    CASE WHEN industry IS NOT NULL AND industry_stock_count > 1',
+    '      THEN SAFE_DIVIDE(industry_inst_net_sum - inst_net, industry_stock_count - 1) END AS industry_capital_flow',
     '  FROM step2',
     '),',
     'step4 AS (',
@@ -91,6 +110,7 @@ function buildFeatureViewSql_(rawTableRef, viewRef) {
     '  stock_id, stock_name, dt AS date,',
     '  inst_participation, inst_part_ma5, ibf_20d, trend_score, ma20_slope, vol_ratio, bias60,',
     '  dividend_yield_f AS dividend_yield, pe_ratio_f AS pe_ratio, pb_ratio_f AS pb_ratio,',
+    '  industry_capital_flow,',
     '  label_return_1m, label_downside_resistance',
     'FROM labeled'
   ].join('\n');
@@ -185,7 +205,11 @@ function ensureFeatureView_(settings) {
   if (settings.sourceMode === 'external' || settings.sourceMode === 'materialized') {
     refreshDataSourceForMode_(settings);
   }
-  runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqFeatureViewRef_(settings)), 'feature_view');
+  // 就算使用者從來沒按過「重新整理產業對照表」，industry_map 表也要先確保存在（可以是空的）——
+  // 不然 buildFeatureViewSql_ 的 LEFT JOIN 對到不存在的表會直接讓整個訓練失敗，而不是優雅地
+  // 讓 industry_capital_flow 全部是 NULL（其他因子照常訓練）。
+  ensureIndustryMapTable_(settings);
+  runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqIndustryMapTableRef_(settings), bqFeatureViewRef_(settings)), 'feature_view');
 }
 
 function trainFactorModel_(settings, labelDef, l1Reg) {

@@ -898,6 +898,60 @@ function ensureRawTable_(settings) {
   }
 }
 
+function bqIndustryMapTableRef_(settings) {
+  return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_INDUSTRY_MAP_TABLE;
+}
+
+function ensureIndustryMapTable_(settings) {
+  try {
+    BigQuery.Tables.get(settings.projectId, settings.dataset, CONFIG.BIGQUERY_INDUSTRY_MAP_TABLE);
+  } catch (e) {
+    BigQuery.Tables.insert({
+      tableReference: { projectId: settings.projectId, datasetId: settings.dataset, tableId: CONFIG.BIGQUERY_INDUSTRY_MAP_TABLE },
+      schema: { fields: [{ name: 'stock_id', type: 'STRING' }, { name: 'industry', type: 'STRING' }] }
+    }, settings.projectId, settings.dataset);
+  }
+}
+
+/**
+ * 把產業對照表（IndustryMap.gs 的 Sheet 資料，已經通過品質驗證）同步一份到 BigQuery，
+ * 給 FactorRegression.gs 的 factor_features view 用 JOIN 取用。整份 WRITE_TRUNCATE
+ * 覆蓋（不是 append）——這是一張「目前狀態」的小型參考表，不是逐日累積的歷史資料，
+ * 每次重新整理都是最新的完整清單，沒有「保留歷史版本」的需求。
+ * 只有設定了 BigQuery 專案才會呼叫這個函式；沒設定的話 IndustryMap.gs 完全不受影響，
+ * Phase 1/2 的 Sheet 版本才是唯一依賴的資料來源。
+ */
+function syncIndustryMapToBigQuery_(rows) {
+  var settings = requireBigQueryProjectId_();
+  ensureBigQueryDataset_(settings);
+  ensureIndustryMapTable_(settings);
+
+  var csvLines = ['stock_id,industry'];
+  rows.forEach(function (r) {
+    var industry = String(r.industry || '').replace(/"/g, '""');
+    csvLines.push(r.code + ',"' + industry + '"');
+  });
+  var blob = Utilities.newBlob(csvLines.join('\n'), 'text/csv', 'industry_map.csv');
+  var job = BigQuery.Jobs.insert({
+    configuration: {
+      load: {
+        destinationTable: {
+          projectId: settings.projectId,
+          datasetId: settings.dataset,
+          tableId: CONFIG.BIGQUERY_INDUSTRY_MAP_TABLE
+        },
+        sourceFormat: 'CSV',
+        skipLeadingRows: 1,
+        writeDisposition: 'WRITE_TRUNCATE',
+        schema: { fields: [{ name: 'stock_id', type: 'STRING' }, { name: 'industry', type: 'STRING' }] }
+      }
+    }
+  }, settings.projectId, blob);
+
+  waitForBqLoadJob_(settings.projectId, job.jobReference.jobId, job.jobReference.location || CONFIG.BIGQUERY_LOCATION);
+  return { rowCount: rows.length };
+}
+
 /** 有沒有設定 BigQuery 專案——一旦設定了，每天/補抓寫入一律直接進 BigQuery（見
  *  upsertHistoryRowsToBigQuery_），不再另外寫 Drive 月份 CSV 檔案；沒有設定 BigQuery
  *  的使用者維持原本寫 Drive 月份檔案的行為，不受影響。 */

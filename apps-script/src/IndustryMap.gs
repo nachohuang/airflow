@@ -196,6 +196,23 @@ function doRefreshIndustryMap_() {
 
   var coverage = computeIndustryMapCoverage_(allRows);
   var untranslated = findUntranslatedIndustryCodes_(allRows);
+
+  // Phase 3：順便同步一份到 BigQuery，給因子迴歸模型的 factor_features view 用 JOIN 取用
+  // （見 FactorRegression.gs 的 industry_capital_flow 候選因子）。只有設定了 BigQuery 專案
+  // 才會嘗試，失敗（例如根本沒設定 BigQuery、或暫時性錯誤）也不影響 Sheet 版本已經存好的
+  // 結果——Phase 1/2 完全不依賴這裡是否成功，這裡只是額外的加分項。
+  var bqSync = { attempted: false, ok: false, error: null };
+  if (shouldWriteToBigQuery_()) {
+    bqSync.attempted = true;
+    try {
+      var bqResult = syncIndustryMapToBigQuery_(allRows.map(function (r) { return { code: r.code, industry: r.industry }; }));
+      bqSync.ok = true;
+      bqSync.rowCount = bqResult.rowCount;
+    } catch (e) {
+      bqSync.error = String(e.message || e);
+    }
+  }
+
   var summary = {
     updatedAt: Date.now(),
     totalCount: allRows.length,
@@ -203,13 +220,15 @@ function doRefreshIndustryMap_() {
     tpexCount: (tpexResult.rows || []).length,
     tpexWarning: tpexResult.warning || null,
     coverage: coverage,
-    untranslated: untranslated
+    untranslated: untranslated,
+    bqSync: bqSync
   };
   PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.INDUSTRY_MAP_LAST_REFRESH, JSON.stringify(summary));
   logRun_('產業對照表', '成功',
     '共 ' + allRows.length + ' 筆（上市 ' + twseRows.length + '，上櫃 ' + (tpexResult.rows || []).length + '）' +
     (coverage.checked ? '，目前追蹤股票涵蓋率 ' + coverage.coveragePct + '%' : '') +
     (untranslated.count ? '，' + untranslated.count + ' 筆產業代碼沒對到文字名稱' : '') +
+    (bqSync.attempted ? '，BigQuery 同步：' + (bqSync.ok ? '成功' : '失敗（' + bqSync.error + '）') : '') +
     (tpexResult.warning ? '；' + tpexResult.warning : ''), 0);
   return summary;
 }

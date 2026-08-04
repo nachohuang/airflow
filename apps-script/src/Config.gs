@@ -131,6 +131,10 @@ var CONFIG = {
   // 因為它是比較新鮮的直接寫入），materialized 模式讀的是這個 view，不是單一份表。
   BIGQUERY_UNIFIED_VIEW: 'history_unified',
   BIGQUERY_FEATURE_VIEW: 'factor_features',
+  // 產業對照表同步進 BigQuery 的小型參考表（見 IndustryMap.gs／BigQuerySync.gs），
+  // 「重新整理產業對照表」成功後會盡量同步一份到這裡，只有設定了 BigQuery 才會同步，
+  // 沒設定完全不影響 Phase 1/2 既有功能（Sheet 版本才是 Phase 1/2 唯一依賴的資料來源）。
+  BIGQUERY_INDUSTRY_MAP_TABLE: 'industry_map',
   BIGQUERY_LOCATION: 'US', // BigQuery Dataset 所在地區，跟後面所有 query 的 location 要一致
   // 資料來源模式：
   //   'native'       -> 用「同步歷史資料到 BigQuery」把我們自己的月份 CSV 逐月載入 history_raw
@@ -178,9 +182,23 @@ var CONFIG = {
   ],
 
   // 拿來做迴歸的候選因子欄位（都是 factor_features view 算出來的欄位名稱）。
+  //
+  // industry_capital_flow（Phase 3，見 IndustryCapitalFlow.gs 的 Phase 2 唯讀驗證）刻意只加
+  // 在這裡（進訓練），沒有加進下面的 BQ_FEATURE_TO_ANALYSIS_FIELD——這是有意的範圍界線：
+  // 加進候選因子清單，就會被 BQML LASSO 一起訓練，「關鍵影響因子」卡片跟權重/R² 看得出
+  // 這個因子有沒有預測力；但「即時預測分數」（今日戰報/回測用來排名的 PredictedResistance_Rank）
+  // 還沒有接這個因子——要讓即時預測正確運作，today's/回測用的每一天資料都要用跟訓練時
+  // 完全一致的「JOIN 產業對照表 + 依產業橫斷面加總」邏輯重算一次，這牽涉到另外兩支
+  // SQL（buildLatestDayFactorsSql_／buildRangeFactorsSql_）都要同步更新且行為一致，
+  // 沒辦法在這個環境實際連上 BigQuery 測試，貿然接上有一定機率讓現有戰報/回測功能
+  // 因為改壞 SQL 而出錯。所以先只做「訓練＋觀察是否有效」這一步：這個因子如果被 LASSO
+  // 選中且權重不是 0，computeWeightedFactorScore_ 會因為查不到 BQ_FEATURE_TO_ANALYSIS_FIELD
+  // 對應欄位而直接跳過那一項（見該函式「理論上不會發生...保守跳過」的既有防呆邏輯），
+  // 不會出錯、也不會讓預測分數變成 null——但也不會真的把這個因子的貢獻算進即時預測分數。
+  // 等確認這個因子在訓練結果裡真的有效，才值得投入去同步改那兩支 SQL（下一階段）。
   FACTOR_CANDIDATE_COLUMNS: [
     'inst_participation', 'inst_part_ma5', 'ibf_20d', 'trend_score', 'ma20_slope',
-    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio'
+    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio', 'industry_capital_flow'
   ],
 
   // BigQuery 因子回歸的候選欄位名稱 -> Analysis.gs computeFactors_ 算出來的同一個量（或原始 CSV 欄位）

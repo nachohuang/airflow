@@ -147,9 +147,9 @@ loadIntoContext('FactorRegression.gs');
 
 // --- buildFeatureViewSql_ ---
 {
-  const sql = context.buildFeatureViewSql_('proj.ds.history_raw', 'proj.ds.factor_features');
+  const sql = context.buildFeatureViewSql_('proj.ds.history_raw', 'proj.ds.industry_map', 'proj.ds.factor_features');
   assert.ok(sql.indexOf('CREATE OR REPLACE VIEW `proj.ds.factor_features`') === 0);
-  assert.ok(sql.indexOf('FROM `proj.ds.history_raw`') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_raw` h') !== -1);
   // 兩個 label 都要在
   assert.ok(sql.indexOf('label_return_1m') !== -1);
   assert.ok(sql.indexOf('label_downside_resistance') !== -1);
@@ -158,10 +158,15 @@ loadIntoContext('FactorRegression.gs');
   // 抗跌力只看大盤下跌的天數（相對大盤，不是絕對回檔）
   assert.ok(sql.indexOf('WHEN mkt_return < 0 THEN daily_return - mkt_return') !== -1);
   assert.ok(sql.indexOf('ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING') !== -1);
-  // 候選因子欄位都要出現在最終 SELECT
+  // 候選因子欄位都要出現在最終 SELECT（含 Phase 3 新增的 industry_capital_flow）
   context.CONFIG.FACTOR_CANDIDATE_COLUMNS.forEach(function (col) {
     assert.ok(sql.indexOf(col) !== -1, 'missing candidate column: ' + col);
   });
+  // Phase 3：要 LEFT JOIN 產業對照表，且用「排除自己」的同業平均（減掉自己的 inst_net，
+  // 除以「產業家數 - 1」），不能是單純加總（會把自己的買賣超算進自己的因子值，變成循環相關）
+  assert.ok(sql.indexOf('LEFT JOIN `proj.ds.industry_map` im ON h.stock_id = im.stock_id') !== -1);
+  assert.ok(sql.indexOf('industry_inst_net_sum - inst_net') !== -1, '產業資金流向要排除自己，不是單純的產業總和');
+  assert.ok(sql.indexOf('industry_stock_count - 1') !== -1);
   console.log('Test buildFeatureViewSql_ passed.');
 }
 

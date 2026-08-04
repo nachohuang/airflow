@@ -1452,7 +1452,8 @@
     bias60: '60日乖離率',
     dividend_yield: '殖利率',
     pe_ratio: '本益比',
-    pb_ratio: '股價淨值比'
+    pb_ratio: '股價淨值比',
+    industry_capital_flow: '產業資金流向（同業平均買賣超，Phase 3 訓練中）'
   };
   function factorCodeCn_(code) { return FACTOR_CODE_CN[code] || code; }
 
@@ -2268,12 +2269,18 @@
         '<td>' + escapeHtml(r['產業別']) + '</td><td>' + escapeHtml(r['市場別']) + '</td></tr>';
     }).join('');
     var untrans = s.untranslated;
+    var bq = s.bqSync;
+    var bqHtml = !bq || !bq.attempted ? '' :
+      (bq.ok
+        ? '<div class="meta-bar">✅ 已同步到 BigQuery（' + fmtNum(bq.rowCount, 0) + ' 筆），可供因子迴歸模型使用</div>'
+        : '<div class="meta-bar" style="color:var(--amber);">⚠️ BigQuery 同步失敗：' + escapeHtml(bq.error || '') + '（不影響上面已存好的資料，因子迴歸模型暫時抓不到最新版對照表）</div>');
     el.innerHTML =
       '<div class="meta-bar">上次更新：' + new Date(s.updatedAt).toLocaleString('zh-TW') + '　共 ' + fmtNum(s.totalCount, 0) +
       ' 筆（上市 ' + fmtNum(s.twseCount, 0) + '，上櫃 ' + fmtNum(s.tpexCount, 0) + '）</div>' +
       (s.tpexWarning ? '<div class="meta-bar" style="color:var(--amber);">⚠️ ' + escapeHtml(s.tpexWarning) + '</div>' : '') +
       (untrans && untrans.count ? '<div class="meta-bar" style="color:var(--amber);">⚠️ 有 ' + untrans.count +
         ' 檔的產業代碼對照表沒收錄到，暫時保留原始代碼沒翻譯（例如：' + untrans.sample.map(escapeHtml).join('、') + '）</div>' : '') +
+      bqHtml +
       '<div class="meta-bar">' + covHtml + '</div>' +
       (sampleRows ? '<details class="info-collapse"><summary>隨機抽查 ' + status.sample.length + ' 筆資料</summary><div class="info-body">' +
         '<table class="simple-table"><thead><tr><th>代號</th><th>名稱</th><th>產業別</th><th>市場別</th></tr></thead><tbody>' +
