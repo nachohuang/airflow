@@ -221,6 +221,28 @@ var CONFIG = {
     return 'industry_flow_' + typeKey + '_' + window + 'd';
   },
 
+  // 第二組「產業相對大盤買賣超強度」候選因子：算法跟上面的排名版不同（見
+  // buildFeatureViewSql_ 說明），是「產業法人參與度 - 大盤法人參與度」，本身已經是
+  // 正規化過的比率（不是原始股數），不會有 v1 那種量級差太多被 LASSO 壓到 0 的問題。
+  // 為了避免候選因子數量爆炸（4*6=24 個排名版 + 4*6=24 個相對強度版 = 48，快逼近訓練資料
+  // 欄位上限、也讓 LASSO 更難分辨誰有效），「三大法人合計」做完整 6 種天期，但外資/投信/
+  // 自營商三個分法人版本只做 1 天（單日）跟 20 天（約一個月）兩個代表性天期，總共
+  // 6 + 3*2 = 12 個，而不是完整展開的 24 個。
+  INDUSTRY_REL_MARKET_TYPE_WINDOWS: [1, 20],
+
+  /** 依法人類別決定「產業相對大盤強度」要算哪些天期窗口——'all'（三大法人合計）用完整
+   *  6 種天期，其他分法人版本只用代表性的 1 天跟 20 天，見上面 INDUSTRY_REL_MARKET_TYPE_WINDOWS
+   *  的說明。 */
+  industryRelMarketWindowsForType: function (typeKey) {
+    return typeKey === 'all' ? CONFIG.INDUSTRY_FLOW_WINDOWS : CONFIG.INDUSTRY_REL_MARKET_TYPE_WINDOWS;
+  },
+
+  /** 產生單一「產業相對大盤買賣超強度」候選因子欄位名稱，命名跟上面的 industryFlowFactorName
+   *  故意用不同前綴（industry_rel_mkt_ vs industry_flow_），避免兩組因子互相搞混。 */
+  industryRelMarketFactorName: function (typeKey, window) {
+    return 'industry_rel_mkt_' + typeKey + '_' + window + 'd';
+  },
+
   // BigQuery 因子回歸的候選欄位名稱 -> Analysis.gs computeFactors_ 算出來的同一個量（或原始 CSV 欄位）
   // 的欄位名稱。套用某一版因子模型後，Analysis.gs 用這個對照表把 BQML 權重乘回每天算好的因子值，
   // 算出「因子模型預測分數」跟 Armor_Score 並列顯示（不會取代 Armor_Score）。
@@ -319,6 +341,15 @@ var CONFIG = {
 CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
   CONFIG.INDUSTRY_FLOW_WINDOWS.forEach(function (w) {
     CONFIG.FACTOR_CANDIDATE_COLUMNS.push(CONFIG.industryFlowFactorName(t.key, w));
+  });
+});
+
+// 同樣道理，把「產業相對大盤買賣超強度」候選因子欄位名稱 push 進候選因子清單——'all' 用
+// 完整 6 種天期，其他分法人版本只用代表性的 1 天跟 20 天（見 INDUSTRY_REL_MARKET_TYPE_WINDOWS
+// 說明），總共 12 個。
+CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
+  CONFIG.industryRelMarketWindowsForType(t.key).forEach(function (w) {
+    CONFIG.FACTOR_CANDIDATE_COLUMNS.push(CONFIG.industryRelMarketFactorName(t.key, w));
   });
 });
 

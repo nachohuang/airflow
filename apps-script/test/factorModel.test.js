@@ -158,12 +158,12 @@ loadIntoContext('FactorRegression.gs');
   // 抗跌力只看大盤下跌的天數（相對大盤，不是絕對回檔）
   assert.ok(sql.indexOf('WHEN mkt_return < 0 THEN daily_return - mkt_return') !== -1);
   assert.ok(sql.indexOf('ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING') !== -1);
-  // 候選因子欄位都要出現在最終 SELECT（含 Phase 3 v3：4 種法人類別 x 6 種移動平均窗口＝24 個）
+  // 候選因子欄位都要出現在最終 SELECT（含 v3：24 種產業資金流向 + v4：12 種產業相對大盤強度）
   context.CONFIG.FACTOR_CANDIDATE_COLUMNS.forEach(function (col) {
     assert.ok(sql.indexOf(col) !== -1, 'missing candidate column: ' + col);
   });
-  assert.strictEqual(context.CONFIG.FACTOR_CANDIDATE_COLUMNS.length, 34,
-    '10 個原本的因子 + 4 種法人類別 x 6 種窗口 = 24 個產業資金流向因子，應該共 34 個候選因子');
+  assert.strictEqual(context.CONFIG.FACTOR_CANDIDATE_COLUMNS.length, 46,
+    '10 個原本的因子 + 24 個產業資金流向 + 12 個產業相對大盤強度 = 46 個候選因子');
   // 要 LEFT JOIN 產業對照表，且用「排除自己」的同業平均（減掉自己的來源欄位，除以「產業家數-1」），
   // 不能是單純加總（會把自己的買賣超算進自己的因子值，變成循環相關）——四種法人類別都要各自算過
   assert.ok(sql.indexOf('LEFT JOIN `proj.ds.industry_map` im ON h.stock_id = im.stock_id') !== -1);
@@ -189,6 +189,39 @@ loadIntoContext('FactorRegression.gs');
   // 整列排除掉——實測真的發生過 industry_map 是空的時候，訓練查詢因此回傳 0 列直接失敗。
   assert.ok(sql.indexOf('COALESCE(industry_flow_foreign_30d, 0.5) AS industry_flow_foreign_30d') !== -1,
     '每個產業資金流向因子缺值時都要 COALESCE 成 0.5，不能用 0（那是合法的最低排名）');
+
+  // --- v4：產業相對大盤強度（industry_rel_mkt_<type>_<window>d）---
+  // 產業層級跟市場層級都要「排除自己」（減掉自己的來源欄位，除以扣掉自己股數的成交量）
+  ['inst_net', 'foreign_v', 'trust_v', 'dealer_v'].forEach(function (col) {
+    assert.ok(sql.indexOf('SAFE_DIVIDE(industry_' +
+      (col === 'inst_net' ? 'all' : col.replace('_v', '')) + '_sum - ' + col + ', industry_vol_sum - vol)') !== -1,
+      '產業層級參與度（' + col + '）要排除自己，分母是扣掉自己股數的產業成交量');
+    assert.ok(sql.indexOf('SAFE_DIVIDE(mkt_' +
+      (col === 'inst_net' ? 'all' : col.replace('_v', '')) + '_sum - ' + col + ', mkt_vol_sum - vol)') !== -1,
+      '大盤層級參與度（' + col + '）也要排除自己');
+  });
+  // 三大法人合計（all）要完整 6 種天期
+  assert.ok(sql.indexOf('industry_rel_mkt_raw_all AS industry_rel_mkt_ma_all_1d') !== -1,
+    '窗口=1 應該直接用原始值');
+  [5, 10, 15, 30, 60].forEach(function (w) {
+    assert.ok(sql.indexOf('ROWS BETWEEN ' + (w - 1) + ' PRECEDING AND CURRENT ROW) AS industry_rel_mkt_ma_all_' + w + 'd') !== -1,
+      '三大法人合計版本窗口 ' + w + ' 天應該用 ROWS BETWEEN ' + (w - 1) + ' PRECEDING');
+  });
+  // 分法人（外資/投信/自營商）只做代表性的 1 天跟 20 天兩個窗口，不是完整 6 個
+  ['foreign', 'trust', 'dealer'].forEach(function (typeKey) {
+    assert.ok(sql.indexOf('industry_rel_mkt_raw_' + typeKey + ' AS industry_rel_mkt_ma_' + typeKey + '_1d') !== -1);
+    assert.ok(sql.indexOf('ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS industry_rel_mkt_ma_' + typeKey + '_20d') !== -1,
+      '分法人版本應該只有 1 天跟 20 天代表性窗口，不是完整 6 個');
+    [5, 10, 15, 30, 60].forEach(function (w) {
+      assert.ok(sql.indexOf('AS industry_rel_mkt_ma_' + typeKey + '_' + w + 'd') === -1,
+        '分法人版本不應該有 ' + w + ' 天窗口（只做 1 天跟 20 天代表性天期，避免候選因子數量翻倍）');
+    });
+  });
+  // 一樣要換算成排名並用 CASE WHEN 明確覆寫 NULL 成中性值 0.5
+  assert.ok(sql.indexOf('CASE WHEN industry_rel_mkt_ma_all_1d IS NULL THEN 0.5' +
+    ' ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY industry_rel_mkt_ma_all_1d) END AS industry_rel_mkt_all_1d') !== -1);
+  assert.ok(sql.indexOf('COALESCE(industry_rel_mkt_foreign_20d, 0.5) AS industry_rel_mkt_foreign_20d') !== -1,
+    '產業相對大盤強度因子缺值時也要 COALESCE 成 0.5');
   console.log('Test buildFeatureViewSql_ passed.');
 }
 
@@ -206,9 +239,16 @@ loadIntoContext('FactorRegression.gs');
 // --- getIndustryFlowFactorOptions ---
 {
   const options = context.getIndustryFlowFactorOptions();
-  assert.strictEqual(options.length, 24, '4 種法人類別 x 6 種窗口 = 24 個選項');
+  assert.strictEqual(options.length, 36, '24 種產業資金流向（同業排名）+ 12 種產業相對大盤強度 = 36 個選項');
   assert.ok(options.some(function (o) { return o.value === 'industry_flow_foreign_5d' && o.label.indexOf('外資') !== -1; }));
   assert.ok(options.some(function (o) { return o.value === 'industry_flow_all_1d' && o.label.indexOf('單日') !== -1; }));
+  // 兩組因子的標籤要能區分開來，不能讓使用者以為是同一種算法
+  assert.ok(options.some(function (o) { return o.value === 'industry_flow_all_5d' && o.label.indexOf('同業排名') !== -1; }));
+  assert.ok(options.some(function (o) { return o.value === 'industry_rel_mkt_all_5d' && o.label.indexOf('相對大盤強度') !== -1; }));
+  // 分法人版本的相對大盤強度只有 1 天跟 20 天，不應該出現 5 天版本
+  assert.ok(!options.some(function (o) { return o.value === 'industry_rel_mkt_foreign_5d'; }),
+    '分法人版本的相對大盤強度只做代表性天期，不應該有 5 天選項');
+  assert.ok(options.some(function (o) { return o.value === 'industry_rel_mkt_dealer_20d'; }));
   console.log('Test getIndustryFlowFactorOptions passed.');
 }
 

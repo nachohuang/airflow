@@ -51,6 +51,27 @@
  *      回傳值本來就不是 NULL）。24 個因子共用同一批 NULL 列（都是「查不到產業別」
  *      造成的，不分法人類別/窗口），對排名分母的影響是均勻、一致的極小比例（目前
  *      實測涵蓋率 99%+），不會讓 24 個因子之間的相對比較失真。
+ *
+ * 「產業相對大盤買賣超強度」候選因子（industry_rel_mkt_<type>_<window>d，見
+ * CONFIG.industryRelMarketFactorName）：跟上面的排名版是不同角度的訊號——排名版回答
+ * 「這支股票的產業，比其他股票的產業熱門/冷門」（橫斷面排名），這組回答「這個產業的資金，
+ * 有沒有比大盤整體更積極地被買/賣」（產業 vs. 大盤的直接對比，帶正負號）。算法：
+ *   1. 「同產業其他股票（排除自己）的法人參與度」= SUM(該類法人買賣超, 排除自己) /
+ *      SUM(成交量, 排除自己)，跟現有的 inst_participation 是同一種算法，只是從個股層級
+ *      換成產業層級。
+ *   2. 「全市場其他股票（排除自己）的法人參與度」，算法一樣，分組換成全市場。
+ *   3. industry_rel_mkt_raw_<type> = 產業參與度 - 大盤參與度，正值代表這個產業被買的力道
+ *      比大盤平均積極，負值代表相對冷淡/被賣超。排除自己是延續上面同一個理由（避免自己
+ *      預測自己的循環相關），市場層級樣本數很大、排不排除自己影響很小，但為了跟產業層級
+ *      一致還是排除。
+ *   4. 這個原始值本身就是「參與度」的差，量級跟其他 0~1 比率因子（如 inst_participation）
+ *      接近，理論上不需要再轉排名也能避開 v1 的 LASSO 零權重問題，但為了跟現有 24 個因子
+ *      的處理方式一致（也再保險一次量級問題），一樣先做 N 天移動平均，再轉成 0~1 橫斷面
+ *      排名，NULL（查不到產業別）一樣給中性值 0.5。
+ *   5. 候選數量控制：為了不讓因子數量從 24 個再翻倍到 48 個（LASSO 要挑的候選變太多、
+ *      訓練也更慢），「三大法人合計」做完整 6 種天期，但外資/投信/自營商三個分法人版本
+ *      只做 1 天跟 20 天兩個代表性天期，總共 6+3*2=12 個（見
+ *      CONFIG.industryRelMarketWindowsForType）。
  */
 function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
   var types = CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES;
@@ -97,6 +118,37 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     });
   });
 
+  // ---- 「產業相對大盤買賣超強度」候選因子（見上方說明）----
+  var mktSumLines = types.map(function (t) {
+    return '    SUM(' + t.column + ') OVER (PARTITION BY dt) AS mkt_' + t.key + '_sum';
+  });
+
+  var relRawLines = types.map(function (t) {
+    return '    CASE WHEN industry IS NOT NULL AND industry_stock_count > 1 AND (mkt_vol_sum - vol) != 0' +
+      ' THEN SAFE_DIVIDE(industry_' + t.key + '_sum - ' + t.column + ', industry_vol_sum - vol)' +
+      ' - SAFE_DIVIDE(mkt_' + t.key + '_sum - ' + t.column + ', mkt_vol_sum - vol) END' +
+      ' AS industry_rel_mkt_raw_' + t.key;
+  });
+
+  var relMaLines = [];
+  var relRankLines = [];
+  var relFinalLines = [];
+  types.forEach(function (t) {
+    CONFIG.industryRelMarketWindowsForType(t.key).forEach(function (w) {
+      var maName = 'industry_rel_mkt_ma_' + t.key + '_' + w + 'd';
+      if (w === 1) {
+        relMaLines.push('    industry_rel_mkt_raw_' + t.key + ' AS ' + maName);
+      } else {
+        relMaLines.push('    AVG(industry_rel_mkt_raw_' + t.key + ') OVER (PARTITION BY stock_id ORDER BY dt' +
+          ' ROWS BETWEEN ' + (w - 1) + ' PRECEDING AND CURRENT ROW) AS ' + maName);
+      }
+      var outName = CONFIG.industryRelMarketFactorName(t.key, w);
+      relRankLines.push('    CASE WHEN ' + maName + ' IS NULL THEN 0.5' +
+        ' ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY ' + maName + ') END AS ' + outName);
+      relFinalLines.push('  COALESCE(' + outName + ', 0.5) AS ' + outName);
+    });
+  });
+
   return [
     'CREATE OR REPLACE VIEW `' + viewRef + '` AS',
     'WITH base AS (',
@@ -135,7 +187,10 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '    SAFE_DIVIDE(close - ma60, ma60) AS bias60,',
     '    LAG(ma20, 3) OVER (PARTITION BY stock_id ORDER BY dt) AS ma20_3ago,',
     industrySumLines.join(',\n') + ',',
-    '    COUNT(*) OVER (PARTITION BY industry, dt) AS industry_stock_count',
+    '    COUNT(*) OVER (PARTITION BY industry, dt) AS industry_stock_count,',
+    '    SUM(vol) OVER (PARTITION BY industry, dt) AS industry_vol_sum,',
+    mktSumLines.join(',\n') + ',',
+    '    SUM(vol) OVER (PARTITION BY dt) AS mkt_vol_sum',
     '  FROM step1',
     '),',
     'step3 AS (',
@@ -143,17 +198,18 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '    (ma20 - ma20_3ago) AS ma20_slope,',
     '    SUM(is_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS drop_count_20,',
     '    SUM(is_inst_buy_on_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS buy_on_drop_20,',
-    rawFlowLines.join(',\n'),
+    rawFlowLines.join(',\n') + ',',
+    relRawLines.join(',\n'),
     '  FROM step2',
     '),',
     'step3ma AS (',
     '  SELECT *,',
-    maLines.join(',\n'),
+    maLines.concat(relMaLines).join(',\n'),
     '  FROM step3',
     '),',
     'step3rank AS (',
     '  SELECT *,',
-    rankLines.join(',\n'),
+    rankLines.concat(relRankLines).join(',\n'),
     '  FROM step3ma',
     '),',
     'step4 AS (',
@@ -185,6 +241,7 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '  inst_participation, inst_part_ma5, ibf_20d, trend_score, ma20_slope, vol_ratio, bias60,',
     '  dividend_yield_f AS dividend_yield, pe_ratio_f AS pe_ratio, pb_ratio_f AS pb_ratio,',
     finalFlowLines.join(',\n') + ',',
+    relFinalLines.join(',\n') + ',',
     '  label_return_1m, label_downside_resistance',
     'FROM labeled'
   ].join('\n');
@@ -341,15 +398,25 @@ function trainFactorModel_(settings, labelDef, l1Reg) {
   };
 }
 
-/** 前端下拉選單用：列出全部 24 種「產業資金流向」候選因子（4 種法人類別 × 6 種移動平均
- *  窗口），給「檢查資料分佈」跟權重顯示用的中文標籤對照。 */
+/** 前端下拉選單用：列出全部產業相關候選因子——24 種「產業資金流向」（同業橫斷面排名，
+ *  4 種法人類別 × 6 種移動平均窗口）+ 12 種「產業相對大盤強度」（產業參與度 - 大盤參與度，
+ *  三大法人合計 6 種天期 + 外資/投信/自營商各自 2 種代表天期），給「檢查資料分佈」跟
+ *  權重顯示用的中文標籤對照。兩組用標籤尾巴的括號文字區分，避免混淆。 */
 function getIndustryFlowFactorOptions() {
   var options = [];
   CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
     CONFIG.INDUSTRY_FLOW_WINDOWS.forEach(function (w) {
       options.push({
         value: CONFIG.industryFlowFactorName(t.key, w),
-        label: t.label + ' · ' + w + '天' + (w === 1 ? '（單日）' : '移動平均')
+        label: t.label + ' · ' + w + '天' + (w === 1 ? '（單日）' : '移動平均') + '（同業排名）'
+      });
+    });
+  });
+  CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
+    CONFIG.industryRelMarketWindowsForType(t.key).forEach(function (w) {
+      options.push({
+        value: CONFIG.industryRelMarketFactorName(t.key, w),
+        label: t.label + ' · ' + w + '天' + (w === 1 ? '（單日）' : '移動平均') + '（相對大盤強度）'
       });
     });
   });

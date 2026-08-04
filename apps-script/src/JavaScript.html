@@ -1455,16 +1455,23 @@
     pb_ratio: '股價淨值比'
   };
   var INDUSTRY_FLOW_TYPE_CN_ = { all: '三大法人合計', foreign: '外資', trust: '投信', dealer: '自營商' };
-  /** industry_flow_<type>_<window>d 這種動態產生的因子代碼（v3，24 種組合，見
-   *  FactorRegression.gs buildFeatureViewSql_）不寫死在上面那張表裡，用 regex 解析代碼本身
-   *  組出人性化標籤，新增/移除窗口天數也不用回來改這裡。 */
+  /** industry_flow_<type>_<window>d（v3，24 種組合，同業橫斷面排名）跟
+   *  industry_rel_mkt_<type>_<window>d（12 種組合，產業相對大盤強度）這兩組動態產生的因子
+   *  代碼（見 FactorRegression.gs buildFeatureViewSql_）不寫死在上面那張表裡，用 regex 解析
+   *  代碼本身組出人性化標籤，新增/移除窗口天數也不用回來改這裡。 */
   function factorCodeCn_(code) {
     if (FACTOR_CODE_CN[code]) return FACTOR_CODE_CN[code];
-    var m = /^industry_flow_(all|foreign|trust|dealer)_(\d+)d$/.exec(code);
-    if (m) {
-      var typeCn = INDUSTRY_FLOW_TYPE_CN_[m[1]] || m[1];
-      var window = m[2];
-      return '產業資金流向・' + typeCn + '・' + window + '天' + (window === '1' ? '（單日）' : '移動平均');
+    var mFlow = /^industry_flow_(all|foreign|trust|dealer)_(\d+)d$/.exec(code);
+    if (mFlow) {
+      var typeCn = INDUSTRY_FLOW_TYPE_CN_[mFlow[1]] || mFlow[1];
+      var window = mFlow[2];
+      return '產業資金流向・' + typeCn + '・' + window + '天' + (window === '1' ? '（單日）' : '移動平均') + '・同業排名';
+    }
+    var mRel = /^industry_rel_mkt_(all|foreign|trust|dealer)_(\d+)d$/.exec(code);
+    if (mRel) {
+      var relTypeCn = INDUSTRY_FLOW_TYPE_CN_[mRel[1]] || mRel[1];
+      var relWindow = mRel[2];
+      return '產業相對大盤強度・' + relTypeCn + '・' + relWindow + '天' + (relWindow === '1' ? '（單日）' : '移動平均');
     }
     return code;
   }
@@ -1832,13 +1839,14 @@
       } else {
         deltaHtml = '<span class="compare-delta">（目前沒有套用中的版本可比較）</span>';
       }
-      // v3：24 種產業資金流向候選因子（4 種法人類別 x 6 種移動平均窗口），依權重絕對值
-      // 由大到小列出來，一眼看出哪個法人類別/哪個平滑窗口被 LASSO 選中、貢獻最大，
-      // 不用自己一個一個去核對代碼。全部剛好都是 0 才顯示「檢查資料分佈」的提示。
+      // v4：36 種產業相關候選因子——24 種產業資金流向（同業橫斷面排名，4 法人類別 x 6 天期）
+      // + 12 種產業相對大盤強度（產業參與度 - 大盤參與度，三大法人合計 6 天期 + 分法人各
+      // 2 個代表天期），依權重絕對值由大到小列出來，一眼看出哪個算法/法人類別/天期被 LASSO
+      // 選中、貢獻最大，不用自己一個一個去核對代碼。全部剛好都是 0 才顯示「檢查資料分佈」的提示。
       var icfHtml = '';
       if (r.weights) {
         var icfEntries = Object.keys(r.weights)
-          .filter(function (k) { return k.indexOf('industry_flow_') === 0; })
+          .filter(function (k) { return k.indexOf('industry_flow_') === 0 || k.indexOf('industry_rel_mkt_') === 0; })
           .map(function (k) { return { code: k, weight: r.weights[k] }; })
           .sort(function (a, b) { return Math.abs(b.weight) - Math.abs(a.weight); });
         if (icfEntries.length) {
@@ -1847,7 +1855,7 @@
             return '<div class="kv-row"><span class="kv-label">' + escapeHtml(factorCodeCn_(e.code)) + '</span>' +
               '<span class="kv-value">' + fmtNum(e.weight, 6) + '</span></div>';
           }).join('');
-          icfHtml = '<details class="info-collapse" style="margin-top:4px;"><summary>產業資金流向因子權重（' +
+          icfHtml = '<details class="info-collapse" style="margin-top:4px;"><summary>產業相關因子權重（' +
             icfEntries.length + ' 種組合，依影響力排序）</summary><div class="info-body">' + icfRows +
             (allZero ? '<div class="meta-bar">全部剛好是 0——按下面「🔬 產業資金流向資料檢查」確認是真的沒用，還是資料本身有問題</div>' : '') +
             '</div></details>';
@@ -1879,8 +1887,9 @@
     });
   }
 
-  /** 下拉選單填入全部 24 種產業資金流向候選因子（見 FactorRegression.gs
-   *  getIndustryFlowFactorOptions），「策略研究」頁籤打開時載入一次即可，選項不會變動。 */
+  /** 下拉選單填入全部 36 種產業相關候選因子（24 種同業排名 + 12 種相對大盤強度，見
+   *  FactorRegression.gs getIndustryFlowFactorOptions），「策略研究」頁籤打開時載入一次
+   *  即可，選項不會變動。 */
   function loadIndustryFlowFactorOptions_() {
     var sel = document.getElementById('industryFlowFactorSelect');
     if (sel.children.length) return Promise.resolve(); // 已經載過，不用重載
