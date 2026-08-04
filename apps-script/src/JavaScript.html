@@ -1390,7 +1390,7 @@
   function loadResearchTab_() {
     return Promise.all([
       loadActiveFactorModelCard_(), loadFactorModelHistory_(), checkFactorRegressionJobOnLoad_(),
-      checkBacktestJobOnLoad_(), loadScreeningStrategy_()
+      checkBacktestJobOnLoad_(), loadScreeningStrategy_(), loadIndustryFlowFactorOptions_()
     ]);
   }
 
@@ -1452,10 +1452,22 @@
     bias60: '60日乖離率',
     dividend_yield: '殖利率',
     pe_ratio: '本益比',
-    pb_ratio: '股價淨值比',
-    industry_capital_flow: '產業資金流向（同業平均買賣超，Phase 3 訓練中）'
+    pb_ratio: '股價淨值比'
   };
-  function factorCodeCn_(code) { return FACTOR_CODE_CN[code] || code; }
+  var INDUSTRY_FLOW_TYPE_CN_ = { all: '三大法人合計', foreign: '外資', trust: '投信', dealer: '自營商' };
+  /** industry_flow_<type>_<window>d 這種動態產生的因子代碼（v3，24 種組合，見
+   *  FactorRegression.gs buildFeatureViewSql_）不寫死在上面那張表裡，用 regex 解析代碼本身
+   *  組出人性化標籤，新增/移除窗口天數也不用回來改這裡。 */
+  function factorCodeCn_(code) {
+    if (FACTOR_CODE_CN[code]) return FACTOR_CODE_CN[code];
+    var m = /^industry_flow_(all|foreign|trust|dealer)_(\d+)d$/.exec(code);
+    if (m) {
+      var typeCn = INDUSTRY_FLOW_TYPE_CN_[m[1]] || m[1];
+      var window = m[2];
+      return '產業資金流向・' + typeCn + '・' + window + '天' + (window === '1' ? '（單日）' : '移動平均');
+    }
+    return code;
+  }
 
   /** R2 是 0~1（甚至可能負值）的小數，畫面一律換算成百分比顯示；null/空字串/非數字一律顯示 '-'，
    *  不能讓 fmtNum(null*100) 誤算成看起來像「剛好 0%」的假數字。 */
@@ -1820,10 +1832,27 @@
       } else {
         deltaHtml = '<span class="compare-delta">（目前沒有套用中的版本可比較）</span>';
       }
-      var icfWeight = r.weights && r.weights.industry_capital_flow !== undefined ? r.weights.industry_capital_flow : null;
-      var icfHtml = icfWeight === null ? '' :
-        '<div class="meta-bar" style="margin-top:2px;">產業資金流向權重：' + fmtNum(icfWeight, 6) +
-        (icfWeight === 0 ? '（剛好是 0——按下面「檢查資料分佈」確認是真的沒用，還是資料本身有問題）' : '') + '</div>';
+      // v3：24 種產業資金流向候選因子（4 種法人類別 x 6 種移動平均窗口），依權重絕對值
+      // 由大到小列出來，一眼看出哪個法人類別/哪個平滑窗口被 LASSO 選中、貢獻最大，
+      // 不用自己一個一個去核對代碼。全部剛好都是 0 才顯示「檢查資料分佈」的提示。
+      var icfHtml = '';
+      if (r.weights) {
+        var icfEntries = Object.keys(r.weights)
+          .filter(function (k) { return k.indexOf('industry_flow_') === 0; })
+          .map(function (k) { return { code: k, weight: r.weights[k] }; })
+          .sort(function (a, b) { return Math.abs(b.weight) - Math.abs(a.weight); });
+        if (icfEntries.length) {
+          var allZero = icfEntries.every(function (e) { return e.weight === 0; });
+          var icfRows = icfEntries.map(function (e) {
+            return '<div class="kv-row"><span class="kv-label">' + escapeHtml(factorCodeCn_(e.code)) + '</span>' +
+              '<span class="kv-value">' + fmtNum(e.weight, 6) + '</span></div>';
+          }).join('');
+          icfHtml = '<details class="info-collapse" style="margin-top:4px;"><summary>產業資金流向因子權重（' +
+            icfEntries.length + ' 種組合，依影響力排序）</summary><div class="info-body">' + icfRows +
+            (allZero ? '<div class="meta-bar">全部剛好是 0——按下面「🔬 產業資金流向資料檢查」確認是真的沒用，還是資料本身有問題</div>' : '') +
+            '</div></details>';
+        }
+      }
       return '<div class="compare-row"><span>' + escapeHtml(r.labelName) + '　新 R² ' + pctOrDash_(r.r2) +
         (hasOld ? '　舊 R² ' + pctOrDash_(oldR2) : '') + '</span>' + deltaHtml + '</div>' + icfHtml;
     }).join('');
@@ -1850,12 +1879,26 @@
     });
   }
 
-  /** 「檢查 industry_capital_flow 資料分佈」按鈕：直接查 BigQuery 這一欄實際的資料，
-   *  分辨「權重是 0」到底是這個因子真的沒用，還是這一欄根本沒有真實資料。 */
+  /** 下拉選單填入全部 24 種產業資金流向候選因子（見 FactorRegression.gs
+   *  getIndustryFlowFactorOptions），「策略研究」頁籤打開時載入一次即可，選項不會變動。 */
+  function loadIndustryFlowFactorOptions_() {
+    var sel = document.getElementById('industryFlowFactorSelect');
+    if (sel.children.length) return Promise.resolve(); // 已經載過，不用重載
+    return callServer('getIndustryFlowFactorOptions').then(function (options) {
+      sel.innerHTML = options.map(function (o) {
+        return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>';
+      }).join('');
+    }).catch(function () { /* 選單載入失敗不擋其他頁面內容，按鈕按下去時 callServer 會再報一次錯 */ });
+  }
+
+  /** 「檢查資料分佈」按鈕：直接查 BigQuery 目前選定因子實際的資料，分辨「權重是 0」到底是
+   *  這個因子真的沒用，還是這一欄根本沒有真實資料。 */
   document.getElementById('industryFlowStatsBtn').addEventListener('click', function () {
     var el = document.getElementById('industryFlowStatsResult');
+    var factorName = document.getElementById('industryFlowFactorSelect').value;
+    if (!factorName) { el.innerHTML = '<div class="empty-hint">選單還沒載入完成，稍等一下再按一次</div>'; return; }
     el.innerHTML = '<div class="loading">查詢中...</div>';
-    withSpin(callServer('getIndustryCapitalFlowFactorStats')).then(function (s) {
+    withSpin(callServer('getIndustryCapitalFlowFactorStats', factorName)).then(function (s) {
       var pct = s.totalRows > 0 ? fmtNum(s.nonNeutralCount / s.totalRows * 100, 1) : '0';
       // v2 是排名版本（0~1），0.5 是「查不到產業別」的中性值，不是 0；真實的排名分佈標準差
       // 理論上應該落在 0.28~0.29 附近（接近均勻分布），這裡抓 0.05 當一個寬鬆的門檻。

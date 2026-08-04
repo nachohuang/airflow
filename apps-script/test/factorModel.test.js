@@ -158,38 +158,58 @@ loadIntoContext('FactorRegression.gs');
   // 抗跌力只看大盤下跌的天數（相對大盤，不是絕對回檔）
   assert.ok(sql.indexOf('WHEN mkt_return < 0 THEN daily_return - mkt_return') !== -1);
   assert.ok(sql.indexOf('ROWS BETWEEN 1 FOLLOWING AND 20 FOLLOWING') !== -1);
-  // 候選因子欄位都要出現在最終 SELECT（含 Phase 3 新增的 industry_capital_flow）
+  // 候選因子欄位都要出現在最終 SELECT（含 Phase 3 v3：4 種法人類別 x 6 種移動平均窗口＝24 個）
   context.CONFIG.FACTOR_CANDIDATE_COLUMNS.forEach(function (col) {
     assert.ok(sql.indexOf(col) !== -1, 'missing candidate column: ' + col);
   });
-  // Phase 3：要 LEFT JOIN 產業對照表，且用「排除自己」的同業平均（減掉自己的 inst_net，
-  // 除以「產業家數 - 1」），不能是單純加總（會把自己的買賣超算進自己的因子值，變成循環相關）
+  assert.strictEqual(context.CONFIG.FACTOR_CANDIDATE_COLUMNS.length, 34,
+    '10 個原本的因子 + 4 種法人類別 x 6 種窗口 = 24 個產業資金流向因子，應該共 34 個候選因子');
+  // 要 LEFT JOIN 產業對照表，且用「排除自己」的同業平均（減掉自己的來源欄位，除以「產業家數-1」），
+  // 不能是單純加總（會把自己的買賣超算進自己的因子值，變成循環相關）——四種法人類別都要各自算過
   assert.ok(sql.indexOf('LEFT JOIN `proj.ds.industry_map` im ON h.stock_id = im.stock_id') !== -1);
-  assert.ok(sql.indexOf('industry_inst_net_sum - inst_net') !== -1, '產業資金流向要排除自己，不是單純的產業總和');
-  assert.ok(sql.indexOf('industry_stock_count - 1') !== -1);
-  // v2：原始股數要換算成當天全市場的橫斷面排名（PERCENT_RANK），排名只對查得到產業別的列
-  // 算（WHERE industry_capital_flow_raw IS NOT NULL），不能把 NULL 也算進排名分母裡稀釋掉
-  // 真實資料的排名區間
-  assert.ok(sql.indexOf('PERCENT_RANK() OVER (PARTITION BY dt ORDER BY industry_capital_flow_raw)') !== -1,
-    '產業資金流向要換算成排名，不能直接用原始股數（量級跟其他因子差太多，容易被 LASSO 忽略）');
-  assert.ok(sql.indexOf('WHERE industry_capital_flow_raw IS NOT NULL') !== -1);
-  // 最終 SELECT 一定要用 COALESCE(...,0.5) 包住，不能讓查不到產業別的列（ETF、industry_map
-  // 還沒同步過）因為這一欄是 NULL，被 buildTrainModelSql_ 的 NOT NULL 條件整列排除掉——
-  // 實測真的發生過 industry_map 是空的時候，訓練查詢因此回傳 0 列直接失敗。0.5 是排名版本
-  // 合理的中性值（0 是排名版本裡「排名最低」的合法數值，不能再拿來當缺值標記）。
-  assert.ok(sql.indexOf('COALESCE(industry_capital_flow, 0.5) AS industry_capital_flow') !== -1,
-    'industry_capital_flow 缺值時要 COALESCE 成 0.5（排名版本的中性值），不能用 0（那是合法的最低排名）');
+  ['inst_net', 'foreign_v', 'trust_v', 'dealer_v'].forEach(function (col) {
+    assert.ok(sql.indexOf('- ' + col + ', industry_stock_count - 1') !== -1,
+      '每種法人類別（' + col + '）都要排除自己算同業平均，不是單純的產業總和');
+  });
+  // 每種法人類別 x 每個窗口都要有移動平均（窗口=1 是原始值本身，不用另外開窗；窗口>1 要用
+  // ROWS BETWEEN N-1 PRECEDING AND CURRENT ROW）
+  assert.ok(sql.indexOf('industry_flow_raw_all AS industry_flow_ma_all_1d') !== -1,
+    '窗口=1 應該直接用原始值，不需要另外算移動平均');
+  [5, 10, 15, 30, 60].forEach(function (w) {
+    assert.ok(sql.indexOf('ROWS BETWEEN ' + (w - 1) + ' PRECEDING AND CURRENT ROW) AS industry_flow_ma_all_' + w + 'd') !== -1,
+      '窗口 ' + w + ' 天應該用 ROWS BETWEEN ' + (w - 1) + ' PRECEDING');
+  });
+  // 每個 MA 欄位都要換算成當天全市場的橫斷面排名（PERCENT_RANK），來源值是 NULL 時要明確
+  // CASE WHEN 覆寫成中性值 0.5（不能只靠 COALESCE，PERCENT_RANK 不會把 NULL 排序鍵留成 NULL）
+  assert.ok(sql.indexOf('CASE WHEN industry_flow_ma_all_1d IS NULL THEN 0.5' +
+    ' ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY industry_flow_ma_all_1d) END AS industry_flow_all_1d') !== -1,
+    '產業資金流向要換算成排名，量級才會跟其他因子一致，不容易被 LASSO 忽略');
+  // 最終 SELECT 一定要用 COALESCE(...,0.5) 包住每一個因子，不能讓查不到產業別的列（ETF、
+  // industry_map 還沒同步過）因為某一欄是 NULL 就被 buildTrainModelSql_ 的 NOT NULL 條件
+  // 整列排除掉——實測真的發生過 industry_map 是空的時候，訓練查詢因此回傳 0 列直接失敗。
+  assert.ok(sql.indexOf('COALESCE(industry_flow_foreign_30d, 0.5) AS industry_flow_foreign_30d') !== -1,
+    '每個產業資金流向因子缺值時都要 COALESCE 成 0.5，不能用 0（那是合法的最低排名）');
   console.log('Test buildFeatureViewSql_ passed.');
 }
 
 // --- buildIndustryCapitalFlowStatsSql_ ---
 {
-  const sql = context.buildIndustryCapitalFlowStatsSql_('proj.ds.factor_features');
+  const sql = context.buildIndustryCapitalFlowStatsSql_('proj.ds.factor_features', 'industry_flow_trust_10d');
   assert.ok(sql.indexOf('FROM `proj.ds.factor_features`') !== -1);
-  // 要能分辨「權重是 0」是真的沒用還是資料本身有問題，非中性值(≠0.5)筆數跟標準差是關鍵
-  assert.ok(sql.indexOf('COUNTIF(industry_capital_flow != 0.5) AS non_neutral_count') !== -1);
-  assert.ok(sql.indexOf('STDDEV(industry_capital_flow) AS stddev_v') !== -1);
+  // 要能分辨「權重是 0」是真的沒用還是資料本身有問題，非中性值(≠0.5)筆數跟標準差是關鍵，
+  // 而且要查的是呼叫端指定的那個欄位，不能寫死成單一因子
+  assert.ok(sql.indexOf('COUNTIF(industry_flow_trust_10d != 0.5) AS non_neutral_count') !== -1);
+  assert.ok(sql.indexOf('STDDEV(industry_flow_trust_10d) AS stddev_v') !== -1);
   console.log('Test buildIndustryCapitalFlowStatsSql_ passed.');
+}
+
+// --- getIndustryFlowFactorOptions ---
+{
+  const options = context.getIndustryFlowFactorOptions();
+  assert.strictEqual(options.length, 24, '4 種法人類別 x 6 種窗口 = 24 個選項');
+  assert.ok(options.some(function (o) { return o.value === 'industry_flow_foreign_5d' && o.label.indexOf('外資') !== -1; }));
+  assert.ok(options.some(function (o) { return o.value === 'industry_flow_all_1d' && o.label.indexOf('單日') !== -1; }));
+  console.log('Test getIndustryFlowFactorOptions passed.');
 }
 
 // --- buildTrainModelSql_ ---

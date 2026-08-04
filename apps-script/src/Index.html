@@ -172,12 +172,15 @@
             <h3>🔬 產業資金流向資料檢查</h3>
             <div class="meta-bar">
               權重是 0 分不出來是「這個因子真的沒有預測力」還是「這一欄根本沒有真實資料」——
-              LASSO 對這兩種情況都會把權重壓到剛好 0。這裡直接查 BigQuery 裡這一欄實際的資料
+              LASSO 對這兩種情況都會把權重壓到剛好 0。這裡直接查 BigQuery 裡指定因子實際的資料
               分佈（0~1 的排名值，0.5 代表查不到產業別的中性值），標準差接近 0 或幾乎所有列
               都卡在 0.5，就代表資料本身有問題（例如產業對照表沒同步好），不是這個因子真的沒用。
+              現在有 24 種組合（三大法人合計／外資／投信／自營商 × 1/5/10/15/30/60 天移動平均），
+              挑一個檢查。
             </div>
-            <div class="form-actions">
-              <button type="button" class="btn-secondary" id="industryFlowStatsBtn">🔍 檢查 industry_capital_flow 資料分佈</button>
+            <div class="inline-form">
+              <select id="industryFlowFactorSelect"></select>
+              <button type="button" class="btn-secondary" id="industryFlowStatsBtn">🔍 檢查資料分佈</button>
             </div>
             <div id="industryFlowStatsResult"></div>
           </div>

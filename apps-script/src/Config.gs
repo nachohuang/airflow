@@ -183,23 +183,43 @@ var CONFIG = {
 
   // 拿來做迴歸的候選因子欄位（都是 factor_features view 算出來的欄位名稱）。
   //
-  // industry_capital_flow（Phase 3，見 IndustryCapitalFlow.gs 的 Phase 2 唯讀驗證）刻意只加
-  // 在這裡（進訓練），沒有加進下面的 BQ_FEATURE_TO_ANALYSIS_FIELD——這是有意的範圍界線：
+  // industry_flow_*（Phase 3，見 IndustryCapitalFlow.gs 的 Phase 2 唯讀驗證）刻意只加在
+  // 這裡（進訓練），沒有加進下面的 BQ_FEATURE_TO_ANALYSIS_FIELD——這是有意的範圍界線：
   // 加進候選因子清單，就會被 BQML LASSO 一起訓練，「關鍵影響因子」卡片跟權重/R² 看得出
-  // 這個因子有沒有預測力；但「即時預測分數」（今日戰報/回測用來排名的 PredictedResistance_Rank）
-  // 還沒有接這個因子——要讓即時預測正確運作，today's/回測用的每一天資料都要用跟訓練時
+  // 這些因子有沒有預測力；但「即時預測分數」（今日戰報/回測用來排名的 PredictedResistance_Rank）
+  // 還沒有接這些因子——要讓即時預測正確運作，today's/回測用的每一天資料都要用跟訓練時
   // 完全一致的「JOIN 產業對照表 + 依產業橫斷面加總」邏輯重算一次，這牽涉到另外兩支
   // SQL（buildLatestDayFactorsSql_／buildRangeFactorsSql_）都要同步更新且行為一致，
   // 沒辦法在這個環境實際連上 BigQuery 測試，貿然接上有一定機率讓現有戰報/回測功能
-  // 因為改壞 SQL 而出錯。所以先只做「訓練＋觀察是否有效」這一步：這個因子如果被 LASSO
+  // 因為改壞 SQL 而出錯。所以先只做「訓練＋觀察是否有效」這一步：這些因子如果被 LASSO
   // 選中且權重不是 0，computeWeightedFactorScore_ 會因為查不到 BQ_FEATURE_TO_ANALYSIS_FIELD
   // 對應欄位而直接跳過那一項（見該函式「理論上不會發生...保守跳過」的既有防呆邏輯），
-  // 不會出錯、也不會讓預測分數變成 null——但也不會真的把這個因子的貢獻算進即時預測分數。
-  // 等確認這個因子在訓練結果裡真的有效，才值得投入去同步改那兩支 SQL（下一階段）。
+  // 不會出錯、也不會讓預測分數變成 null——但也不會真的把這些因子的貢獻算進即時預測分數。
+  // 等確認哪些因子在訓練結果裡真的有效，才值得投入去同步改那兩支 SQL（下一階段）。
   FACTOR_CANDIDATE_COLUMNS: [
     'inst_participation', 'inst_part_ma5', 'ibf_20d', 'trend_score', 'ma20_slope',
-    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio', 'industry_capital_flow'
+    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio'
   ],
+
+  // 產業資金流向的候選因子矩陣：4 種法人類別（三大法人合計 + 外資/投信/自營商各自）
+  // × 6 種移動平均窗口（1天=不平滑、5/10/15/30/60天），一次全部丟進訓練讓 LASSO 自己選
+  // 哪個組合最有效——單日版本（1天窗口）實測權重太小、幾乎測不出對 R² 的貢獻，使用者要求
+  // 同時試不同天數的移動平均，也要分拆不同法人來源分開試。每個組合都會產生一個名叫
+  // industry_flow_<type>_<window>d 的候選因子欄位（見 buildFeatureViewSql_ 的產生邏輯），
+  // 4*6=24 個，一起 push 進 FACTOR_CANDIDATE_COLUMNS。
+  INDUSTRY_FLOW_INVESTOR_TYPES: [
+    { key: 'all', label: '三大法人合計', column: 'inst_net' },
+    { key: 'foreign', label: '外資', column: 'foreign_v' },
+    { key: 'trust', label: '投信', column: 'trust_v' },
+    { key: 'dealer', label: '自營商', column: 'dealer_v' }
+  ],
+  INDUSTRY_FLOW_WINDOWS: [1, 5, 10, 15, 30, 60],
+
+  /** 產生單一「產業資金流向」候選因子欄位名稱，SQL 產生（FactorRegression.gs）跟這裡
+   *  的候選因子清單都呼叫這個，兩邊命名保證一致，不會因為手動拼字漏掉或拼錯。 */
+  industryFlowFactorName: function (typeKey, window) {
+    return 'industry_flow_' + typeKey + '_' + window + 'd';
+  },
 
   // BigQuery 因子回歸的候選欄位名稱 -> Analysis.gs computeFactors_ 算出來的同一個量（或原始 CSV 欄位）
   // 的欄位名稱。套用某一版因子模型後，Analysis.gs 用這個對照表把 BQML 權重乘回每天算好的因子值，
@@ -292,6 +312,15 @@ var CONFIG = {
   DEFAULT_TRIGGER_HOUR: 20,
   DEFAULT_TRIGGER_MINUTE: 30
 };
+
+// 把「產業資金流向」4 種法人類別 × 6 種移動平均窗口的候選因子欄位名稱，全部 push 進候選
+// 因子清單——集中寫在這裡（跟 CONFIG 物件本身分開），是因為要呼叫 CONFIG.industryFlowFactorName
+// 這個剛剛定義好的函式，避免在物件字面量裡面互相引用自己還沒宣告完的屬性。
+CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
+  CONFIG.INDUSTRY_FLOW_WINDOWS.forEach(function (w) {
+    CONFIG.FACTOR_CANDIDATE_COLUMNS.push(CONFIG.industryFlowFactorName(t.key, w));
+  });
+});
 
 /**
  * ============================================================================
