@@ -175,6 +175,16 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test buildFeatureViewSql_ passed.');
 }
 
+// --- buildIndustryCapitalFlowStatsSql_ ---
+{
+  const sql = context.buildIndustryCapitalFlowStatsSql_('proj.ds.factor_features');
+  assert.ok(sql.indexOf('FROM `proj.ds.factor_features`') !== -1);
+  // 要能分辨「權重是 0」是真的沒用還是資料本身有問題，非零筆數跟標準差是關鍵
+  assert.ok(sql.indexOf('COUNTIF(industry_capital_flow != 0) AS non_zero_count') !== -1);
+  assert.ok(sql.indexOf('STDDEV(industry_capital_flow) AS stddev_v') !== -1);
+  console.log('Test buildIndustryCapitalFlowStatsSql_ passed.');
+}
+
 // --- buildTrainModelSql_ ---
 {
   const sql = context.buildTrainModelSql_(

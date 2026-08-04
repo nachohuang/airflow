@@ -1820,8 +1820,12 @@
       } else {
         deltaHtml = '<span class="compare-delta">（目前沒有套用中的版本可比較）</span>';
       }
+      var icfWeight = r.weights && r.weights.industry_capital_flow !== undefined ? r.weights.industry_capital_flow : null;
+      var icfHtml = icfWeight === null ? '' :
+        '<div class="meta-bar" style="margin-top:2px;">產業資金流向權重：' + fmtNum(icfWeight, 6) +
+        (icfWeight === 0 ? '（剛好是 0——按下面「檢查資料分佈」確認是真的沒用，還是資料本身有問題）' : '') + '</div>';
       return '<div class="compare-row"><span>' + escapeHtml(r.labelName) + '　新 R² ' + pctOrDash_(r.r2) +
-        (hasOld ? '　舊 R² ' + pctOrDash_(oldR2) : '') + '</span>' + deltaHtml + '</div>';
+        (hasOld ? '　舊 R² ' + pctOrDash_(oldR2) : '') + '</span>' + deltaHtml + '</div>' + icfHtml;
     }).join('');
 
     var hasSuccess = results.some(function (r) { return !r.error; });
@@ -1845,6 +1849,25 @@
       compareEl.innerHTML = '';
     });
   }
+
+  /** 「檢查 industry_capital_flow 資料分佈」按鈕：直接查 BigQuery 這一欄實際的資料，
+   *  分辨「權重是 0」到底是這個因子真的沒用，還是這一欄根本沒有真實資料。 */
+  document.getElementById('industryFlowStatsBtn').addEventListener('click', function () {
+    var el = document.getElementById('industryFlowStatsResult');
+    el.innerHTML = '<div class="loading">查詢中...</div>';
+    withSpin(callServer('getIndustryCapitalFlowFactorStats')).then(function (s) {
+      var pct = s.totalRows > 0 ? fmtNum(s.nonZeroCount / s.totalRows * 100, 1) : '0';
+      var looksReal = s.nonZeroCount > 0 && s.stddev !== null && s.stddev > 0;
+      el.innerHTML =
+        '<div style="font-weight:700; color:' + (looksReal ? 'var(--green)' : 'var(--red)') + ';">' +
+        (looksReal ? '✅ 這一欄有真實的變動資料' : '⚠️ 這一欄看起來幾乎是常數，資料可能有問題') + '</div>' +
+        '<div class="meta-bar">總列數 ' + fmtNum(s.totalRows, 0) + '　非空值 ' + fmtNum(s.nonNullCount, 0) +
+        '　非零值 ' + fmtNum(s.nonZeroCount, 0) + '（' + pct + '%）</div>' +
+        '<div class="meta-bar">最小值 ' + fmtNum(s.min, 0) + '　最大值 ' + fmtNum(s.max, 0) +
+        '　平均 ' + fmtNum(s.avg, 2) + '　標準差 ' + fmtNum(s.stddev, 2) + '</div>' +
+        (looksReal ? '' : '<div class="meta-bar">如果非零值筆數接近 0，通常代表產業對照表（industry_map）在 BigQuery 裡沒有真實資料——去「系統與資料後台 → 資料庫與模式 → 產業對照表」確認上次同步是不是成功。</div>');
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
 
   /** 「策略研究」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後，完全不知道背景工作
    *  跑到哪、甚至早就做完了。只有真的有 job（狀態是 running）時才顯示/開始輪詢。 */

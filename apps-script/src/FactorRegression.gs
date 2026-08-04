@@ -128,6 +128,28 @@ function factorModelName_(labelKey) {
   return 'factor_model_' + labelKey;
 }
 
+/**
+ * 診斷用：查 factor_features view 裡 industry_capital_flow 這一欄的資料分佈——因為 LASSO
+ * 對「真的沒有預測力」跟「這欄根本是常數（例如 industry_map 沒同步好、全部是 COALESCE
+ * 出來的 0）」這兩種情況，訓練出來的權重看起來會一樣（都很可能是精確的 0，LASSO 本來就是
+ * 設計成會把沒用的因子壓到剛好 0），單看權重數字沒辦法分辨到底是「這個因子真的沒用」還是
+ * 「這個因子根本沒有真實資料」。用非零筆數／標準差直接看這一欄有沒有真實的變動——標準差
+ * 接近 0 或非零筆數接近 0，代表資料本身有問題，不是這個因子真的沒有預測力。
+ */
+function buildIndustryCapitalFlowStatsSql_(viewRef) {
+  return [
+    'SELECT',
+    '  COUNT(*) AS total_rows,',
+    '  COUNTIF(industry_capital_flow IS NOT NULL) AS non_null_count,',
+    '  COUNTIF(industry_capital_flow != 0) AS non_zero_count,',
+    '  MIN(industry_capital_flow) AS min_v,',
+    '  MAX(industry_capital_flow) AS max_v,',
+    '  AVG(industry_capital_flow) AS avg_v,',
+    '  STDDEV(industry_capital_flow) AS stddev_v',
+    'FROM `' + viewRef + '`'
+  ].join('\n');
+}
+
 function buildTrainModelSql_(modelRef, viewRef, labelColumn, featureColumns, l1Reg) {
   var selectCols = featureColumns.concat([labelColumn]).join(', ');
   var notNullConds = featureColumns.concat([labelColumn]).map(function (c) { return c + ' IS NOT NULL'; }).join(' AND ');
@@ -241,6 +263,31 @@ function trainFactorModel_(settings, labelDef, l1Reg) {
     weights: weights,
     featureColumns: CONFIG.FACTOR_CANDIDATE_COLUMNS,
     l1Reg: l1Reg
+  };
+}
+
+/**
+ * 前端「檢查 industry_capital_flow 資料分佈」按鈕呼叫：直接查 factor_features view 裡這一欄
+ * 實際的資料分佈，用來回答「這個因子的權重是 0，到底是真的沒有預測力，還是這一欄根本沒有
+ * 真實資料（例如 industry_map 沒同步好）」——這兩種情況訓練出來的權重可能長得一模一樣
+ * （LASSO 本來就會把沒用的因子壓到剛好 0），不看實際資料分佈沒辦法分辨。
+ */
+function getIndustryCapitalFlowFactorStats() {
+  var settings = requireBigQueryProjectId_();
+  ensureFeatureView_(settings);
+  var rows = runBqQuery_(buildIndustryCapitalFlowStatsSql_(bqFeatureViewRef_(settings)), 'industry_capital_flow_stats');
+  if (!rows || rows.length === 0) {
+    return { totalRows: 0, nonNullCount: 0, nonZeroCount: 0, min: null, max: null, avg: null, stddev: null };
+  }
+  var r = rows[0];
+  return {
+    totalRows: parseInt(r.total_rows, 10) || 0,
+    nonNullCount: parseInt(r.non_null_count, 10) || 0,
+    nonZeroCount: parseInt(r.non_zero_count, 10) || 0,
+    min: r.min_v === null || r.min_v === undefined ? null : parseFloat(r.min_v),
+    max: r.max_v === null || r.max_v === undefined ? null : parseFloat(r.max_v),
+    avg: r.avg_v === null || r.avg_v === undefined ? null : parseFloat(r.avg_v),
+    stddev: r.stddev_v === null || r.stddev_v === undefined ? null : parseFloat(r.stddev_v)
   };
 }
 
