@@ -268,8 +268,9 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf("optimize_strategy='BATCH_GRADIENT_DESCENT'") !== -1);
   assert.ok(sql.indexOf("learn_rate_strategy='LINE_SEARCH'") !== -1);
   // 候選因子多、彼此高度相關時，預設的提前停止很容易讓訓練在 L1 懲罰真正累積起作用之前
-  // 就收斂，必須拉高 max_iterations、調嚴 min_rel_progress 讓訓練真的跑到收斂
-  assert.ok(sql.indexOf('max_iterations=100') !== -1);
+  // 就收斂，必須拉高 max_iterations、調嚴 min_rel_progress 讓訓練真的跑到收斂——BQML 對
+  // 單次訓練的 max_iterations 有硬性上限「必須小於 50」，只能設到 49
+  assert.ok(sql.indexOf('max_iterations=49') !== -1);
   assert.ok(sql.indexOf('min_rel_progress=0.0001') !== -1);
   console.log('Test buildTrainModelSql_ passed.');
 }

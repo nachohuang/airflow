@@ -294,7 +294,9 @@ function buildIndustryCapitalFlowStatsSql_(viewRef, columnName) {
  *   - learn_rate_strategy='LINE_SEARCH'：自動找每一步最適合的學習率，比固定學習率更容易
  *     穩定收斂。
  *   - max_iterations 拉高、min_rel_progress 門檻調嚴：讓訓練真的跑到收斂，L1 懲罰才有機會
- *     確實把不重要的因子壓到 0，而不是被提前停止打斷。
+ *     確實把不重要的因子壓到 0，而不是被提前停止打斷。BQML 對單次訓練的 max_iterations
+ *     有硬性上限「必須小於 50」（實測撞過這個限制，錯誤訊息明確要求改用 warm_start 才能
+ *     跑更多輪），所以這裡只能設到 49，不能像原本想的設 100。
  */
 function buildTrainModelSql_(modelRef, viewRef, labelColumn, featureColumns, l1Reg) {
   var selectCols = featureColumns.concat([labelColumn]).join(', ');
@@ -306,7 +308,7 @@ function buildTrainModelSql_(modelRef, viewRef, labelColumn, featureColumns, l1R
     "  optimize_strategy='BATCH_GRADIENT_DESCENT',",
     "  learn_rate_strategy='LINE_SEARCH',",
     '  l1_reg=' + l1Reg + ',',
-    '  max_iterations=100,',
+    '  max_iterations=49,',
     '  min_rel_progress=0.0001,',
     "  input_label_cols=['" + labelColumn + "'],",
     "  data_split_method='RANDOM',",
