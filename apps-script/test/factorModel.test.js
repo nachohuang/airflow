@@ -263,6 +263,14 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf("input_label_cols=['label_return_1m']") !== -1);
   assert.ok(sql.indexOf('inst_part_ma5, ibf_20d, label_return_1m') !== -1);
   assert.ok(sql.indexOf('inst_part_ma5 IS NOT NULL AND ibf_20d IS NOT NULL AND label_return_1m IS NOT NULL') !== -1);
+  // l1_reg 沒有封閉解，一定要明確指定梯度下降法，不能留給 AUTO_STRATEGY 自動判斷
+  // （否則資料量夠大時可能選到 NORMAL_EQUATION，導致 l1_reg 形同虛設）
+  assert.ok(sql.indexOf("optimize_strategy='BATCH_GRADIENT_DESCENT'") !== -1);
+  assert.ok(sql.indexOf("learn_rate_strategy='LINE_SEARCH'") !== -1);
+  // 候選因子多、彼此高度相關時，預設的提前停止很容易讓訓練在 L1 懲罰真正累積起作用之前
+  // 就收斂，必須拉高 max_iterations、調嚴 min_rel_progress 讓訓練真的跑到收斂
+  assert.ok(sql.indexOf('max_iterations=100') !== -1);
+  assert.ok(sql.indexOf('min_rel_progress=0.0001') !== -1);
   console.log('Test buildTrainModelSql_ passed.');
 }
 

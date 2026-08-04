@@ -282,6 +282,20 @@ function buildIndustryCapitalFlowStatsSql_(viewRef, columnName) {
   ].join('\n');
 }
 
+/**
+ * 實測發現：候選因子從 24 個擴充到 46 個之後，把 l1_reg 從 0.05 加倍到 0.1，幾乎所有權重
+ * 都沒什麼變化（差異在小數點第4~5位以後）——不是 L1 強度不夠，是訓練根本沒有跑到收斂。
+ * BigQuery ML 的預設是梯度下降法配「提前停止」（一次迭代的損失改善低於 1% 就收斂，最多
+ * 只跑 20 輪），候選因子多、彼此又高度相關時，每一步梯度下降能帶來的損失改善天生就很小，
+ * 很容易在 L1 懲罰真正累積起作用之前就提前收斂，係數看起來還很接近沒做正規化的樣子。
+ * 所以這裡明確加上：
+ *   - optimize_strategy='BATCH_GRADIENT_DESCENT'：l1_reg 沒有封閉解，一定要用梯度下降法
+ *     才有意義（NORMAL_EQUATION 無法處理 L1 懲罰項），不留給 AUTO_STRATEGY 自動判斷。
+ *   - learn_rate_strategy='LINE_SEARCH'：自動找每一步最適合的學習率，比固定學習率更容易
+ *     穩定收斂。
+ *   - max_iterations 拉高、min_rel_progress 門檻調嚴：讓訓練真的跑到收斂，L1 懲罰才有機會
+ *     確實把不重要的因子壓到 0，而不是被提前停止打斷。
+ */
 function buildTrainModelSql_(modelRef, viewRef, labelColumn, featureColumns, l1Reg) {
   var selectCols = featureColumns.concat([labelColumn]).join(', ');
   var notNullConds = featureColumns.concat([labelColumn]).map(function (c) { return c + ' IS NOT NULL'; }).join(' AND ');
@@ -289,7 +303,11 @@ function buildTrainModelSql_(modelRef, viewRef, labelColumn, featureColumns, l1R
     'CREATE OR REPLACE MODEL `' + modelRef + '`',
     'OPTIONS(',
     "  model_type='linear_reg',",
+    "  optimize_strategy='BATCH_GRADIENT_DESCENT',",
+    "  learn_rate_strategy='LINE_SEARCH',",
     '  l1_reg=' + l1Reg + ',',
+    '  max_iterations=100,',
+    '  min_rel_progress=0.0001,',
     "  input_label_cols=['" + labelColumn + "'],",
     "  data_split_method='RANDOM',",
     '  data_split_eval_fraction=0.2',
