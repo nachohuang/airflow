@@ -1856,16 +1856,18 @@
     var el = document.getElementById('industryFlowStatsResult');
     el.innerHTML = '<div class="loading">查詢中...</div>';
     withSpin(callServer('getIndustryCapitalFlowFactorStats')).then(function (s) {
-      var pct = s.totalRows > 0 ? fmtNum(s.nonZeroCount / s.totalRows * 100, 1) : '0';
-      var looksReal = s.nonZeroCount > 0 && s.stddev !== null && s.stddev > 0;
+      var pct = s.totalRows > 0 ? fmtNum(s.nonNeutralCount / s.totalRows * 100, 1) : '0';
+      // v2 是排名版本（0~1），0.5 是「查不到產業別」的中性值，不是 0；真實的排名分佈標準差
+      // 理論上應該落在 0.28~0.29 附近（接近均勻分布），這裡抓 0.05 當一個寬鬆的門檻。
+      var looksReal = s.nonNeutralCount > 0 && s.stddev !== null && s.stddev > 0.05;
       el.innerHTML =
         '<div style="font-weight:700; color:' + (looksReal ? 'var(--green)' : 'var(--red)') + ';">' +
-        (looksReal ? '✅ 這一欄有真實的變動資料' : '⚠️ 這一欄看起來幾乎是常數，資料可能有問題') + '</div>' +
+        (looksReal ? '✅ 這一欄有真實的變動資料' : '⚠️ 這一欄看起來幾乎都卡在中性值，資料可能有問題') + '</div>' +
         '<div class="meta-bar">總列數 ' + fmtNum(s.totalRows, 0) + '　非空值 ' + fmtNum(s.nonNullCount, 0) +
-        '　非零值 ' + fmtNum(s.nonZeroCount, 0) + '（' + pct + '%）</div>' +
-        '<div class="meta-bar">最小值 ' + fmtNum(s.min, 0) + '　最大值 ' + fmtNum(s.max, 0) +
-        '　平均 ' + fmtNum(s.avg, 2) + '　標準差 ' + fmtNum(s.stddev, 2) + '</div>' +
-        (looksReal ? '' : '<div class="meta-bar">如果非零值筆數接近 0，通常代表產業對照表（industry_map）在 BigQuery 裡沒有真實資料——去「系統與資料後台 → 資料庫與模式 → 產業對照表」確認上次同步是不是成功。</div>');
+        '　非中性值(≠0.5) ' + fmtNum(s.nonNeutralCount, 0) + '（' + pct + '%）</div>' +
+        '<div class="meta-bar">最小值 ' + fmtNum(s.min, 3) + '　最大值 ' + fmtNum(s.max, 3) +
+        '　平均 ' + fmtNum(s.avg, 3) + '　標準差 ' + fmtNum(s.stddev, 3) + '（0~1 排名，理論上標準差接近 0.29 代表分佈接近均勻）</div>' +
+        (looksReal ? '' : '<div class="meta-bar">如果幾乎所有列都卡在 0.5，通常代表產業對照表（industry_map）在 BigQuery 裡沒有真實資料——去「系統與資料後台 → 資料庫與模式 → 產業對照表」確認上次同步是不是成功。</div>');
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   });
 

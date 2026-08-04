@@ -167,11 +167,18 @@ loadIntoContext('FactorRegression.gs');
   assert.ok(sql.indexOf('LEFT JOIN `proj.ds.industry_map` im ON h.stock_id = im.stock_id') !== -1);
   assert.ok(sql.indexOf('industry_inst_net_sum - inst_net') !== -1, '產業資金流向要排除自己，不是單純的產業總和');
   assert.ok(sql.indexOf('industry_stock_count - 1') !== -1);
-  // 最終 SELECT 一定要用 COALESCE(...,0) 包住，不能讓查不到產業別的列（ETF、industry_map
+  // v2：原始股數要換算成當天全市場的橫斷面排名（PERCENT_RANK），排名只對查得到產業別的列
+  // 算（WHERE industry_capital_flow_raw IS NOT NULL），不能把 NULL 也算進排名分母裡稀釋掉
+  // 真實資料的排名區間
+  assert.ok(sql.indexOf('PERCENT_RANK() OVER (PARTITION BY dt ORDER BY industry_capital_flow_raw)') !== -1,
+    '產業資金流向要換算成排名，不能直接用原始股數（量級跟其他因子差太多，容易被 LASSO 忽略）');
+  assert.ok(sql.indexOf('WHERE industry_capital_flow_raw IS NOT NULL') !== -1);
+  // 最終 SELECT 一定要用 COALESCE(...,0.5) 包住，不能讓查不到產業別的列（ETF、industry_map
   // 還沒同步過）因為這一欄是 NULL，被 buildTrainModelSql_ 的 NOT NULL 條件整列排除掉——
-  // 實測真的發生過 industry_map 是空的時候，訓練查詢因此回傳 0 列直接失敗。
-  assert.ok(sql.indexOf('COALESCE(industry_capital_flow, 0) AS industry_capital_flow') !== -1,
-    'industry_capital_flow 缺值時要 COALESCE 成 0，不能讓 NULL 拖累整列被排除在訓練資料外');
+  // 實測真的發生過 industry_map 是空的時候，訓練查詢因此回傳 0 列直接失敗。0.5 是排名版本
+  // 合理的中性值（0 是排名版本裡「排名最低」的合法數值，不能再拿來當缺值標記）。
+  assert.ok(sql.indexOf('COALESCE(industry_capital_flow, 0.5) AS industry_capital_flow') !== -1,
+    'industry_capital_flow 缺值時要 COALESCE 成 0.5（排名版本的中性值），不能用 0（那是合法的最低排名）');
   console.log('Test buildFeatureViewSql_ passed.');
 }
 
@@ -179,8 +186,8 @@ loadIntoContext('FactorRegression.gs');
 {
   const sql = context.buildIndustryCapitalFlowStatsSql_('proj.ds.factor_features');
   assert.ok(sql.indexOf('FROM `proj.ds.factor_features`') !== -1);
-  // 要能分辨「權重是 0」是真的沒用還是資料本身有問題，非零筆數跟標準差是關鍵
-  assert.ok(sql.indexOf('COUNTIF(industry_capital_flow != 0) AS non_zero_count') !== -1);
+  // 要能分辨「權重是 0」是真的沒用還是資料本身有問題，非中性值(≠0.5)筆數跟標準差是關鍵
+  assert.ok(sql.indexOf('COUNTIF(industry_capital_flow != 0.5) AS non_neutral_count') !== -1);
   assert.ok(sql.indexOf('STDDEV(industry_capital_flow) AS stddev_v') !== -1);
   console.log('Test buildIndustryCapitalFlowStatsSql_ passed.');
 }

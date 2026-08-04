@@ -173,8 +173,8 @@
             <div class="meta-bar">
               權重是 0 分不出來是「這個因子真的沒有預測力」還是「這一欄根本沒有真實資料」——
               LASSO 對這兩種情況都會把權重壓到剛好 0。這裡直接查 BigQuery 裡這一欄實際的資料
-              分佈，非零筆數/標準差接近 0 就代表資料本身有問題（例如產業對照表沒同步好），
-              不是這個因子真的沒用。
+              分佈（0~1 的排名值，0.5 代表查不到產業別的中性值），標準差接近 0 或幾乎所有列
+              都卡在 0.5，就代表資料本身有問題（例如產業對照表沒同步好），不是這個因子真的沒用。
             </div>
             <div class="form-actions">
               <button type="button" class="btn-secondary" id="industryFlowStatsBtn">🔍 檢查 industry_capital_flow 資料分佈</button>

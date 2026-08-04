@@ -23,13 +23,21 @@
  * industryMapTableRef：Phase 3 新增，IndustryMap.gs 同步過去的「股票代號→產業別」小型參考表
  * （見 BigQuerySync.gs syncIndustryMapToBigQuery_）。LEFT JOIN 進來只用來算 industry_capital_flow
  * 這一個候選因子——查不到產業別（例如 ETF、上櫃股票，見 IndustryMap.gs 說明）的股票這個
- * 因子就是 NULL，不影響其他因子照常計算。
+ * 因子就是中性值 0.5（見下方說明），不影響其他因子照常計算。
  *
- * industry_capital_flow 定義：「同產業其他股票（排除自己）當天法人買賣超的平均值」，不是
- * 單純把同產業全部股票的買賣超加總——加總的話會把「這檔股票自己的買賣超」也算進它自己的
- * 因子值裡，變成自己預測自己的循環相關，訓練出來的權重會失真；排除自己、只看「同業其他
- * 人在幹嘛」才是乾淨的橫斷面訊號。用 SAFE_DIVIDE 處理「這個產業當天只有這一檔股票」的
- * 邊界情況（分母是 0），這種情況因子值就是 NULL，不會撞到除以 0 的錯誤。
+ * industry_capital_flow 定義（v2，改成排名版本）：
+ *   1. 先算「同產業其他股票（排除自己）當天法人買賣超的平均值」（industry_capital_flow_raw）——
+ *      不是單純把同產業全部股票加總，加總會把這檔股票自己的買賣超算進自己的因子值裡，變成
+ *      自己預測自己的循環相關，訓練出來的權重會失真。
+ *   2. 再把這個原始股數值，換算成「當天全市場的橫斷面排名百分位」（0~1，PERCENT_RANK，
+ *      只對查得到產業別的股票排名，不含 NULL）——實測發現直接用原始股數（量級可以到
+ *      ±2000萬）當因子，LASSO 訓練出來的權重固定是 0，可能是因為其他候選因子幾乎都是
+ *      0~1 或個位數量級的比率/排名（法人參與度、乖離率…），L1 正規化對「係數大小」懲罰，
+ *      量級差太多的因子天生更容易被壓到 0，換算成排名才能跟其他因子公平比較。
+ *      查不到產業別的股票（ETF、industry_map 還沒同步好）沒有排名可算，用 0.5（中位數，
+ *      代表「不特別偏多也不特別偏空」的中性值）取代，不能留 NULL——buildTrainModelSql_
+ *      要求所有候選因子都 NOT NULL 才會拿去訓練，NULL 會讓整列被排除在訓練資料外
+ *      （實測真的發生過 industry_map 是空的時候，訓練查詢因此回傳 0 列直接失敗）。
  */
 function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
   return [
@@ -79,15 +87,29 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '    SUM(is_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS drop_count_20,',
     '    SUM(is_inst_buy_on_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS buy_on_drop_20,',
     '    CASE WHEN industry IS NOT NULL AND industry_stock_count > 1',
-    '      THEN SAFE_DIVIDE(industry_inst_net_sum - inst_net, industry_stock_count - 1) END AS industry_capital_flow',
+    '      THEN SAFE_DIVIDE(industry_inst_net_sum - inst_net, industry_stock_count - 1) END AS industry_capital_flow_raw',
     '  FROM step2',
+    '),',
+    // industry_capital_flow_raw 換算成當天全市場的橫斷面排名百分位——一定要先篩掉 NULL
+    // 再排名（WHERE industry_capital_flow_raw IS NOT NULL），不然 PERCENT_RANK 的排名分母
+    // 會把查不到產業別的列也算進去，稀釋掉真正有資料那些列的排名區間。
+    'industry_ranks AS (',
+    '  SELECT stock_id, dt,',
+    '    PERCENT_RANK() OVER (PARTITION BY dt ORDER BY industry_capital_flow_raw) AS industry_capital_flow_rank',
+    '  FROM step3',
+    '  WHERE industry_capital_flow_raw IS NOT NULL',
+    '),',
+    'step3_ranked AS (',
+    '  SELECT step3.*, COALESCE(industry_ranks.industry_capital_flow_rank, 0.5) AS industry_capital_flow',
+    '  FROM step3',
+    '  LEFT JOIN industry_ranks USING (stock_id, dt)',
     '),',
     'step4 AS (',
     '  SELECT *,',
     '    CASE WHEN drop_count_20 IS NULL OR drop_count_20 = 0 THEN 0 ELSE buy_on_drop_20 / drop_count_20 END AS ibf_20d,',
     '    (CASE WHEN ma20 IS NOT NULL AND close > ma20 THEN 1 ELSE 0 END',
     '      + CASE WHEN ma20_slope IS NOT NULL AND ma20_slope > 0 THEN 1 ELSE 0 END) AS trend_score',
-    '  FROM step3',
+    '  FROM step3_ranked',
     '),',
     'market AS (',
     '  SELECT dt, AVG(daily_return) AS mkt_return',
@@ -110,14 +132,7 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '  stock_id, stock_name, dt AS date,',
     '  inst_participation, inst_part_ma5, ibf_20d, trend_score, ma20_slope, vol_ratio, bias60,',
     '  dividend_yield_f AS dividend_yield, pe_ratio_f AS pe_ratio, pb_ratio_f AS pb_ratio,',
-    // COALESCE 成 0（不是留 NULL）：buildTrainModelSql_ 要求所有候選因子都 NOT NULL 才會拿去
-    // 訓練，任何一列只要有一個因子是 NULL 就整列被排除。查不到產業別的股票（ETF、上櫃、
-    // industry_map 還沒同步過）每天都會是 NULL，如果照其他因子一樣留 NULL，只要 industry_map
-    // 覆蓋率沒有 100%，就會把大量列擋在訓練資料外——實測甚至遇過 industry_map 剛好是空的，
-    // 導致「整批」被排除、訓練查詢直接回傳 0 列失敗（Input data doesn't contain any rows.）。
-    // 用 0（=「沒有明顯的同業買賣超訊號」，是這個量本身合理的中性值）取代 NULL，其他因子
-    // 都正常時這一列還是能拿去訓練，這個因子頂多在缺資料的列上貢獻中性訊號，不會拖累整批。
-    '  COALESCE(industry_capital_flow, 0) AS industry_capital_flow,',
+    '  COALESCE(industry_capital_flow, 0.5) AS industry_capital_flow,',
     '  label_return_1m, label_downside_resistance',
     'FROM labeled'
   ].join('\n');
@@ -130,18 +145,22 @@ function factorModelName_(labelKey) {
 
 /**
  * 診斷用：查 factor_features view 裡 industry_capital_flow 這一欄的資料分佈——因為 LASSO
- * 對「真的沒有預測力」跟「這欄根本是常數（例如 industry_map 沒同步好、全部是 COALESCE
- * 出來的 0）」這兩種情況，訓練出來的權重看起來會一樣（都很可能是精確的 0，LASSO 本來就是
- * 設計成會把沒用的因子壓到剛好 0），單看權重數字沒辦法分辨到底是「這個因子真的沒用」還是
- * 「這個因子根本沒有真實資料」。用非零筆數／標準差直接看這一欄有沒有真實的變動——標準差
- * 接近 0 或非零筆數接近 0，代表資料本身有問題，不是這個因子真的沒有預測力。
+ * 對「真的沒有預測力」跟「這欄根本是常數」這兩種情況，訓練出來的權重看起來會一樣（都很
+ * 可能是精確的 0，LASSO 本來就是設計成會把沒用的因子壓到剛好 0），單看權重數字沒辦法分辨
+ * 到底是「這個因子真的沒用」還是「這個因子根本沒有真實資料」。
+ *
+ * v2（排名版本）之後，0.5 才是「沒有資料的中性值」（見 buildFeatureViewSql_ 的說明），不是
+ * 0——所以這裡改成算「跟 0.5 剛好相等」的筆數（這種列代表查不到產業別，或極少數情況剛好
+ * 排在樣本中位數），配合標準差一起看：標準差接近 0（理論上真實排名分佈的標準差應該落在
+ * 0.28~0.29 附近，接近均勻分布）或幾乎所有列都卡在 0.5，代表資料本身有問題，不是這個因子
+ * 真的沒有預測力。
  */
 function buildIndustryCapitalFlowStatsSql_(viewRef) {
   return [
     'SELECT',
     '  COUNT(*) AS total_rows,',
     '  COUNTIF(industry_capital_flow IS NOT NULL) AS non_null_count,',
-    '  COUNTIF(industry_capital_flow != 0) AS non_zero_count,',
+    '  COUNTIF(industry_capital_flow != 0.5) AS non_neutral_count,',
     '  MIN(industry_capital_flow) AS min_v,',
     '  MAX(industry_capital_flow) AS max_v,',
     '  AVG(industry_capital_flow) AS avg_v,',
@@ -283,7 +302,7 @@ function getIndustryCapitalFlowFactorStats() {
   return {
     totalRows: parseInt(r.total_rows, 10) || 0,
     nonNullCount: parseInt(r.non_null_count, 10) || 0,
-    nonZeroCount: parseInt(r.non_zero_count, 10) || 0,
+    nonNeutralCount: parseInt(r.non_neutral_count, 10) || 0,
     min: r.min_v === null || r.min_v === undefined ? null : parseFloat(r.min_v),
     max: r.max_v === null || r.max_v === undefined ? null : parseFloat(r.max_v),
     avg: r.avg_v === null || r.avg_v === undefined ? null : parseFloat(r.avg_v),
