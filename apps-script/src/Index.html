@@ -159,9 +159,18 @@
               選「v17.0 規則式門檻」則完全不受影響。
               GCP 專案 ID 與資料來源模式設定移到「系統與資料後台」頁籤最上方的「資料庫狀態」，
               這裡只留「執行因子迴歸」跟歷史執行紀錄。
+              <br><br>
+              「L1正規化強度」數字越大，LASSO 篩選越嚴格，越容易把沒用或彼此重複的因子壓到剛好
+              0，只留下真正有貢獻的少數幾個；數字越小，越多因子會保留非零權重，但彼此高度相關時
+              權重會被拆得很分散、看不出誰是主力訊號。預設 0.05，候選因子變多（目前 46 個）時可以
+              試著調高（例如 0.1、0.15）看能不能篩出更清楚的結果。
             </div>
           </details>
 
+          <div class="inline-form">
+            <label for="factorL1RegInput">L1正規化強度</label>
+            <input type="number" id="factorL1RegInput" step="0.01" min="0.01" value="0.05">
+          </div>
           <div class="form-actions">
             <button type="button" id="bqRegressionBtn" class="btn-primary">🚀 重新訓練並比對新模型</button>
           </div>

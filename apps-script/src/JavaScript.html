@@ -1764,8 +1764,13 @@
   document.getElementById('bqRegressionBtn').addEventListener('click', function () {
     var resultEl = document.getElementById('bqActionResult');
     document.getElementById('factorCompareCard').innerHTML = '';
+    // 讓使用者自己調整 L1 正規化強度（預設 0.05）——候選因子變多、彼此相關時，數字越大篩選
+    // 越嚴格，越容易看出誰是真正有貢獻的因子，不用回來改程式碼測試不同強度。
+    var l1RegInput = document.getElementById('factorL1RegInput');
+    var l1Reg = l1RegInput ? parseFloat(l1RegInput.value) : null;
+    if (!l1Reg || l1Reg <= 0) l1Reg = null; // 空白/無效輸入 -> 讓後端用預設值
     resultEl.innerHTML = '<div class="loading">⏳ 背景執行因子迴歸中，可以切到別的畫面或關掉螢幕，不會中斷這個工作，通常要一到兩分鐘...</div>';
-    withSpin(callServer('startFactorRegressionJob', null)).then(function () {
+    withSpin(callServer('startFactorRegressionJob', l1Reg)).then(function () {
       pollFactorRegressionJob_();
     }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
