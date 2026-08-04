@@ -59,4 +59,57 @@ loadIntoContext('IndustryMap.gs');
   console.log('Test validateIndustryMapRows_ (dup/format/blank all flagged) passed:', issues);
 }
 
+// --- translateIndustryCode_: 對照表收錄的代碼要翻成文字（用使用者實測抽查到的兩筆核對過的
+//     代碼：1→水泥工業/台泥、2→食品工業/味全） ---
+{
+  assert.strictEqual(context.translateIndustryCode_('1'), '水泥工業');
+  assert.strictEqual(context.translateIndustryCode_('2'), '食品工業');
+  assert.strictEqual(context.translateIndustryCode_(24), '半導體業');
+  console.log('Test translateIndustryCode_ (known codes translated) passed.');
+}
+
+// --- translateIndustryCode_: 對照表沒收錄的代碼要原樣保留，不能亂猜硬翻 ---
+{
+  assert.strictEqual(context.translateIndustryCode_('999'), '999');
+  console.log('Test translateIndustryCode_ (unknown code kept as-is, not guessed) passed.');
+}
+
+// --- translateIndustryCode_: 已經是文字的（不是純數字）不去動它 ---
+{
+  assert.strictEqual(context.translateIndustryCode_('半導體業'), '半導體業');
+  console.log('Test translateIndustryCode_ (already text -> unchanged) passed.');
+}
+
+// --- findUntranslatedIndustryCodes_: 抓出翻完還是純數字的列 ---
+{
+  const rows = [
+    { code: '1101', industry: '水泥工業' },
+    { code: '9999', industry: '999' },
+    { code: '9998', industry: '888' }
+  ];
+  const result = context.findUntranslatedIndustryCodes_(rows);
+  assert.strictEqual(result.count, 2);
+  assert.ok(result.sample.some((s) => s.indexOf('9999') !== -1 && s.indexOf('999') !== -1));
+  console.log('Test findUntranslatedIndustryCodes_ (flags rows still numeric after translation) passed.');
+}
+
+// --- pickRandomSample_: 抽出指定筆數，且不超過原始陣列長度 ---
+{
+  const items = [];
+  for (let i = 0; i < 100; i++) items.push(i);
+  const sample = context.pickRandomSample_(items, 10);
+  assert.strictEqual(sample.length, 10);
+  const distinct = new Set(sample);
+  assert.strictEqual(distinct.size, 10, '抽出來的 10 筆不應該有重複');
+  sample.forEach((v) => assert.ok(v >= 0 && v < 100));
+  console.log('Test pickRandomSample_ (10 distinct items from pool of 100) passed.');
+}
+
+// --- pickRandomSample_: 陣列筆數比要求的樣本數少時，回傳全部、不報錯 ---
+{
+  const sample = context.pickRandomSample_([1, 2, 3], 10);
+  assert.strictEqual(sample.length, 3);
+  console.log('Test pickRandomSample_ (pool smaller than n -> returns all) passed.');
+}
+
 console.log('All IndustryMap.gs tests passed.');

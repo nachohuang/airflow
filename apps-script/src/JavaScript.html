@@ -2223,12 +2223,15 @@
       return '<tr><td>' + escapeHtml(r['證券代號']) + '</td><td>' + escapeHtml(r['證券名稱']) + '</td>' +
         '<td>' + escapeHtml(r['產業別']) + '</td><td>' + escapeHtml(r['市場別']) + '</td></tr>';
     }).join('');
+    var untrans = s.untranslated;
     el.innerHTML =
       '<div class="meta-bar">上次更新：' + new Date(s.updatedAt).toLocaleString('zh-TW') + '　共 ' + fmtNum(s.totalCount, 0) +
       ' 筆（上市 ' + fmtNum(s.twseCount, 0) + '，上櫃 ' + fmtNum(s.tpexCount, 0) + '）</div>' +
       (s.tpexWarning ? '<div class="meta-bar" style="color:var(--amber);">⚠️ ' + escapeHtml(s.tpexWarning) + '</div>' : '') +
+      (untrans && untrans.count ? '<div class="meta-bar" style="color:var(--amber);">⚠️ 有 ' + untrans.count +
+        ' 檔的產業代碼對照表沒收錄到，暫時保留原始代碼沒翻譯（例如：' + untrans.sample.map(escapeHtml).join('、') + '）</div>' : '') +
       '<div class="meta-bar">' + covHtml + '</div>' +
-      (sampleRows ? '<details class="info-collapse"><summary>抽查前 ' + status.sample.length + ' 筆資料</summary><div class="info-body">' +
+      (sampleRows ? '<details class="info-collapse"><summary>隨機抽查 ' + status.sample.length + ' 筆資料</summary><div class="info-body">' +
         '<table class="simple-table"><thead><tr><th>代號</th><th>名稱</th><th>產業別</th><th>市場別</th></tr></thead><tbody>' +
         sampleRows + '</tbody></table></div></details>' : '');
   }

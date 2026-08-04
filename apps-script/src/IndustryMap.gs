@@ -27,6 +27,42 @@ function detectFieldKey_(sampleRow, substrings) {
   return null;
 }
 
+/**
+ * TWSE t187ap03_L 的「產業別」欄位實際存的是數字代碼（例如 1101 台泥回傳的是 "1"），
+ * 不是文字名稱——這是實測後才發現的（第一版誤以為欄位裡就是文字，抽查資料看到一堆
+ * 「1」「2」才發現），TWSE 沒有在這支 JSON API 裡另外提供代碼對照表可查。
+ *
+ * 這份對照表是台灣證交所行之有年、外部工具（例如 isin.twse.com.tw 的產業分類頁面）
+ * 普遍採用的標準分類代碼，抽查過的兩筆（代碼 1→水泥工業／台泥、代碼 2→食品工業／味全）
+ * 都對得上，但沒有找到 TWSE 官方逐碼文件能 100% 逐一核對，所以：
+ *   - 對得到的代碼才翻譯成文字，翻不到的代碼「保留原始代碼」，不會亂猜硬翻。
+ *   - validateIndustryMapRows_ 會把「翻完還是純數字」的列另外抓出來當品質警訊，
+ *     這樣如果這份對照表有缺漏或錯誤，後台的「涵蓋率／品質檢查」會直接看得到，
+ *     不會被默默吃掉。
+ */
+var TWSE_INDUSTRY_CODE_MAP_ = {
+  1: '水泥工業', 2: '食品工業', 3: '塑膠工業', 4: '紡織纖維', 5: '電機機械',
+  6: '電器電纜', 8: '玻璃陶瓷', 9: '造紙工業', 10: '鋼鐵工業', 11: '橡膠工業',
+  12: '汽車工業', 13: '電子工業', 14: '建材營造業', 15: '航運業', 16: '觀光事業',
+  17: '金融保險業', 18: '貿易百貨業', 19: '綜合', 20: '其他業', 21: '化學工業',
+  22: '生技醫療業', 23: '油電燃氣業', 24: '半導體業', 25: '電腦及週邊設備業',
+  26: '光電業', 27: '通信網路業', 28: '電子零組件業', 29: '電子通路業',
+  30: '資訊服務業', 31: '其他電子業', 32: '文化創意業', 33: '農業科技業',
+  34: '電子商務', 35: '綠能環保', 36: '數位雲端', 37: '運動休閒', 38: '居家生活',
+  80: '管理股票', 91: '存託憑證'
+};
+
+/** 純函式：把 t187ap03_L 回傳的數字代碼翻成文字產業別；查不到對應代碼就原樣保留
+ *  （呼叫端會另外偵測「還是純數字」的情況，不在這裡偷偷用代碼本身充當文字）。 */
+function translateIndustryCode_(raw) {
+  var s = String(raw || '').trim();
+  if (!s) return s;
+  if (/^\d+$/.test(s) && TWSE_INDUSTRY_CODE_MAP_.hasOwnProperty(Number(s))) {
+    return TWSE_INDUSTRY_CODE_MAP_[Number(s)];
+  }
+  return s;
+}
+
 /** 上市公司產業別：TWSE OpenAPI t187ap03_L（上市公司基本資料）。這支資料集沒有像
  *  t187ap05_L/06_L_ci/07_L_ci 那樣先前已經驗證過，欄位名稱是用關鍵字動態偵測，
  *  偵測不到代號或產業別欄位就直接拋出錯誤，不會用錯欄位硬解析出垃圾資料。 */
@@ -55,7 +91,7 @@ function fetchTwseListedIndustryMap_() {
     return {
       code: zfill4(String(r[codeKey] || '').trim()),
       name: nameKey ? String(r[nameKey] || '').trim() : '',
-      industry: String(r[industryKey] || '').trim(),
+      industry: translateIndustryCode_(r[industryKey]),
       market: '上市'
     };
   }).filter(function (r) { return r.code.length === 4 && r.industry; });
@@ -94,6 +130,19 @@ function validateIndustryMapRows_(rows) {
     if (blankIndustryCount > 0) issues.push('有 ' + blankIndustryCount + ' 筆產業別是空白。');
   }
   return issues;
+}
+
+/** 純函式：找出「產業別欄位翻完還是純數字」的列——代表 TWSE_INDUSTRY_CODE_MAP_ 這份
+ *  對照表沒收錄到的代碼（這份表沒有 100% 官方核對過，見表格上方註解）。故意不當成致命
+ *  的品質問題（不會阻擋整批更新），因為就算只有少數代碼沒對到，其餘資料還是正確、
+ *  可以先用；但一定要在後台清楚列出來，讓使用者看得到「這幾個代碼還沒翻譯」，而不是
+ *  放著一堆數字看起來像正常資料卻沒人發現。 */
+function findUntranslatedIndustryCodes_(rows) {
+  var matched = (rows || []).filter(function (r) { return /^\d+$/.test(String(r.industry || '')); });
+  return {
+    count: matched.length,
+    sample: matched.slice(0, 10).map(function (r) { return r.code + '（代碼 ' + r.industry + '）'; })
+  };
 }
 
 /** 拿目前實際掃描到的最新一天全市場資料（跟今日戰報同一份計算結果，不用另外重算）當作
@@ -146,28 +195,43 @@ function doRefreshIndustryMap_() {
   }));
 
   var coverage = computeIndustryMapCoverage_(allRows);
+  var untranslated = findUntranslatedIndustryCodes_(allRows);
   var summary = {
     updatedAt: Date.now(),
     totalCount: allRows.length,
     twseCount: twseRows.length,
     tpexCount: (tpexResult.rows || []).length,
     tpexWarning: tpexResult.warning || null,
-    coverage: coverage
+    coverage: coverage,
+    untranslated: untranslated
   };
   PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.INDUSTRY_MAP_LAST_REFRESH, JSON.stringify(summary));
   logRun_('產業對照表', '成功',
     '共 ' + allRows.length + ' 筆（上市 ' + twseRows.length + '，上櫃 ' + (tpexResult.rows || []).length + '）' +
     (coverage.checked ? '，目前追蹤股票涵蓋率 ' + coverage.coveragePct + '%' : '') +
+    (untranslated.count ? '，' + untranslated.count + ' 筆產業代碼沒對到文字名稱' : '') +
     (tpexResult.warning ? '；' + tpexResult.warning : ''), 0);
   return summary;
 }
 
+/** 純函式：從陣列裡隨機挑 n 筆（不重複、不改動原陣列順序的複本），用 Fisher-Yates 洗牌
+ *  取前 n 個。人眼抽查資料品質時，固定看「前 10 筆」容易因為 Sheet 排序方式（例如照代號
+ *  排序）剛好都抽到同一種類型（例如水泥股集中在代號開頭），隨機抽比較能代表整體資料。 */
+function pickRandomSample_(items, n) {
+  var arr = (items || []).slice();
+  for (var i = arr.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+  }
+  return arr.slice(0, n);
+}
+
 /** 前端「產業對照表」卡片載入用：純讀取，不會觸發任何抓取，只讀上次重新整理存下來的摘要
- *  跟目前分頁裡的前幾筆資料（給人眼抽查用）。 */
+ *  跟目前分頁裡隨機抽出的幾筆資料（給人眼抽查用，見 pickRandomSample_ 為什麼要隨機抽）。 */
 function getIndustryMapStatus() {
   var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.INDUSTRY_MAP_LAST_REFRESH);
   var summary = raw ? JSON.parse(raw) : null;
-  var sample = readSheetObjects_(getIndustryMapSheet_()).slice(0, 10);
+  var sample = pickRandomSample_(readSheetObjects_(getIndustryMapSheet_()), 10);
   return { summary: summary, sample: sample };
 }
 
