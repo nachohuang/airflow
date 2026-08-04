@@ -1338,7 +1338,8 @@
       loadBqSettings_(), loadBqMaterializedStatus_(),
       loadJobQueue_(),
       loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_(),
-      checkMaterializeJobOnLoad_()
+      checkMaterializeJobOnLoad_(),
+      loadIndustryMapStatus_(), checkIndustryMapJobOnLoad_()
     ]);
   }
 
@@ -2205,6 +2206,81 @@
       loadStorageDiagnostics_();
       alert('✅ 已切換根資料夾為「' + info.name + '」，重新整理各頁籤即可看到該資料夾底下的資料。');
     }).catch(function (err) { alert(err.message || err); });
+  });
+
+  // ---------- 產業對照表（Phase 1：資料源＋品質驗證，還沒接進因子計算） ----------
+  function renderIndustryMapStatus_(status) {
+    var el = document.getElementById('industryMapStatus');
+    var s = status.summary;
+    if (!s) { el.innerHTML = '<div class="empty-hint">還沒有重新整理過，按下面按鈕第一次抓取。</div>'; return; }
+    var cov = s.coverage;
+    var covHtml = !cov ? '' : (cov.checked
+      ? '目前追蹤股票涵蓋率 <b>' + fmtNum(cov.coveragePct, 1) + '%</b>（' + cov.matchedCount + ' / ' + cov.trackedCount + ' 檔）' +
+        (cov.unmatchedTotal ? '，' + cov.unmatchedTotal + ' 檔沒有對到產業別' +
+          (cov.unmatchedSample && cov.unmatchedSample.length ? '（例如：' + cov.unmatchedSample.slice(0, 10).join('、') + (cov.unmatchedTotal > 10 ? '...' : '') + '）' : '') : '')
+      : '涵蓋率無法比對：' + escapeHtml(cov.error || ''));
+    var sampleRows = (status.sample || []).map(function (r) {
+      return '<tr><td>' + escapeHtml(r['證券代號']) + '</td><td>' + escapeHtml(r['證券名稱']) + '</td>' +
+        '<td>' + escapeHtml(r['產業別']) + '</td><td>' + escapeHtml(r['市場別']) + '</td></tr>';
+    }).join('');
+    el.innerHTML =
+      '<div class="meta-bar">上次更新：' + new Date(s.updatedAt).toLocaleString('zh-TW') + '　共 ' + fmtNum(s.totalCount, 0) +
+      ' 筆（上市 ' + fmtNum(s.twseCount, 0) + '，上櫃 ' + fmtNum(s.tpexCount, 0) + '）</div>' +
+      (s.tpexWarning ? '<div class="meta-bar" style="color:var(--amber);">⚠️ ' + escapeHtml(s.tpexWarning) + '</div>' : '') +
+      '<div class="meta-bar">' + covHtml + '</div>' +
+      (sampleRows ? '<details class="info-collapse"><summary>抽查前 ' + status.sample.length + ' 筆資料</summary><div class="info-body">' +
+        '<table class="simple-table"><thead><tr><th>代號</th><th>名稱</th><th>產業別</th><th>市場別</th></tr></thead><tbody>' +
+        sampleRows + '</tbody></table></div></details>' : '');
+  }
+
+  function loadIndustryMapStatus_() {
+    return callServer('getIndustryMapStatus').then(renderIndustryMapStatus_)
+      .catch(function (err) { document.getElementById('industryMapStatus').innerHTML = errorBox(err); });
+  }
+
+  var industryMapPollTimer_ = null;
+  function stopIndustryMapPoll_() {
+    if (industryMapPollTimer_) { clearInterval(industryMapPollTimer_); industryMapPollTimer_ = null; }
+  }
+
+  function pollIndustryMapJob_() {
+    stopIndustryMapPoll_();
+    var poll = function () {
+      callServer('getIndustryMapRefreshJobStatus').then(function (state) {
+        if (!state || state.status === 'running') return;
+        stopIndustryMapPoll_();
+        renderIndustryMapJobResult_(state);
+      }).catch(function () { /* 輪詢本身失敗不代表背景工作失敗，下一次輪詢再試 */ });
+    };
+    poll();
+    industryMapPollTimer_ = setInterval(poll, 3000);
+  }
+
+  function renderIndustryMapJobResult_(state) {
+    var resultEl = document.getElementById('industryMapResult');
+    if (state.status === 'error') { resultEl.innerHTML = errorBox('重新整理失敗：' + state.errorMessage); return; }
+    resultEl.innerHTML = '';
+    loadIndustryMapStatus_();
+  }
+
+  /** 「系統與資料後台」頁籤打開時檢查一次，避免使用者關掉分頁又重新打開後不知道背景工作跑到哪。 */
+  function checkIndustryMapJobOnLoad_() {
+    return callServer('getIndustryMapRefreshJobStatus').then(function (state) {
+      if (state && state.status === 'running') {
+        document.getElementById('industryMapResult').innerHTML = '<div class="loading">⏳ 背景重新整理中...</div>';
+        pollIndustryMapJob_();
+        return;
+      }
+      if (state && state.status === 'error') renderIndustryMapJobResult_(state);
+    }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
+  }
+
+  document.getElementById('industryMapRefreshBtn').addEventListener('click', function () {
+    var resultEl = document.getElementById('industryMapResult');
+    resultEl.innerHTML = '<div class="loading">⏳ 背景重新整理中，可以切到別的畫面或關掉螢幕，不會中斷...</div>';
+    withSpin(callServer('startIndustryMapRefreshJob')).then(function () {
+      pollIndustryMapJob_();
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
 
   // ---------- 匯入既有彙整表 ----------

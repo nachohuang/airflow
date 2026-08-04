@@ -147,4 +147,23 @@ loadIntoContext('JobQueue.gs');
   console.log('Test jobQueueDetail_ (aiTask) passed.');
 }
 
+// --- jobQueueDetail_: industryMap ---
+{
+  assert.strictEqual(context.jobQueueDetail_('industryMap', { status: 'running' }), '');
+
+  const done = context.jobQueueDetail_('industryMap', {
+    status: 'done',
+    result: {
+      totalCount: 980, twseCount: 980, tpexCount: 0,
+      coverage: { checked: true, coveragePct: 49.2 },
+      tpexWarning: '上櫃（TPEX）產業別資料源尚未確認正確的 API 路徑，目前只有上市股票有產業別資料。'
+    }
+  });
+  assert.ok(done.indexOf('共 980 筆') !== -1);
+  assert.ok(done.indexOf('上市 980，上櫃 0') !== -1);
+  assert.ok(done.indexOf('涵蓋率 49.2%') !== -1);
+  assert.ok(done.indexOf('尚未確認正確的 API 路徑') !== -1, '上櫃資料源還沒接上時，警告要顯示在排程佇列摘要裡讓使用者看到');
+  console.log('Test jobQueueDetail_ (industryMap) passed.');
+}
+
 console.log('All JobQueue.gs tests passed.');

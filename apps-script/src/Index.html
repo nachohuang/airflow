@@ -344,6 +344,21 @@
               <button type="submit" class="btn-primary">設為歷史資料夾</button>
             </form>
           </div>
+
+          <div class="admin-section">
+            <h3>產業對照表</h3>
+            <div class="meta-bar">
+              股票代號 → 產業別的靜態參考資料，目前是「Phase 1」：只負責把資料抓下來、驗證品質、
+              存起來，還沒有接進任何戰報因子計算。跟每天更新的 History 是不同性質的資料，不接進
+              每日排程，只能手動重新整理。任何一項資料品質檢查沒過，這次更新會整批放棄、不覆蓋
+              既有資料。
+            </div>
+            <div id="industryMapStatus"></div>
+            <div class="form-actions" style="margin-top:8px;">
+              <button type="button" class="btn-secondary" id="industryMapRefreshBtn">🔄 重新整理產業對照表</button>
+            </div>
+            <div id="industryMapResult"></div>
+          </div>
         </div>
 
         <div id="subtab-datafix" class="sub-tab-panel">

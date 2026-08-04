@@ -46,7 +46,8 @@ function jobQueueDefs_() {
     { key: 'factorRegression', label: '因子迴歸模型', getStatus: getFactorRegressionJobStatus },
     { key: 'materialize', label: '立即重新整理（materialized）', getStatus: getMaterializeJobStatus },
     { key: 'backtest', label: 'v17.0 策略回測', getStatus: getBacktestV17JobStatus },
-    { key: 'aiTask', label: 'AI 診斷／續抱／Top3', getStatus: getAiDiagnosisJobStatus }
+    { key: 'aiTask', label: 'AI 診斷／續抱／Top3', getStatus: getAiDiagnosisJobStatus },
+    { key: 'industryMap', label: '產業對照表', getStatus: getIndustryMapRefreshJobStatus }
   ];
 }
 
@@ -109,6 +110,14 @@ function jobQueueDetail_(key, state) {
       : (res2 && res2.ok === false ? '失敗：' + res2.error : (res2 && res2.verdict ? res2.verdict : ''));
     return taskLabel + (target ? '（' + target + '）' : '') + (resultPart ? '　' + resultPart : '');
   }
+  if (key === 'industryMap') {
+    if (state.status !== 'done') return '';
+    var s = state.result;
+    if (!s) return '';
+    return '共 ' + s.totalCount + ' 筆（上市 ' + s.twseCount + '，上櫃 ' + s.tpexCount + '）' +
+      (s.coverage && s.coverage.checked ? '　涵蓋率 ' + s.coverage.coveragePct + '%' : '') +
+      (s.tpexWarning ? '　⚠️ ' + s.tpexWarning : '');
+  }
   return '';
 }
 
@@ -163,6 +172,7 @@ function restartJob(key) {
     if (!aiState || !aiState.taskType) throw new Error('沒有可重新啟動的 AI 任務');
     return startAiDiagnosisJob(aiState.taskType, aiState.payload);
   }
+  if (key === 'industryMap') return startIndustryMapRefreshJob();
   throw new Error('未知的工作類型：' + key);
 }
 
@@ -174,21 +184,23 @@ function deleteJob(key) {
   if (key === 'materialize') return clearMaterializeJob_();
   if (key === 'backtest') return clearBacktestV17Job_();
   if (key === 'aiTask') return clearAiDiagnosisJob_();
+  if (key === 'industryMap') return clearIndustryMapRefreshJob_();
   throw new Error('未知的工作類型：' + key);
 }
 
-/** 六種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
+/** 七種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
  *  不會碰到「每日自動排程」（scheduledDailyFetch，見 Scheduler.gs，那是核心功能本身，
  *  不是這裡管的「背景 job」）。 */
 function knownJobTickHandlers_() {
   return ['processAnalysisJobTick_', 'processBackfillJobTick_', 'processFactorRegressionJobTick_',
-    'processMaterializeJobTick_', 'processBacktestV17JobTick_', 'processAiDiagnosisJobTick_'];
+    'processMaterializeJobTick_', 'processBacktestV17JobTick_', 'processAiDiagnosisJobTick_',
+    'processIndustryMapJobTick_'];
 }
 
 /**
- * 排程佇列的「強制清空所有背景工作」按鈕：把六個 job 的狀態都清回 idle，同時直接掃過整個
- * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這六種 tick 函式的觸發器。
- * 不是只呼叫六個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
+ * 排程佇列的「強制清空所有背景工作」按鈕：把七個 job 的狀態都清回 idle，同時直接掃過整個
+ * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這七種 tick 函式的觸發器。
+ * 不是只呼叫七個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
  * 用「直接掃過觸發器列表」再確認一次，避免萬一有某個角落遺留、沒有被任何 job 狀態追蹤到
  * 的孤兒觸發器——例如很久以前用過的 handler 名稱、或某次刪除呼叫剛好失敗——這種觸發器
  * 不會出現在排程佇列的任何一張卡片裡，卻仍然會在排定的時間自己觸發、佔用執行配額，
@@ -201,6 +213,7 @@ function stopAllJobs() {
   clearMaterializeJob_();
   clearBacktestV17Job_();
   clearAiDiagnosisJob_();
+  clearIndustryMapRefreshJob_();
   var handlers = knownJobTickHandlers_();
   var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
@@ -209,7 +222,7 @@ function stopAllJobs() {
       removed++;
     }
   });
-  logRun_('強制清空背景工作', '成功', '已清空 6 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
+  logRun_('強制清空背景工作', '成功', '已清空 7 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
   return { removedTriggerCount: removed };
 }
 
