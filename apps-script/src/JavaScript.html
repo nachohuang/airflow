@@ -1318,6 +1318,29 @@
     }).catch(function (err) { alert(err.message || err); });
   });
 
+  // ---------- 產業資金流向（Phase 2 唯讀驗證，見 IndustryCapitalFlow.gs） ----------
+  document.getElementById('industryFlowBtn').addEventListener('click', function () {
+    var el = document.getElementById('industryFlowResult');
+    el.innerHTML = '<div class="loading">計算今日產業資金流向中...</div>';
+    withSpin(callServer('getIndustryCapitalFlowSnapshot')).then(function (data) {
+      if (!data.latestDate) { el.innerHTML = '<div class="empty-hint">目前沒有可用的歷史資料，請先確認「戰報與個股」有資料。</div>'; return; }
+      if (!data.industries.length) {
+        el.innerHTML = '<div class="empty-hint">產業對照表目前是空的，請先到「系統與資料後台 → 資料庫與模式 → 產業對照表」重新整理一次。</div>';
+        return;
+      }
+      var rows = data.industries.map(function (r, i) {
+        var color = r.sumInstNet > 0 ? 'var(--red)' : (r.sumInstNet < 0 ? 'var(--green)' : 'var(--text-muted)');
+        return '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(r.industry) + '</td><td>' + fmtNum(r.stockCount, 0) + '</td>' +
+          '<td style="color:' + color + ';">' + fmtNum(r.sumInstNet, 0) + '</td>' +
+          '<td>' + fmtNum(r.avgInstNet, 0) + '</td></tr>';
+      }).join('');
+      el.innerHTML = '<div class="meta-bar">' + escapeHtml(data.latestDate) + '　共 ' + fmtNum(data.totalStocks, 0) +
+        ' 檔（' + fmtNum(data.unclassifiedCount, 0) + ' 檔沒有產業別資料，不計入下面統計）</div>' +
+        '<div class="table-scroll"><table class="simple-table"><thead><tr><th>排名</th><th>產業別</th><th>家數</th>' +
+        '<th>合計買賣超(股)</th><th>平均買賣超/檔</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    }).catch(function (err) { el.innerHTML = errorBox(err); });
+  });
+
   // ---------- 系統與資料後台 ----------
   function populateTimeSelects() {
     var hourSel = document.getElementById('schHour');

@@ -118,6 +118,20 @@
             <div id="factorScanResult"></div>
           </div>
 
+          <div class="admin-section">
+            <h3>🏭 產業資金流向（今日快照，Phase 2 唯讀驗證）</h3>
+            <div class="meta-bar">
+              把「產業對照表」（系統與資料後台 → 資料庫與模式）跟今天全市場的法人買賣超合併：
+              同一產業所有股票的買賣超（投信+外資+自營商）加總，看資金今天偏向流入哪個產業。
+              純粹讓你先肉眼確認這個訊號合不合理，還沒有寫入 Reports、不影響 Armor_Score 或任何
+              篩選/評分邏輯，也還沒有變成因子迴歸模型的候選因子。
+            </div>
+            <div class="form-actions">
+              <button type="button" class="btn-secondary" id="industryFlowBtn">🔍 計算今日產業資金流向</button>
+            </div>
+            <div id="industryFlowResult"></div>
+          </div>
+
           <div id="factorActiveModelCard"></div>
 
           <div class="admin-section">
