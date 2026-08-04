@@ -214,8 +214,12 @@ function ensureFeatureView_(settings) {
   }
   // 就算使用者從來沒按過「重新整理產業對照表」，industry_map 表也要先確保存在（可以是空的）——
   // 不然 buildFeatureViewSql_ 的 LEFT JOIN 對到不存在的表會直接讓整個訓練失敗，而不是優雅地
-  // 讓 industry_capital_flow 全部是 NULL（其他因子照常訓練）。
+  // 讓 industry_capital_flow 全部是 0（其他因子照常訓練）。
   ensureIndustryMapTable_(settings);
+  // 自動檢核：確保 industry_map 表裡真的有資料，不用使用者自己記得要先手動重新整理過
+  // 一次才能讓 industry_capital_flow 這個因子有意義（見 IndustryMap.gs 的說明跟這個問題
+  // 實際發生過一次的經過）。
+  ensureIndustryMapSyncedToBigQuery_();
   runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqIndustryMapTableRef_(settings), bqFeatureViewRef_(settings)), 'feature_view');
 }
 

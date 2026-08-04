@@ -7,7 +7,19 @@ const assert = require('assert');
 // 用跟其他 test 一樣的手法把 .gs 檔案載進共用的 vm context 直接測。doRefreshIndustryMap_ /
 // computeIndustryMapCoverage_ 依賴 UrlFetchApp/PropertiesService/computeLatestDayRows_，
 // 不在這裡測，只能在真正的 Apps Script 環境驗證。
-const context = { console: console };
+// 最小 PropertiesService stub（跟 aiDiagnosis.test.js 同樣手法），給 ensureIndustryMapSyncedToBigQuery_
+// 的測試用：用一個 plain object 模擬 Script Properties 的 get/set。
+const fakeProps = {};
+const PropertiesService = {
+  getScriptProperties: function () {
+    return {
+      getProperty: function (key) { return Object.prototype.hasOwnProperty.call(fakeProps, key) ? fakeProps[key] : null; },
+      setProperty: function (key, value) { fakeProps[key] = value; },
+      deleteProperty: function (key) { delete fakeProps[key]; }
+    };
+  }
+};
+const context = { console: console, PropertiesService: PropertiesService, logRun_: function () {}, CONFIG: { PROP_KEYS: { INDUSTRY_MAP_LAST_REFRESH: 'INDUSTRY_MAP_LAST_REFRESH' } } };
 vm.createContext(context);
 function loadIntoContext(relPath) {
   const code = fs.readFileSync(path.join(__dirname, '..', 'src', relPath), 'utf8');
@@ -110,6 +122,45 @@ loadIntoContext('IndustryMap.gs');
   const sample = context.pickRandomSample_([1, 2, 3], 10);
   assert.strictEqual(sample.length, 3);
   console.log('Test pickRandomSample_ (pool smaller than n -> returns all) passed.');
+}
+
+// --- ensureIndustryMapSyncedToBigQuery_: 從來沒有存過摘要（第一次用）-> 要觸發重新整理 ---
+{
+  delete fakeProps['INDUSTRY_MAP_LAST_REFRESH'];
+  let called = false;
+  context.doRefreshIndustryMap_ = function () { called = true; };
+  context.ensureIndustryMapSyncedToBigQuery_();
+  assert.strictEqual(called, true, '從來沒同步過應該要自動觸發重新整理');
+  console.log('Test ensureIndustryMapSyncedToBigQuery_ (no prior summary -> triggers refresh) passed.');
+}
+
+// --- ensureIndustryMapSyncedToBigQuery_: 已經成功同步過 -> 不用重跑（避免每次訓練都重抓） ---
+{
+  fakeProps['INDUSTRY_MAP_LAST_REFRESH'] = JSON.stringify({ bqSync: { attempted: true, ok: true, rowCount: 1087 } });
+  let called = false;
+  context.doRefreshIndustryMap_ = function () { called = true; };
+  context.ensureIndustryMapSyncedToBigQuery_();
+  assert.strictEqual(called, false, '已經成功同步過，不應該再自動重跑一次');
+  console.log('Test ensureIndustryMapSyncedToBigQuery_ (already synced ok -> skips) passed.');
+}
+
+// --- ensureIndustryMapSyncedToBigQuery_: 上次同步失敗（或從沒設定過 BigQuery）-> 要再試一次 ---
+{
+  fakeProps['INDUSTRY_MAP_LAST_REFRESH'] = JSON.stringify({ bqSync: { attempted: true, ok: false, error: '尚未設定 BigQuery 專案 ID' } });
+  let called = false;
+  context.doRefreshIndustryMap_ = function () { called = true; };
+  context.ensureIndustryMapSyncedToBigQuery_();
+  assert.strictEqual(called, true, '上次同步失敗應該要再自動觸發一次');
+  console.log('Test ensureIndustryMapSyncedToBigQuery_ (last sync failed -> retries) passed.');
+}
+
+// --- ensureIndustryMapSyncedToBigQuery_: 自動觸發失敗不能整個拋出例外，不能擋住後續訓練 ---
+{
+  delete fakeProps['INDUSTRY_MAP_LAST_REFRESH'];
+  context.doRefreshIndustryMap_ = function () { throw new Error('TWSE 端點暫時性錯誤'); };
+  assert.doesNotThrow(function () { context.ensureIndustryMapSyncedToBigQuery_(); },
+    '自動檢核失敗不應該讓呼叫端（因子迴歸訓練）也跟著失敗');
+  console.log('Test ensureIndustryMapSyncedToBigQuery_ (refresh failure does not propagate) passed.');
 }
 
 console.log('All IndustryMap.gs tests passed.');

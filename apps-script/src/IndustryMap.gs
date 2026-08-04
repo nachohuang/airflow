@@ -233,6 +233,30 @@ function doRefreshIndustryMap_() {
   return summary;
 }
 
+/**
+ * 因子迴歸訓練前的自動檢核：如果產業對照表從來沒有成功同步過 BigQuery（或唯一一次同步
+ * 失敗），自動先跑一次「重新整理產業對照表」，確保 industry_capital_flow 這個候選因子
+ * 訓練時真的有資料可用，不用使用者自己記得要先手動點一次——這是實際發生過的問題：
+ * Phase 3 程式碼部署後，industry_map 這張 BigQuery 表因為還沒同步過是空的，導致訓練
+ * 用到的因子全部是中性值 0，看不出這個因子有沒有真的有效。
+ *
+ * 已經成功同步過一次就直接跳過，不會每次訓練都重抓——公司產業分類幾乎不會變動，沒必要
+ * 每次都重查。這裡是同步呼叫（不是另外開一個背景 job），因為呼叫端（因子迴歸）本身已經
+ * 是背景 job 執行環境，不受瀏覽器連線影響；就算這裡失敗也不阻擋後續訓練繼續進行，
+ * 只是 industry_capital_flow 這個因子當下沒有真實資料可用（COALESCE 成 0，訓練還是能
+ * 正常跑，只是這個因子暫時沒有訊號）。
+ */
+function ensureIndustryMapSyncedToBigQuery_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.INDUSTRY_MAP_LAST_REFRESH);
+  var summary = raw ? JSON.parse(raw) : null;
+  if (summary && summary.bqSync && summary.bqSync.ok) return; // 已經成功同步過，不用重跑
+  try {
+    doRefreshIndustryMap_();
+  } catch (e) {
+    logRun_('產業對照表', '失敗', '因子迴歸訓練前自動檢核觸發重新整理失敗：' + String(e.message || e), 0);
+  }
+}
+
 /** 純函式：從陣列裡隨機挑 n 筆（不重複、不改動原陣列順序的複本），用 Fisher-Yates 洗牌
  *  取前 n 個。人眼抽查資料品質時，固定看「前 10 筆」容易因為 Sheet 排序方式（例如照代號
  *  排序）剛好都抽到同一種類型（例如水泥股集中在代號開頭），隨機抽比較能代表整體資料。 */
