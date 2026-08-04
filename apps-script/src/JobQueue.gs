@@ -47,7 +47,8 @@ function jobQueueDefs_() {
     { key: 'materialize', label: '立即重新整理（materialized）', getStatus: getMaterializeJobStatus },
     { key: 'backtest', label: 'v17.0 策略回測', getStatus: getBacktestV17JobStatus },
     { key: 'aiTask', label: 'AI 診斷／續抱／Top3', getStatus: getAiDiagnosisJobStatus },
-    { key: 'industryMap', label: '產業對照表', getStatus: getIndustryMapRefreshJobStatus }
+    { key: 'industryMap', label: '產業對照表', getStatus: getIndustryMapRefreshJobStatus },
+    { key: 'scheduleResume', label: '每日排程重跑', getStatus: getResumeScheduledRunJobStatus }
   ];
 }
 
@@ -118,6 +119,11 @@ function jobQueueDetail_(key, state) {
       (s.coverage && s.coverage.checked ? '　涵蓋率 ' + s.coverage.coveragePct + '%' : '') +
       (s.tpexWarning ? '　⚠️ ' + s.tpexWarning : '');
   }
+  if (key === 'scheduleResume') {
+    if (state.status === 'idle') return '';
+    var stepLabel = (SCHEDULE_STEP_DEFS_[state.stepIndex] && SCHEDULE_STEP_DEFS_[state.stepIndex].label) || ('第 ' + (state.stepIndex + 1) + ' 步');
+    return '從「' + stepLabel + '」開始重跑' + (state.status === 'error' ? '：' + state.errorMessage : '');
+  }
   return '';
 }
 
@@ -173,6 +179,11 @@ function restartJob(key) {
     return startAiDiagnosisJob(aiState.taskType, aiState.payload);
   }
   if (key === 'industryMap') return startIndustryMapRefreshJob();
+  if (key === 'scheduleResume') {
+    var resumeState = getResumeScheduledRunJobStatus();
+    if (!resumeState || resumeState.stepIndex === undefined) throw new Error('沒有可重新啟動的每日排程重跑工作');
+    return startResumeScheduledRunJob(resumeState.stepIndex);
+  }
   throw new Error('未知的工作類型：' + key);
 }
 
@@ -185,16 +196,17 @@ function deleteJob(key) {
   if (key === 'backtest') return clearBacktestV17Job_();
   if (key === 'aiTask') return clearAiDiagnosisJob_();
   if (key === 'industryMap') return clearIndustryMapRefreshJob_();
+  if (key === 'scheduleResume') return clearScheduleResumeJob_();
   throw new Error('未知的工作類型：' + key);
 }
 
-/** 七種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
+/** 八種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
  *  不會碰到「每日自動排程」（scheduledDailyFetch，見 Scheduler.gs，那是核心功能本身，
  *  不是這裡管的「背景 job」）。 */
 function knownJobTickHandlers_() {
   return ['processAnalysisJobTick_', 'processBackfillJobTick_', 'processFactorRegressionJobTick_',
     'processMaterializeJobTick_', 'processBacktestV17JobTick_', 'processAiDiagnosisJobTick_',
-    'processIndustryMapJobTick_'];
+    'processIndustryMapJobTick_', 'processScheduleResumeJobTick_'];
 }
 
 /**
@@ -214,6 +226,7 @@ function stopAllJobs() {
   clearBacktestV17Job_();
   clearAiDiagnosisJob_();
   clearIndustryMapRefreshJob_();
+  clearScheduleResumeJob_();
   var handlers = knownJobTickHandlers_();
   var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
@@ -222,7 +235,7 @@ function stopAllJobs() {
       removed++;
     }
   });
-  logRun_('強制清空背景工作', '成功', '已清空 7 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
+  logRun_('強制清空背景工作', '成功', '已清空 8 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
   return { removedTriggerCount: removed };
 }
 

@@ -436,61 +436,53 @@ function saveLastScheduledRunSteps_(steps, overallStatus, summary, startedAt) {
 }
 
 /**
- * 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。
- * 執行順序：
- *   1. 檢查大表目前最新資料日期（getHistoryOverview().max）
- *   2. 從「最新日期的隔天」逐天抓到「執行當日」——不是只抓今天一天，這樣就算排程曾經
- *      中斷過幾天（某次執行失敗、機器沒開機…），下次執行也會自動把中間漏掉的每一天補齊。
- *   3. 完成後，materialized 模式下重新整理進 BigQuery 原生表
- *   4. 完成後，重新計算戰報（runAnalysisAndSave 本來就會自動用歷史資料裡最新的一天）
- *   5. 完成後，跑每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較，見 runDailyAiDiagnosisForTopPicks 的說明）
- * 即使第 2 步有某幾天抓取失敗，仍然照常往下跑 3~5 步、沿用目前既有的歷史資料——理由跟
- * runManualFullUpdate() 一樣：不該因為某一天抓不到就完全沒有戰報可看。
- * 每個步驟的起訖時間/狀態都會記進 steps，執行完（或中途略過）整包存進
- * CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN，供「每日自動排程」區塊顯示時間軸。
+ * 每日排程 5 個步驟的定義 + 執行引擎。每個 runner 接收共用的 ctx（跨步驟傳遞像 cursor/
+ * todayOnly/settings 這種需要往後帶的值），回傳 { status: 'success'|'partial'|'skipped',
+ * detail: string }，或直接 throw（真的出錯，不是「這步驟本身設計上就允許的部分失敗」）。
+ *
+ * runScheduledSteps_ 依序執行，只要有一步 throw，立刻停止、不跑後面的步驟——這是使用者
+ * 明確要的行為：後面步驟只是拿同一份舊資料重算一次一模一樣的舊結果，沒有意義，寧可停
+ * 下來讓人看到哪一步壞了、針對性重跑，而不是蒙混過關、讓「排程跑完了」的假象掩蓋掉
+ * 「其實資料根本沒更新」的事實。'partial'（目前只有補抓資料會用到：部分日期失敗但至少
+ * 有成功的）不算整步失敗，會繼續跑下一步。
  */
-function scheduledDailyFetch() {
-  var startTime = Date.now();
-  var steps = [];
-  var today = new Date();
-  var skip = shouldSkipToday_(today);
-  if (skip.skip) {
-    logRun_('每日排程', '略過', skip.reason, 0);
-    saveLastScheduledRunSteps_(steps, 'skipped', skip.reason, startTime);
-    return;
-  }
+var SCHEDULE_STEP_DEFS_ = [
+  { label: '檢查最新資料日期', run: runScheduleStep1_ },
+  { label: '補抓資料', run: runScheduleStep2_ },
+  { label: 'BigQuery 整理', run: runScheduleStep3_ },
+  { label: '重新計算戰報', run: runScheduleStep4_ },
+  { label: '每日自動 AI 診斷', run: runScheduleStep5_ }
+];
 
-  var settings = getScheduleSettings();
-  var todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-
-  // 1. 檢查大表目前最新資料日期，決定要從哪一天開始補抓；抓不到既有最新日期時
-  //    （例如全新安裝、或查詢本身失敗）退回只抓「今天」，維持排程不中斷。
-  var step1Start = Date.now();
+/** 檢查大表目前最新資料日期，決定要從哪一天開始補抓；抓不到既有最新日期時（例如全新
+ *  安裝、或查詢本身失敗——後者會直接 throw，交給外層引擎判定整步失敗、停止後續步驟）
+ *  就從「今天」開始抓。 */
+function runScheduleStep1_(ctx) {
+  var overview = getHistoryOverview();
   var cursor = null;
-  try {
-    var overview = getHistoryOverview();
-    if (overview && overview.max) {
-      var next = new Date(overview.max + 'T00:00:00');
-      next.setDate(next.getDate() + 1);
-      cursor = new Date(next.getFullYear(), next.getMonth(), next.getDate());
-    }
-    recordScheduledStep_(steps, '檢查最新資料日期', 'success',
-      overview && overview.max ? '目前最新資料：' + overview.max : '查無既有資料，改抓今天', step1Start);
-  } catch (overviewErr) {
-    logRun_('每日排程-檢查最新日期', '失敗', String(overviewErr.message || overviewErr), 0);
-    recordScheduledStep_(steps, '檢查最新資料日期', 'failed', String(overviewErr.message || overviewErr), step1Start);
+  if (overview && overview.max) {
+    var next = new Date(overview.max + 'T00:00:00');
+    next.setDate(next.getDate() + 1);
+    cursor = new Date(next.getFullYear(), next.getMonth(), next.getDate());
   }
-  if (!cursor || cursor > todayOnly) cursor = todayOnly;
+  if (!cursor || cursor > ctx.todayOnly) cursor = ctx.todayOnly;
+  ctx.cursor = cursor;
+  return { status: 'success', detail: overview && overview.max ? '目前最新資料：' + overview.max : '查無既有資料，改抓今天' };
+}
 
-  // 2. 逐天抓到今天為止（含）。單次執行最多補 MAX_CATCHUP_DAYS 天，避免缺口太大時
-  //    觸發器執行時間超過上限；缺口更大時請改用「資料總覽」的「重新抓取/合併此區間」
-  //    背景 job（分批續跑、不受單次執行時間限制）。
-  var step2Start = Date.now();
+/** 從 ctx.cursor 逐天抓到今天為止（含）。單次執行最多補 MAX_CATCHUP_DAYS 天，避免缺口
+ *  太大時觸發器執行時間超過上限；缺口更大時請改用「資料總覽」的「重新抓取/合併此區間」
+ *  背景 job（分批續跑、不受單次執行時間限制）。
+ *  一整天都沒抓到（succeeded 是空的、又確實有失敗）才 throw、判定整步失敗停止後續步驟——
+ *  只要至少有一天成功，代表有新資料值得往下跑（重新計算戰報才有意義），算 partial 不算
+ *  整步失敗。 */
+function runScheduleStep2_(ctx) {
   var MAX_CATCHUP_DAYS = 14;
   var succeeded = [], skipped = [], failed = [], truncated = false, processedDays = 0, totalRowCount = 0;
-  while (cursor <= todayOnly) {
+  var cursor = ctx.cursor;
+  while (cursor <= ctx.todayOnly) {
     if (processedDays >= MAX_CATCHUP_DAYS) { truncated = true; break; }
-    var dayResult = backfillOneDay_(cursor, settings);
+    var dayResult = backfillOneDay_(cursor, ctx.settings);
     if (dayResult.kind === 'succeeded') { succeeded.push(dayResult.date); totalRowCount += dayResult.rowCount || 0; }
     else if (dayResult.kind === 'skipped') skipped.push(dayResult.date);
     else failed.push(dayResult.date + '：' + dayResult.error);
@@ -502,62 +494,160 @@ function scheduledDailyFetch() {
       '資料缺口超過 ' + MAX_CATCHUP_DAYS + ' 天，本次只補到 ' + (succeeded[succeeded.length - 1] || skipped[skipped.length - 1] || '（無）') +
       '，剩餘天數請用「資料總覽」的「重新抓取/合併此區間」補齊', 0);
   }
-  var backfillSummary = '成功 ' + succeeded.length + ' 天' + (succeeded.length ? '，共 ' + totalRowCount + ' 筆' : '') +
+  var summary = '成功 ' + succeeded.length + ' 天' + (succeeded.length ? '，共 ' + totalRowCount + ' 筆' : '') +
     (skipped.length ? '、略過 ' + skipped.length + ' 天' : '') +
     (failed.length ? '、失敗 ' + failed.length + ' 天（' + failed.join('; ') + '）' : '') + (truncated ? '（缺口過大，已截斷）' : '');
-  recordScheduledStep_(steps, '補抓資料', truncated || failed.length ? 'partial' : 'success', backfillSummary, step2Start);
+  if (succeeded.length === 0 && failed.length > 0) throw new Error(summary);
+  return { status: (failed.length || truncated) ? 'partial' : 'success', detail: summary };
+}
 
-  // 3. materialized 模式下，剛寫進去的新資料要先重新整理進 BigQuery 原生表，不然下一步的
-  //    分析可能讀到「重新整理間隔還沒到」的舊版本，漏掉剛補上的資料。
-  var step3Start = Date.now();
-  try {
-    var bqSettings = getBigQuerySettings();
-    if (bqSettings.projectId && bqSettings.sourceMode === 'materialized') {
-      materializeHistoryTableIfStale_(0);
-      recordScheduledStep_(steps, 'BigQuery整理', 'success', '', step3Start);
-    } else {
-      recordScheduledStep_(steps, 'BigQuery整理', 'skipped', '非 materialized 模式，略過', step3Start);
+/** materialized 模式下，剛寫進去的新資料要先重新整理進 BigQuery 原生表。 */
+function runScheduleStep3_(ctx) {
+  var bqSettings = getBigQuerySettings();
+  if (bqSettings.projectId && bqSettings.sourceMode === 'materialized') {
+    materializeHistoryTableIfStale_(0);
+    return { status: 'success', detail: '' };
+  }
+  return { status: 'skipped', detail: '非 materialized 模式，略過' };
+}
+
+/** 重新計算戰報。 */
+function runScheduleStep4_(ctx) {
+  var analysisResult = runAnalysisAndSave();
+  var detail = analysisResult && analysisResult.latestDate
+    ? '戰報日期 ' + analysisResult.latestDate + '，' + analysisResult.report.length + ' 檔訊號' +
+      (analysisResult.diagnostics && analysisResult.diagnostics.totalStocks !== undefined ? '（共掃描 ' + analysisResult.diagnostics.totalStocks + ' 檔）' : '')
+    : '沒有可用的歷史資料，查無戰報';
+  return { status: 'success', detail: detail };
+}
+
+/** 每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較）。 */
+function runScheduleStep5_(ctx) {
+  var aiResult = runDailyAiDiagnosisForTopPicks();
+  if (aiResult.skipped) return { status: 'skipped', detail: aiResult.reason };
+  var detail = '候選名單深度診斷：' + (aiResult.shortlist.ok ? '成功' : '失敗（' + aiResult.shortlist.error + '）') +
+    '　Top3 橫向比較：' + (aiResult.topPicks.ok ? '成功' : '失敗（' + aiResult.topPicks.error + '）');
+  return { status: (aiResult.shortlist.ok && aiResult.topPicks.ok) ? 'success' : 'partial', detail: detail };
+}
+
+/**
+ * 依序執行每日排程步驟，從 startIndex（0-based）開始跑到底，任何一步 throw 就立刻停止。
+ * previousSteps 是「上一次執行紀錄」的 steps 陣列，取 startIndex 之前的部分直接沿用
+ * （不重跑，保留原本的起訖時間/狀態/摘要），讓畫面上的時間軸即使只重跑某幾步，仍然是
+ * 完整的 5 步紀錄，不會因為「從第 3 步重跑」就看不到第 1、2 步當初的結果。
+ * 正常每日排程從 startIndex=0（previousSteps=null）開始；「從這步重跑」按鈕帶著使用者
+ * 指定的 stepIndex 跟上一次的 steps 進來。
+ */
+function runScheduledSteps_(startIndex, previousSteps) {
+  var startTime = Date.now();
+  var steps = (previousSteps || []).slice(0, startIndex);
+  var today = new Date();
+  var ctx = {
+    settings: getScheduleSettings(),
+    todayOnly: new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  };
+
+  for (var i = startIndex; i < SCHEDULE_STEP_DEFS_.length; i++) {
+    var def = SCHEDULE_STEP_DEFS_[i];
+    var stepStart = Date.now();
+    try {
+      var result = def.run(ctx);
+      recordScheduledStep_(steps, def.label, result.status, result.detail, stepStart);
+    } catch (e) {
+      logRun_('每日排程-' + def.label, '失敗', String(e.message || e), 0);
+      recordScheduledStep_(steps, def.label, 'failed', String(e.message || e), stepStart);
+      break; // 硬停：後面的步驟只會用同一份舊資料重算一次一模一樣的結果，沒有意義
     }
-  } catch (materializeErr) {
-    logRun_('每日排程-BigQuery整理', '失敗', String(materializeErr.message || materializeErr), 0);
-    recordScheduledStep_(steps, 'BigQuery整理', 'failed', String(materializeErr.message || materializeErr), step3Start);
   }
 
-  // 4. 重新計算戰報
-  var step4Start = Date.now();
-  try {
-    var analysisResult = runAnalysisAndSave();
-    var analysisDetail = analysisResult && analysisResult.latestDate
-      ? '戰報日期 ' + analysisResult.latestDate + '，' + analysisResult.report.length + ' 檔訊號' +
-        (analysisResult.diagnostics && analysisResult.diagnostics.totalStocks !== undefined ? '（共掃描 ' + analysisResult.diagnostics.totalStocks + ' 檔）' : '')
-      : '沒有可用的歷史資料，查無戰報';
-    recordScheduledStep_(steps, '重新計算戰報', 'success', analysisDetail, step4Start);
-  } catch (analysisErr) {
-    logRun_('每日排程-分析', '失敗', String(analysisErr.message || analysisErr), 0);
-    recordScheduledStep_(steps, '重新計算戰報', 'failed', String(analysisErr.message || analysisErr), step4Start);
-  }
-
-  // 5. 每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較）
-  var step5Start = Date.now();
-  try {
-    var aiResult = runDailyAiDiagnosisForTopPicks();
-    if (aiResult.skipped) {
-      recordScheduledStep_(steps, '每日自動 AI 診斷', 'skipped', aiResult.reason, step5Start);
-    } else {
-      var aiDetail = '候選名單深度診斷：' + (aiResult.shortlist.ok ? '成功' : '失敗（' + aiResult.shortlist.error + '）') +
-        '　Top3 橫向比較：' + (aiResult.topPicks.ok ? '成功' : '失敗（' + aiResult.topPicks.error + '）');
-      recordScheduledStep_(steps, '每日自動 AI 診斷', (aiResult.shortlist.ok && aiResult.topPicks.ok) ? 'success' : 'partial', aiDetail, step5Start);
-    }
-  } catch (aiErr) {
-    logRun_('每日排程-AI診斷', '失敗', String(aiErr.message || aiErr), 0);
-    recordScheduledStep_(steps, '每日自動 AI 診斷', 'failed', String(aiErr.message || aiErr), step5Start);
-  }
-
-  var dur = Math.round((Date.now() - startTime) / 1000);
-  var summary = '成功 ' + succeeded.length + ' 天' + (succeeded.length ? '（' + succeeded.join(', ') + '）' : '');
-  if (skipped.length) summary += '、略過 ' + skipped.length + ' 天';
-  if (failed.length) summary += '、失敗 ' + failed.length + ' 天（' + failed.join('; ') + '）';
-  var overallStatus = (succeeded.length === 0 && failed.length > 0) ? 'failed' : 'success';
-  logRun_('每日排程', overallStatus === 'failed' ? '失敗' : '成功', summary, dur);
+  var hasFailed = steps.some(function (s) { return s.status === 'failed'; });
+  var hasPartial = steps.some(function (s) { return s.status === 'partial'; });
+  var overallStatus = hasFailed ? 'failed' : (hasPartial ? 'partial' : 'success');
+  var summary = steps.map(function (s) { return s.label + '：' + s.status; }).join('、');
+  logRun_('每日排程', overallStatus === 'failed' ? '失敗' : (overallStatus === 'partial' ? '部分成功' : '成功'), summary, Math.round((Date.now() - startTime) / 1000));
   saveLastScheduledRunSteps_(steps, overallStatus, summary, startTime);
+  return { steps: steps, overallStatus: overallStatus, summary: summary };
+}
+
+/**
+ * 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。
+ * 整段包在最外層 try/catch 裡是最後一道防線——理論上 runScheduledSteps_ 裡每個步驟都已經
+ * 各自接住例外，不應該再有漏網之魚，但實測真的發生過「最近一次排程執行」永遠顯示「尚未
+ * 執行過」、卻又看得到某些步驟自己的成功記錄（例如手動按「立即重新整理」留下的 BigQuery
+ * 整理成功記錄，被誤以為是排程本身有跑），追查後就是某個環節丟出了沒被接住的例外，導致
+ * 整支函式中途默默中斷、saveLastScheduledRunSteps_ 永遠沒被呼叫到。有這道防線之後，即使
+ * 又發生類似未預期的例外，至少「最近一次排程執行」會誠實顯示「失敗＋錯誤訊息」，而不是
+ * 永遠停在「尚未執行過」讓人誤判成觸發器根本沒被觸發。
+ */
+function scheduledDailyFetch() {
+  var startTime = Date.now();
+  try {
+    var today = new Date();
+    var skip = shouldSkipToday_(today);
+    if (skip.skip) {
+      logRun_('每日排程', '略過', skip.reason, 0);
+      saveLastScheduledRunSteps_([], 'skipped', skip.reason, startTime);
+      return;
+    }
+    runScheduledSteps_(0, null);
+  } catch (e) {
+    logRun_('每日排程', '失敗', '未預期的例外（步驟外層）：' + String(e.message || e), Math.round((Date.now() - startTime) / 1000));
+    saveLastScheduledRunSteps_([], 'failed', '未預期的例外：' + String(e.message || e), startTime);
+  }
+}
+
+// ============================================================
+// 「每日自動排程」某一步失敗後「從這步重跑」：背景 job（機制跟其他背景 job 相同）。
+// 只重跑指定步驟跟後面的步驟，前面已經成功的步驟不用重做（見 runScheduledSteps_ 的說明）。
+// ============================================================
+
+function getScheduleResumeJobState_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveScheduleResumeJobState_(state) {
+  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, JSON.stringify(state));
+}
+
+function deleteScheduleResumeJobTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'processScheduleResumeJobTick_') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/** 前端「從這步重跑」按鈕呼叫：stepIndex 是 0-based 的步驟編號（0=檢查最新資料日期 ...
+ *  4=每日自動AI診斷）。排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，實際重跑在另一次
+ *  獨立觸發的執行裡進行，不受這次瀏覽器連線影響。 */
+function startResumeScheduledRunJob(stepIndex) {
+  deleteScheduleResumeJobTriggers_();
+  saveScheduleResumeJobState_({ status: 'running', stepIndex: stepIndex, updatedAt: Date.now() });
+  ScriptApp.newTrigger('processScheduleResumeJobTick_').timeBased().after(3000).create();
+  return { status: 'running' };
+}
+
+function getResumeScheduledRunJobStatus() {
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, getScheduleResumeJobState_() || { status: 'idle' });
+}
+
+function clearScheduleResumeJob_() {
+  deleteScheduleResumeJobTriggers_();
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
+  return { status: 'idle' };
+}
+
+function processScheduleResumeJobTick_() {
+  deleteScheduleResumeJobTriggers_();
+  var state = getScheduleResumeJobState_();
+  if (!state || state.status !== 'running') return;
+  try {
+    var last = getLastScheduledRunSteps();
+    runScheduledSteps_(state.stepIndex, last ? last.steps : null);
+    state.status = 'done';
+  } catch (e) {
+    state.status = 'error';
+    state.errorMessage = String(e.message || e);
+  }
+  state.updatedAt = Date.now();
+  saveScheduleResumeJobState_(state);
 }

@@ -40,7 +40,8 @@ var CONFIG = {
     SCREENING_STRATEGY: 'SCREENING_STRATEGY', // 目前生效的「新進場訊號」篩選邏輯版本（見 Analysis.gs SCREENING_STRATEGIES）
     LAST_SCHEDULED_RUN: 'LAST_SCHEDULED_RUN', // 最近一次「每日自動排程」依序執行的每個步驟起訖時間/狀態（見 DataFetch.gs scheduledDailyFetch）
     INDUSTRY_MAP_LAST_REFRESH: 'INDUSTRY_MAP_LAST_REFRESH', // 產業對照表上次重新整理的結果摘要（見 IndustryMap.gs）
-    INDUSTRY_MAP_JOB_STATE: 'INDUSTRY_MAP_JOB_STATE' // 「重新整理產業對照表」背景 job 的目前狀態（見 IndustryMap.gs）
+    INDUSTRY_MAP_JOB_STATE: 'INDUSTRY_MAP_JOB_STATE', // 「重新整理產業對照表」背景 job 的目前狀態（見 IndustryMap.gs）
+    SCHEDULE_RESUME_JOB_STATE: 'SCHEDULE_RESUME_JOB_STATE' // 「每日自動排程」某一步失敗後「從這步重跑」背景 job 的目前狀態（見 DataFetch.gs）
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，

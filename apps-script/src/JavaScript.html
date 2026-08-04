@@ -2192,6 +2192,9 @@
       .catch(function (err) { document.getElementById('lastScheduledRun').innerHTML = errorBox(err); });
   }
 
+  /** 排程任一步失敗就整個硬停（見 DataFetch.gs runScheduledSteps_ 的說明：後面步驟只會用
+   *  同一份舊資料重算一次一模一樣的結果，沒有意義），所以最多只會有一個 status:'failed'
+   *  的步驟、而且一定是陣列裡最後一個——只在那一步顯示「從這步重跑」按鈕。 */
   function renderLastScheduledRun_(run) {
     var el = document.getElementById('lastScheduledRun');
     if (!run) { el.innerHTML = '<div class="empty-hint">尚未執行過</div>'; return; }
@@ -2199,17 +2202,57 @@
     var header = '<div class="meta-bar">整體：' + (SCHEDULED_STEP_STATUS_ICON_[run.overallStatus] || '') + ' ' +
       escapeHtml(run.summary || '') + '　' + new Date(run.startedAt).toLocaleString('zh-TW') + ' ～ ' +
       new Date(run.endedAt).toLocaleTimeString('zh-TW') + '（共 ' + totalSec + ' 秒）</div>';
-    if (!run.steps || !run.steps.length) { el.innerHTML = header; return; }
+    if (!run.steps || !run.steps.length) { el.innerHTML = header + '<div id="scheduleResumeResult"></div>'; return; }
     var stepsHtml = '<div class="md-table-cards">' + run.steps.map(function (s, i) {
       var sec = Math.round((s.endedAt - s.startedAt) / 1000);
+      var resumeBtn = s.status === 'failed'
+        ? '<button type="button" class="btn-secondary schedule-resume-btn" data-step-index="' + i + '" style="margin-top:6px;">🔁 從這步重跑</button>'
+        : '';
       return '<div class="md-table-card">' +
         '<div class="md-table-card-title">' + (i + 1) + '. ' + escapeHtml(s.label) + ' ' + (SCHEDULED_STEP_STATUS_ICON_[s.status] || '') + '</div>' +
         '<div class="kv-row"><span class="kv-label">時間</span><span class="kv-value">' +
         new Date(s.startedAt).toLocaleTimeString('zh-TW') + ' ～ ' + new Date(s.endedAt).toLocaleTimeString('zh-TW') + '（' + sec + ' 秒）</span></div>' +
         (s.detail ? '<div class="kv-row"><span class="kv-label">摘要</span><span class="kv-value">' + escapeHtml(s.detail) + '</span></div>' : '') +
+        resumeBtn +
         '</div>';
     }).join('') + '</div>';
-    el.innerHTML = header + stepsHtml;
+    el.innerHTML = header + stepsHtml + '<div id="scheduleResumeResult"></div>';
+    el.querySelectorAll('.schedule-resume-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var stepIndex = parseInt(btn.getAttribute('data-step-index'), 10);
+        var resultEl = document.getElementById('scheduleResumeResult');
+        resultEl.innerHTML = '<div class="loading">⏳ 背景重跑中，可以切到別的畫面或關掉螢幕，不會中斷，完成後這裡會自動更新...</div>';
+        withSpin(callServer('startResumeScheduledRunJob', stepIndex)).then(function () {
+          pollScheduleResumeJob_();
+        }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
+      });
+    });
+  }
+
+  var scheduleResumePollTimer_ = null;
+  function stopScheduleResumePoll_() {
+    if (scheduleResumePollTimer_) { clearInterval(scheduleResumePollTimer_); scheduleResumePollTimer_ = null; }
+  }
+
+  /** 「從這步重跑」是背景 job（機制跟其他背景 job 相同，避免長時間 RPC 在手機瀏覽器上
+   *  被中斷），完成後直接重新載入整份「最近一次排程執行」時間軸，不用自己拼湊局部更新。 */
+  function pollScheduleResumeJob_() {
+    stopScheduleResumePoll_();
+    var poll = function () {
+      callServer('getResumeScheduledRunJobStatus').then(function (state) {
+        if (!state || state.status === 'running') return;
+        stopScheduleResumePoll_();
+        var resultEl = document.getElementById('scheduleResumeResult');
+        if (resultEl) resultEl.innerHTML = state.status === 'error' ? errorBox(state.errorMessage || '重跑失敗') : '';
+        loadLastScheduledRunSteps_();
+      }).catch(function (err) {
+        stopScheduleResumePoll_();
+        var resultEl2 = document.getElementById('scheduleResumeResult');
+        if (resultEl2) resultEl2.innerHTML = errorBox(err);
+      });
+    };
+    poll();
+    scheduleResumePollTimer_ = setInterval(poll, 4000);
   }
 
   function renderSkipDates(dates) {

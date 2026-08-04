@@ -166,4 +166,23 @@ loadIntoContext('JobQueue.gs');
   console.log('Test jobQueueDetail_ (industryMap) passed.');
 }
 
+// --- jobQueueDetail_: scheduleResume ---
+// SCHEDULE_STEP_DEFS_ 實際定義在 DataFetch.gs（這裡只單獨載入 JobQueue.gs），手動塞一份
+// 最小假資料模擬同一個全域 scope 下 DataFetch.gs 已經載入過的樣子。
+{
+  context.SCHEDULE_STEP_DEFS_ = [
+    { label: '檢查最新資料日期' }, { label: '補抓資料' }, { label: 'BigQuery 整理' },
+    { label: '重新計算戰報' }, { label: '每日自動 AI 診斷' }
+  ];
+  assert.strictEqual(context.jobQueueDetail_('scheduleResume', { status: 'idle' }), '');
+
+  const running = context.jobQueueDetail_('scheduleResume', { status: 'running', stepIndex: 1 });
+  assert.ok(running.indexOf('補抓資料') !== -1, '要顯示是從哪一步開始重跑的，不能只講「執行中」');
+
+  const errored = context.jobQueueDetail_('scheduleResume', { status: 'error', stepIndex: 3, errorMessage: 'BigQuery 連線逾時' });
+  assert.ok(errored.indexOf('重新計算戰報') !== -1);
+  assert.ok(errored.indexOf('BigQuery 連線逾時') !== -1, '重跑本身又失敗時，錯誤訊息要看得到');
+  console.log('Test jobQueueDetail_ (scheduleResume) passed.');
+}
+
 console.log('All JobQueue.gs tests passed.');
