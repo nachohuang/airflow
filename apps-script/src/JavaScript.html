@@ -1319,6 +1319,11 @@
   });
 
   // ---------- 產業資金流向（Phase 2 唯讀驗證，見 IndustryCapitalFlow.gs） ----------
+  /** 三大法人分項數字上色：淨買超（正）紅、淨賣超（負）綠，符合台股慣例；0 用中性灰。 */
+  function instNetColor_(v) {
+    return v > 0 ? 'var(--red)' : (v < 0 ? 'var(--green)' : 'var(--text-muted)');
+  }
+
   document.getElementById('industryFlowBtn').addEventListener('click', function () {
     var el = document.getElementById('industryFlowResult');
     el.innerHTML = '<div class="loading">計算今日產業資金流向中...</div>';
@@ -1328,16 +1333,32 @@
         el.innerHTML = '<div class="empty-hint">產業對照表目前是空的，請先到「系統與資料後台 → 資料庫與模式 → 產業對照表」重新整理一次。</div>';
         return;
       }
-      var rows = data.industries.map(function (r, i) {
-        var color = r.sumInstNet > 0 ? 'var(--red)' : (r.sumInstNet < 0 ? 'var(--green)' : 'var(--text-muted)');
-        return '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(r.industry) + '</td><td>' + fmtNum(r.stockCount, 0) + '</td>' +
-          '<td style="color:' + color + ';">' + fmtNum(r.sumInstNet, 0) + '</td>' +
-          '<td>' + fmtNum(r.avgInstNet, 0) + '</td></tr>';
+      var cards = data.industries.map(function (r, i) {
+        var top = r.topContributor;
+        // 最大貢獻股佔「總交易強度」（絕對值加總，不是淨額）超過一半，代表這個產業的排名
+        // 主要是被單一檔股票拖著走，不是整個產業一致的方向，用顏色標出來提醒不要照單全收。
+        var topWarn = top && top.sharePct !== null && top.sharePct >= 50;
+        var topHtml = !top ? '' :
+          '<div class="kv-row"><span class="kv-label">最大貢獻個股</span><span class="kv-value">' +
+          escapeHtml(top.name) + '(' + escapeHtml(top.code) + ')　' +
+          '<span style="color:' + instNetColor_(top.instNet) + ';">' + fmtNum(top.instNet, 0) + '</span>' +
+          (top.sharePct !== null ? '　佔產業交易強度 <span style="color:' + (topWarn ? 'var(--amber)' : 'var(--text-muted)') + '; font-weight:' + (topWarn ? '700' : '400') + ';">' + fmtNum(top.sharePct, 1) + '%</span>' +
+            (topWarn ? ' ⚠️' : '') : '') + '</span></div>';
+        return '<div class="md-table-card">' +
+          '<div class="md-table-card-title">' + (i + 1) + '. ' + escapeHtml(r.industry) + '（' + fmtNum(r.stockCount, 0) + ' 家）</div>' +
+          '<div class="kv-row"><span class="kv-label">合計買賣超</span><span class="kv-value" style="color:' + instNetColor_(r.sumInstNet) + '; font-weight:700;">' +
+          fmtNum(r.sumInstNet, 0) + ' 股</span></div>' +
+          '<div class="kv-row"><span class="kv-label">外資／投信／自營商</span><span class="kv-value">' +
+          '<span style="color:' + instNetColor_(r.foreignSum) + ';">' + fmtNum(r.foreignSum, 0) + '</span>／' +
+          '<span style="color:' + instNetColor_(r.trustSum) + ';">' + fmtNum(r.trustSum, 0) + '</span>／' +
+          '<span style="color:' + instNetColor_(r.dealerSum) + ';">' + fmtNum(r.dealerSum, 0) + '</span></span></div>' +
+          topHtml +
+          '</div>';
       }).join('');
       el.innerHTML = '<div class="meta-bar">' + escapeHtml(data.latestDate) + '　共 ' + fmtNum(data.totalStocks, 0) +
-        ' 檔（' + fmtNum(data.unclassifiedCount, 0) + ' 檔沒有產業別資料，不計入下面統計）</div>' +
-        '<div class="table-scroll"><table class="simple-table"><thead><tr><th>排名</th><th>產業別</th><th>家數</th>' +
-        '<th>合計買賣超(股)</th><th>平均買賣超/檔</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+        ' 檔（' + fmtNum(data.unclassifiedCount, 0) + ' 檔沒有產業別資料，不計入下面統計）　' +
+        '<span style="color:var(--amber);">⚠️ 標示代表這個產業的排名主要是被單一檔股票拖著走</span></div>' +
+        '<div class="md-table-cards">' + cards + '</div>';
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   });
 

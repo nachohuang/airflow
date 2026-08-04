@@ -75,4 +75,56 @@ loadIntoContext('IndustryCapitalFlow.gs');
   console.log('Test aggregateIndustryCapitalFlow_ (empty input -> empty result) passed.');
 }
 
+// --- 依三大法人分別加總（外資/投信/自營商），不只是合計 ---
+{
+  const scanRows = [
+    { '證券代號': '2330', Inst_Net: 2000, '外資': 3000, '投信': -500, '自營商': -500 },
+    { '證券代號': '2454', Inst_Net: -500, '外資': -1000, '投信': 400, '自營商': 100 }
+  ];
+  const codeToIndustry = { '2330': '半導體業', '2454': '半導體業' };
+  const result = context.aggregateIndustryCapitalFlow_(scanRows, codeToIndustry);
+
+  const semi = result.industries[0];
+  assert.strictEqual(semi.foreignSum, 2000); // 3000 + (-1000)
+  assert.strictEqual(semi.trustSum, -100); // -500 + 400
+  assert.strictEqual(semi.dealerSum, -400); // -500 + 100
+  console.log('Test aggregateIndustryCapitalFlow_ (breaks down by foreign/trust/dealer separately) passed.');
+}
+
+// --- 最大貢獻個股：抓出 |Inst_Net| 最大的那一檔，並用「總交易強度」（絕對值加總）當分母算佔比，
+//     不是用淨額當分母（淨額多空互相抵銷時，用它當分母會失真甚至除以接近 0 的數字） ---
+{
+  const scanRows = [
+    { '證券代號': '2330', '證券名稱': '台積電', Inst_Net: 9000 },
+    { '證券代號': '2454', '證券名稱': '聯發科', Inst_Net: -900 },
+    { '證券代號': '3711', '證券名稱': '日月光投控', Inst_Net: 100 }
+  ];
+  const codeToIndustry = { '2330': '半導體業', '2454': '半導體業', '3711': '半導體業' };
+  const result = context.aggregateIndustryCapitalFlow_(scanRows, codeToIndustry);
+
+  const semi = result.industries[0];
+  assert.strictEqual(semi.topContributor.code, '2330');
+  assert.strictEqual(semi.topContributor.name, '台積電');
+  // sumAbsInstNet = 9000 + 900 + 100 = 10000，台積電佔 9000/10000 = 90%
+  assert.strictEqual(semi.topContributor.sharePct, 90);
+  console.log('Test aggregateIndustryCapitalFlow_ (identifies dominant single stock by abs value, share % uses abs-sum denominator) passed.');
+}
+
+// --- 產業淨額接近 0（多空互相抵銷）時，最大貢獻股的佔比不會被誤導成很低或除以 0 ---
+{
+  const scanRows = [
+    { '證券代號': '2330', '證券名稱': '台積電', Inst_Net: 5000 },
+    { '證券代號': '2454', '證券名稱': '聯發科', Inst_Net: -4990 }
+  ];
+  const codeToIndustry = { '2330': '半導體業', '2454': '半導體業' };
+  const result = context.aggregateIndustryCapitalFlow_(scanRows, codeToIndustry);
+
+  const semi = result.industries[0];
+  assert.strictEqual(semi.sumInstNet, 10); // 淨額幾乎是 0
+  // 但實際交易強度（絕對值加總）是 9990，台積電佔了一半左右，用淨額當分母會得到荒謬的比例
+  assert.ok(semi.topContributor.sharePct > 40 && semi.topContributor.sharePct < 60,
+    '用總交易強度當分母應該得到合理的比例，不是用接近 0 的淨額當分母');
+  console.log('Test aggregateIndustryCapitalFlow_ (near-zero net sum does not distort dominance share) passed:', semi.topContributor.sharePct);
+}
+
 console.log('All IndustryCapitalFlow.gs tests passed.');
