@@ -24,9 +24,11 @@ const PropertiesService = {
   }
 };
 const fakeTriggers = [];
+let newTriggerCalls = []; // 每個元素是這次 ScriptApp.newTrigger(handlerName) 呼叫的 handler 名稱
 const ScriptApp = {
   getProjectTriggers: function () { return fakeTriggers; },
-  newTrigger: function () {
+  newTrigger: function (handlerName) {
+    newTriggerCalls.push(handlerName);
     return {
       timeBased: function () { return this; },
       after: function () { return this; },
@@ -176,6 +178,78 @@ function makeCallSpy() {
   assert.strictEqual(calls.step3, 1, '第 3 步應該被重新執行');
   assert.strictEqual(result.overallStatus, 'success');
   console.log('Test runScheduledSteps_ (resume from step index -> reuses earlier steps) passed.');
+}
+
+// --- runScheduledSteps_: 時間預算在第一步開始前就已經用完（例如上一段 tick 已經跑了很
+// 久）-> 一步都不跑，直接回傳 nextStepIndex=startIndex，狀態是 'running'（不是失敗）,
+// 讓呼叫端知道要排下一次 tick 繼續。這是修「Apps Script 單次執行 6 分鐘上限會直接砍斷、
+// 任何 try/catch 都接不住」這個實際發生過的問題的核心機制。 ---
+{
+  resetFakeProps();
+  const calls = makeCallSpy();
+  const longAgoBudgetStart = Date.now() - context.SCHEDULE_STEP_TIME_BUDGET_MS_ - 1000;
+  const result = context.runScheduledSteps_(0, null, longAgoBudgetStart);
+  assert.strictEqual(result.overallStatus, 'running', '時間預算用完不該算失敗，只是這段先停在這裡');
+  assert.strictEqual(result.nextStepIndex, 0, '一步都還沒開始跑，下一次應該從第 0 步繼續');
+  assert.strictEqual(result.steps.length, 0);
+  assert.strictEqual(calls.step1, 0, '時間預算已經用完，第 1 步不該被呼叫');
+  console.log('Test runScheduledSteps_ (time budget already exhausted -> stops before any step, status running) passed.');
+}
+
+// --- processScheduleResumeJobTick_: runScheduledSteps_ 回傳 nextStepIndex 非 null（時間
+// 預算用完、還沒跑到底）時，要更新進度並排下一次 tick 繼續，這次 tick 不能標記成 done——
+// 直接覆寫 context.runScheduledSteps_ 本身，跟 runScheduledSteps_ 的真實計時邏輯脫鉤，
+// 專注驗證 processScheduleResumeJobTick_ 的協調邏輯本身對不對。 ---
+{
+  resetFakeProps();
+  newTriggerCalls = [];
+  const originalRunScheduledSteps = context.runScheduledSteps_;
+  context.runScheduledSteps_ = function () {
+    return { steps: [{ label: '補抓資料', status: 'partial', detail: 'x', startedAt: 1, endedAt: 2 }], overallStatus: 'running', summary: 'x', nextStepIndex: 2 };
+  };
+  context.saveScheduleResumeJobState_({ status: 'running', stepIndex: 0, overallStartedAt: Date.now(), updatedAt: Date.now() });
+  context.processScheduleResumeJobTick_();
+  const state = context.getScheduleResumeJobState_();
+  assert.strictEqual(state.status, 'running', '時間預算用完時這次 tick 不該把工作標記成 done');
+  assert.strictEqual(state.stepIndex, 2, '進度應該更新成 runScheduledSteps_ 回傳的 nextStepIndex');
+  assert.ok(newTriggerCalls.indexOf('processScheduleResumeJobTick_') !== -1, '應該要排一個新的一次性觸發器繼續下一段');
+  context.runScheduledSteps_ = originalRunScheduledSteps;
+  console.log('Test processScheduleResumeJobTick_ (budget exhausted -> reschedules, stays running) passed.');
+}
+
+// --- processScheduleResumeJobTick_: runScheduledSteps_ 回傳 nextStepIndex=null（真的跑到
+// 底了，不管成功/部分成功/失敗）時，這次 tick 才該標記成 done/error，不該再排下一次 tick。 ---
+{
+  resetFakeProps();
+  newTriggerCalls = [];
+  const originalRunScheduledSteps2 = context.runScheduledSteps_;
+  context.runScheduledSteps_ = function () {
+    return { steps: [], overallStatus: 'failed', summary: '第 2 步：failed', nextStepIndex: null };
+  };
+  context.saveScheduleResumeJobState_({ status: 'running', stepIndex: 0, overallStartedAt: Date.now(), updatedAt: Date.now() });
+  context.processScheduleResumeJobTick_();
+  const state2 = context.getScheduleResumeJobState_();
+  assert.strictEqual(state2.status, 'error', 'runScheduledSteps_ 回傳失敗時，job 狀態也該是 error');
+  assert.ok(state2.errorMessage.indexOf('failed') !== -1);
+  assert.strictEqual(newTriggerCalls.indexOf('processScheduleResumeJobTick_'), -1, '已經跑到底了，不該再排下一次 tick');
+  context.runScheduledSteps_ = originalRunScheduledSteps2;
+  console.log('Test processScheduleResumeJobTick_ (reaches the end -> marks done/error, no reschedule) passed.');
+}
+
+// --- scheduledDailyFetch: 正常情況（不略過）現在應該是「排一個背景 job 就馬上回傳」，
+// 不再是「同步跑完整套 5 個步驟」——這正是這次要修的問題本身：同步跑完整套很容易超過
+// Apps Script 6 分鐘單次執行上限，被平台直接砍斷。 ---
+{
+  resetFakeProps();
+  const calls = makeCallSpy();
+  context.shouldSkipToday_ = function () { return { skip: false, reason: '' }; };
+  context.scheduledDailyFetch();
+  const jobState = context.getScheduleResumeJobState_();
+  assert.ok(jobState, '應該要排一個背景 job');
+  assert.strictEqual(jobState.status, 'running');
+  assert.strictEqual(jobState.stepIndex, 0);
+  assert.strictEqual(calls.step1, 0, 'scheduledDailyFetch 本身不該同步執行任何步驟——那是 tick 的工作');
+  console.log('Test scheduledDailyFetch (normal case -> starts background job instead of running synchronously) passed.');
 }
 
 // --- scheduledDailyFetch: 最外層安全網——就算某個步驟之外的地方（例如 shouldSkipToday_）

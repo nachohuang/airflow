@@ -471,13 +471,15 @@ function runScheduleStep1_(ctx) {
 }
 
 /** 從 ctx.cursor 逐天抓到今天為止（含）。單次執行最多補 MAX_CATCHUP_DAYS 天，避免缺口
- *  太大時觸發器執行時間超過上限；缺口更大時請改用「資料總覽」的「重新抓取/合併此區間」
- *  背景 job（分批續跑、不受單次執行時間限制）。
+ *  太大時單一步驟自己就跑超過時間預算（見 runScheduledSteps_ 的時間預算說明——目前只有
+ *  「跨步驟」之間會檢查預算、換下一次 tick 繼續，單一步驟內部（例如這裡逐天迴圈）還沒有
+ *  拆更細的時間預算檢查，缺口太大時這步本身還是有機會跑很久）；缺口更大時請改用「資料
+ *  總覽」的「重新抓取/合併此區間」背景 job（那個才是真的逐日都有時間預算、分批續跑）。
  *  一整天都沒抓到（succeeded 是空的、又確實有失敗）才 throw、判定整步失敗停止後續步驟——
  *  只要至少有一天成功，代表有新資料值得往下跑（重新計算戰報才有意義），算 partial 不算
  *  整步失敗。 */
 function runScheduleStep2_(ctx) {
-  var MAX_CATCHUP_DAYS = 14;
+  var MAX_CATCHUP_DAYS = 5;
   var succeeded = [], skipped = [], failed = [], truncated = false, processedDays = 0, totalRowCount = 0;
   var cursor = ctx.cursor;
   while (cursor <= ctx.todayOnly) {
@@ -531,15 +533,35 @@ function runScheduleStep5_(ctx) {
 }
 
 /**
- * 依序執行每日排程步驟，從 startIndex（0-based）開始跑到底，任何一步 throw 就立刻停止。
- * previousSteps 是「上一次執行紀錄」的 steps 陣列，取 startIndex 之前的部分直接沿用
- * （不重跑，保留原本的起訖時間/狀態/摘要），讓畫面上的時間軸即使只重跑某幾步，仍然是
- * 完整的 5 步紀錄，不會因為「從第 3 步重跑」就看不到第 1、2 步當初的結果。
- * 正常每日排程從 startIndex=0（previousSteps=null）開始；「從這步重跑」按鈕帶著使用者
- * 指定的 stepIndex 跟上一次的 steps 進來。
+ * Apps Script 單次執行大約有 6 分鐘的硬性上限，超過會被平台直接強制終止——不是拋出一般的
+ * JS 例外，程式碼完全沒有機會再繼續執行，任何 try/catch 都接不住。實測真的撞過這個問題：
+ * `scheduledDailyFetch()` 原本把 5 個步驟全部同步塞在同一次執行裡（沒有補抓資料天數比較多、
+ * 或每日自動 AI 診斷要對好幾檔股票各自呼叫 AI API 時，很容易跑超過 6 分鐘），導致
+ * 「最近一次排程執行」永遠是 null——不是沒被觸發，是每次真的觸發了，卻都在寫入執行紀錄
+ * 之前就被平台砍斷，saveLastScheduledRunSteps_ 永遠沒有機會被呼叫到。
+ * 所以留 1.5 分鐘緩衝、只給 4.5 分鐘時間預算，跟其他背景 job（補抓區間、AI 診斷…）的
+ * 4.5 分鐘預算是同一個保守值。這個預算是在「跨步驟之間」檢查（每個步驟開始前才看還有沒有
+ * 預算），不是拆到每個步驟內部——單一步驟本身（尤其補抓資料如果缺口比較大、或 AI 診斷
+ * 要跑好幾檔股票）理論上還是有機會單獨超過預算，但正常情況下（一天只補一天的量）每步
+ * 都遠遠不到 4.5 分鐘，這個殘餘風險先不處理，真的缺口很大時本來就有專門的「重新抓取/合併
+ * 此區間」背景 job 可以用。
  */
-function runScheduledSteps_(startIndex, previousSteps) {
-  var startTime = Date.now();
+var SCHEDULE_STEP_TIME_BUDGET_MS_ = 4.5 * 60 * 1000;
+
+/**
+ * 依序執行每日排程步驟，從 startIndex（0-based）開始，每個步驟開始前先檢查時間預算
+ * （budgetStartMs 到現在經過的時間）夠不夠，預算用完就停在這裡（不算失敗，只是這次
+ * tick 先做到這裡），回傳 nextStepIndex 讓呼叫端（processScheduleResumeJobTick_）知道
+ * 要排下一次 tick 從哪一步繼續。真的 throw（步驟本身出錯，不是時間預算問題）才會整個
+ * 判定成失敗、硬停不再繼續——這是使用者明確要的行為：後面步驟只是拿同一份舊資料重算一次
+ * 一模一樣的舊結果，沒有意義，寧可停下來讓人看到哪一步壞了、針對性重跑，而不是蒙混過關。
+ * previousSteps 是「上一次執行紀錄」的 steps 陣列，取 startIndex 之前的部分直接沿用
+ * （不重跑，保留原本的起訖時間/狀態/摘要），讓畫面上的時間軸不管重跑幾次、跨幾個 tick，
+ * 都是完整的 5 步紀錄。
+ */
+function runScheduledSteps_(startIndex, previousSteps, budgetStartMs) {
+  var tickStart = Date.now();
+  var budgetDeadline = (budgetStartMs || tickStart) + SCHEDULE_STEP_TIME_BUDGET_MS_;
   var steps = (previousSteps || []).slice(0, startIndex);
   var today = new Date();
   var ctx = {
@@ -547,7 +569,10 @@ function runScheduledSteps_(startIndex, previousSteps) {
     todayOnly: new Date(today.getFullYear(), today.getMonth(), today.getDate())
   };
 
-  for (var i = startIndex; i < SCHEDULE_STEP_DEFS_.length; i++) {
+  var i = startIndex;
+  var timedOut = false;
+  for (; i < SCHEDULE_STEP_DEFS_.length; i++) {
+    if (Date.now() >= budgetDeadline) { timedOut = true; break; }
     var def = SCHEDULE_STEP_DEFS_[i];
     var stepStart = Date.now();
     try {
@@ -556,28 +581,34 @@ function runScheduledSteps_(startIndex, previousSteps) {
     } catch (e) {
       logRun_('每日排程-' + def.label, '失敗', String(e.message || e), 0);
       recordScheduledStep_(steps, def.label, 'failed', String(e.message || e), stepStart);
-      break; // 硬停：後面的步驟只會用同一份舊資料重算一次一模一樣的結果，沒有意義
+      i = SCHEDULE_STEP_DEFS_.length; // 硬停：後面的步驟不用再跑，直接視為跑到底（非 timeout）
+      break;
     }
   }
 
   var hasFailed = steps.some(function (s) { return s.status === 'failed'; });
   var hasPartial = steps.some(function (s) { return s.status === 'partial'; });
-  var overallStatus = hasFailed ? 'failed' : (hasPartial ? 'partial' : 'success');
-  var summary = steps.map(function (s) { return s.label + '：' + s.status; }).join('、');
-  logRun_('每日排程', overallStatus === 'failed' ? '失敗' : (overallStatus === 'partial' ? '部分成功' : '成功'), summary, Math.round((Date.now() - startTime) / 1000));
-  saveLastScheduledRunSteps_(steps, overallStatus, summary, startTime);
-  return { steps: steps, overallStatus: overallStatus, summary: summary };
+  var reachedEnd = i >= SCHEDULE_STEP_DEFS_.length;
+  var stillPending = timedOut && !reachedEnd && !hasFailed;
+  var overallStatus = hasFailed ? 'failed' : (stillPending ? 'running' : (hasPartial ? 'partial' : 'success'));
+  var summary = steps.map(function (s) { return s.label + '：' + s.status; }).join('、') +
+    (stillPending ? '（時間預算用完，已自動排下一段繼續）' : '');
+  logRun_('每日排程', hasFailed ? '失敗' : (stillPending ? '執行中' : (overallStatus === 'partial' ? '部分成功' : '成功')),
+    summary, Math.round((Date.now() - tickStart) / 1000));
+  saveLastScheduledRunSteps_(steps, overallStatus, summary, budgetStartMs || tickStart);
+  return { steps: steps, overallStatus: overallStatus, summary: summary, nextStepIndex: stillPending ? i : null };
 }
 
 /**
  * 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。
- * 整段包在最外層 try/catch 裡是最後一道防線——理論上 runScheduledSteps_ 裡每個步驟都已經
- * 各自接住例外，不應該再有漏網之魚，但實測真的發生過「最近一次排程執行」永遠顯示「尚未
- * 執行過」、卻又看得到某些步驟自己的成功記錄（例如手動按「立即重新整理」留下的 BigQuery
- * 整理成功記錄，被誤以為是排程本身有跑），追查後就是某個環節丟出了沒被接住的例外，導致
- * 整支函式中途默默中斷、saveLastScheduledRunSteps_ 永遠沒被呼叫到。有這道防線之後，即使
- * 又發生類似未預期的例外，至少「最近一次排程執行」會誠實顯示「失敗＋錯誤訊息」，而不是
- * 永遠停在「尚未執行過」讓人誤判成觸發器根本沒被觸發。
+ * 只做「檢查今天該不該跑」+ 排一個背景 job 就馬上回傳，實際 5 個步驟在另一次獨立觸發的
+ * 執行裡進行（跟「從這步重跑」共用同一套機制，見下方）——這支函式本身現在只做很少的事，
+ * 幾乎不可能跑到接近 6 分鐘上限，這正是要修的問題本身：改之前這裡直接同步跑完整套 5 個
+ * 步驟，補抓資料天數多、或 AI 診斷要對好幾檔股票各自呼叫 AI API 時很容易超過 Apps Script
+ * 6 分鐘的單次執行上限，被平台直接強制終止（不是拋出例外，任何 try/catch 都接不住），
+ * 導致「最近一次排程執行」永遠是 null。外層仍然包一層 try/catch 當最後防線，防的是
+ * shouldSkipToday_/startResumeScheduledRunJob 本身丟出的例外（例如試算表讀取失敗），
+ * 兩者都是快速操作，不會有超時風險。
  */
 function scheduledDailyFetch() {
   var startTime = Date.now();
@@ -589,7 +620,7 @@ function scheduledDailyFetch() {
       saveLastScheduledRunSteps_([], 'skipped', skip.reason, startTime);
       return;
     }
-    runScheduledSteps_(0, null);
+    startResumeScheduledRunJob(0);
   } catch (e) {
     logRun_('每日排程', '失敗', '未預期的例外（步驟外層）：' + String(e.message || e), Math.round((Date.now() - startTime) / 1000));
     saveLastScheduledRunSteps_([], 'failed', '未預期的例外：' + String(e.message || e), startTime);
@@ -597,8 +628,11 @@ function scheduledDailyFetch() {
 }
 
 // ============================================================
-// 「每日自動排程」某一步失敗後「從這步重跑」：背景 job（機制跟其他背景 job 相同）。
-// 只重跑指定步驟跟後面的步驟，前面已經成功的步驟不用重做（見 runScheduledSteps_ 的說明）。
+// 每日排程實際執行的背景 job（機制跟其他背景 job 相同）：scheduledDailyFetch() 跟前端
+// 「從這步重跑」／「立即測試整套排程流程」都是排這個 job，只是起始 stepIndex 不同
+// （0＝從頭開始，N＝從失敗那步繼續）。單一 tick 跑不完（時間預算用完）會自動排下一次
+// tick 從中斷的地方繼續，不會被 Apps Script 6 分鐘單次執行上限打斷（見 runScheduledSteps_
+// 的說明）。
 // ============================================================
 
 function getScheduleResumeJobState_() {
@@ -616,12 +650,15 @@ function deleteScheduleResumeJobTriggers_() {
   });
 }
 
-/** 前端「從這步重跑」按鈕呼叫：stepIndex 是 0-based 的步驟編號（0=檢查最新資料日期 ...
- *  4=每日自動AI診斷）。排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，實際重跑在另一次
- *  獨立觸發的執行裡進行，不受這次瀏覽器連線影響。 */
+/** 排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，實際重跑在另一次獨立觸發的執行裡
+ *  進行，不受這次呼叫端（瀏覽器連線或時間觸發器本身）影響。stepIndex 是 0-based 的步驟
+ *  編號（0=檢查最新資料日期 ... 4=每日自動AI診斷）。overallStartedAt 是這整段（可能跨
+ *  多個 tick）的起始時間，用來算時間預算的截止點跟畫面上顯示的總耗時——每次呼叫這個
+ *  函式都視為一次新的開始（不管是真正排程觸發、使用者按「從這步重跑」、還是「立即測試」），
+ *  重設成現在時間。 */
 function startResumeScheduledRunJob(stepIndex) {
   deleteScheduleResumeJobTriggers_();
-  saveScheduleResumeJobState_({ status: 'running', stepIndex: stepIndex, updatedAt: Date.now() });
+  saveScheduleResumeJobState_({ status: 'running', stepIndex: stepIndex, overallStartedAt: Date.now(), updatedAt: Date.now() });
   ScriptApp.newTrigger('processScheduleResumeJobTick_').timeBased().after(3000).create();
   return { status: 'running' };
 }
@@ -642,8 +679,17 @@ function processScheduleResumeJobTick_() {
   if (!state || state.status !== 'running') return;
   try {
     var last = getLastScheduledRunSteps();
-    runScheduledSteps_(state.stepIndex, last ? last.steps : null);
-    state.status = 'done';
+    var result = runScheduledSteps_(state.stepIndex, last ? last.steps : null, state.overallStartedAt);
+    if (result.nextStepIndex !== null) {
+      // 時間預算用完，還沒跑到底：更新進度、排下一次 tick 繼續，這次 tick 先不標記成 done。
+      state.stepIndex = result.nextStepIndex;
+      state.updatedAt = Date.now();
+      saveScheduleResumeJobState_(state);
+      ScriptApp.newTrigger('processScheduleResumeJobTick_').timeBased().after(3000).create();
+      return;
+    }
+    state.status = result.overallStatus === 'failed' ? 'error' : 'done';
+    if (result.overallStatus === 'failed') state.errorMessage = result.summary;
   } catch (e) {
     state.status = 'error';
     state.errorMessage = String(e.message || e);
