@@ -250,7 +250,12 @@
             </div>
 
             <h4>最近一次排程執行</h4>
+            <div class="form-actions">
+              <button type="button" id="scheduleTestRunBtn" class="btn-secondary">🧪 立即測試整套排程流程</button>
+            </div>
+            <div class="meta-bar">跟真正的每日排程跑一模一樣的 5 個步驟（含硬停邏輯），只是繞過六日/停跑日檢查，方便現在就測試，不用等到排定時間。</div>
             <div id="lastScheduledRun"></div>
+            <div id="scheduleResumeResult"></div>
 
             <h4>臨時停跑日（例如颱風假）</h4>
             <form id="skipDateForm" class="inline-form">

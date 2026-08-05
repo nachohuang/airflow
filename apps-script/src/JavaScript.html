@@ -2194,7 +2194,11 @@
 
   /** 排程任一步失敗就整個硬停（見 DataFetch.gs runScheduledSteps_ 的說明：後面步驟只會用
    *  同一份舊資料重算一次一模一樣的結果，沒有意義），所以最多只會有一個 status:'failed'
-   *  的步驟、而且一定是陣列裡最後一個——只在那一步顯示「從這步重跑」按鈕。 */
+   *  的步驟、而且一定是陣列裡最後一個——只在那一步顯示「從這步重跑」按鈕。
+   *  #scheduleResumeResult 是 Index.html 裡固定寫死、在 #lastScheduledRun 外面的容器，不是
+   *  這裡動態產生的——這裡每次都會整包覆蓋 #lastScheduledRun 的 innerHTML，如果結果容器放
+   *  在裡面，「立即測試整套排程流程」按鈕（跟 #lastScheduledRun 平行、不受這次覆蓋影響）
+   *  觸發的重跑訊息會在下一次 loadLastScheduledRunSteps_() 被整個蓋掉。 */
   function renderLastScheduledRun_(run) {
     var el = document.getElementById('lastScheduledRun');
     if (!run) { el.innerHTML = '<div class="empty-hint">尚未執行過</div>'; return; }
@@ -2202,7 +2206,7 @@
     var header = '<div class="meta-bar">整體：' + (SCHEDULED_STEP_STATUS_ICON_[run.overallStatus] || '') + ' ' +
       escapeHtml(run.summary || '') + '　' + new Date(run.startedAt).toLocaleString('zh-TW') + ' ～ ' +
       new Date(run.endedAt).toLocaleTimeString('zh-TW') + '（共 ' + totalSec + ' 秒）</div>';
-    if (!run.steps || !run.steps.length) { el.innerHTML = header + '<div id="scheduleResumeResult"></div>'; return; }
+    if (!run.steps || !run.steps.length) { el.innerHTML = header; return; }
     var stepsHtml = '<div class="md-table-cards">' + run.steps.map(function (s, i) {
       var sec = Math.round((s.endedAt - s.startedAt) / 1000);
       var resumeBtn = s.status === 'failed'
@@ -2216,7 +2220,7 @@
         resumeBtn +
         '</div>';
     }).join('') + '</div>';
-    el.innerHTML = header + stepsHtml + '<div id="scheduleResumeResult"></div>';
+    el.innerHTML = header + stepsHtml;
     el.querySelectorAll('.schedule-resume-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var stepIndex = parseInt(btn.getAttribute('data-step-index'), 10);
@@ -2286,6 +2290,16 @@
       loadScheduleSettings();
       alert('已停用每日自動排程');
     });
+  });
+  /** 「立即測試整套排程流程」：直接呼叫跟「從這步重跑」一樣的背景 job（stepIndex=0，
+   *  等於從頭跑一次全部 5 步），不用等到排定時間才知道排程改完之後到底有沒有正常運作、
+   *  最近一次排程執行有沒有真的被記錄下來。 */
+  document.getElementById('scheduleTestRunBtn').addEventListener('click', function () {
+    var resultEl = document.getElementById('scheduleResumeResult');
+    resultEl.innerHTML = '<div class="loading">⏳ 背景測試執行中，可以切到別的畫面或關掉螢幕，不會中斷，通常要一到兩分鐘，完成後這裡會自動更新...</div>';
+    withSpin(callServer('startResumeScheduledRunJob', 0)).then(function () {
+      pollScheduleResumeJob_();
+    }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
   });
   document.getElementById('skipDateForm').addEventListener('submit', function (e) {
     e.preventDefault();

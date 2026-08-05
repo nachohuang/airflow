@@ -55,14 +55,26 @@ function resetFakeProps() {
   Object.keys(fakeProps).forEach(function (k) { delete fakeProps[k]; });
 }
 
+/** runScheduleStep1_/2_ 的 cursor 邏輯是拿 getHistoryOverview() 回傳的「最新資料日期」跟
+ *  ctx.todayOnly（當下真正的今天，new Date()）比較算出要補抓幾天，不能在測試裡寫死絕對
+ *  日期字串（例如 '2026-08-03'）——這份測試檔案曾經因為寫死日期，跨到隔天執行時「今天」
+ *  往前推了一天，補抓天數從預期的 1 天變成 2 天，斷言失敗。一律用「離真正的今天幾天前」
+ *  動態算，測試才不會因為執行的當下日期不同而跑出不一樣的結果。 */
+function daysAgoStr_(n) {
+  var d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
 function makeCallSpy() {
   const calls = { step1: 0, step2: 0, step3: 0, step4: 0, step5: 0 };
   context.getScheduleSettings = function () { return { skipWeekends: true, skipDates: [] }; };
-  context.getHistoryOverview = function () { calls.step1++; return { max: '2026-08-03' }; };
-  context.backfillOneDay_ = function (cur) { calls.step2++; return { kind: 'succeeded', date: '2026-08-04', rowCount: 10 }; };
+  // 最新資料是「昨天」-> cursor 從「今天」開始 -> 剛好 1 天要補抓。
+  context.getHistoryOverview = function () { calls.step1++; return { max: daysAgoStr_(1) }; };
+  context.backfillOneDay_ = function (cur) { calls.step2++; return { kind: 'succeeded', date: daysAgoStr_(0), rowCount: 10 }; };
   context.getBigQuerySettings = function () { calls.step3++; return { projectId: '', sourceMode: 'materialized' }; };
   context.materializeHistoryTableIfStale_ = function () {};
-  context.runAnalysisAndSave = function () { calls.step4++; return { latestDate: '2026-08-04', report: [1, 2, 3], diagnostics: { totalStocks: 2000 } }; };
+  context.runAnalysisAndSave = function () { calls.step4++; return { latestDate: daysAgoStr_(0), report: [1, 2, 3], diagnostics: { totalStocks: 2000 } }; };
   context.runDailyAiDiagnosisForTopPicks = function () { calls.step5++; return { skipped: true, reason: '未開啟每日自動 AI 診斷' }; };
   context.logRun_ = function () {};
   return calls;
@@ -122,10 +134,10 @@ function makeCallSpy() {
     calls.step2++;
     dayCount++;
     return dayCount === 1
-      ? { kind: 'succeeded', date: '2026-08-03', rowCount: 5 }
-      : { kind: 'failed', date: '2026-08-04', error: '部分失敗' };
+      ? { kind: 'succeeded', date: daysAgoStr_(1), rowCount: 5 }
+      : { kind: 'failed', date: daysAgoStr_(0), error: '部分失敗' };
   };
-  context.getHistoryOverview = function () { calls.step1++; return { max: '2026-08-02' }; }; // 讓 cursor 涵蓋兩天
+  context.getHistoryOverview = function () { calls.step1++; return { max: daysAgoStr_(2) }; }; // 讓 cursor 涵蓋兩天（今天跟昨天）
   const result = context.runScheduledSteps_(0, null);
   assert.strictEqual(result.steps[1].status, 'partial', '至少有一天成功，補抓資料這步不該算整步失敗');
   assert.strictEqual(result.overallStatus, 'partial');
