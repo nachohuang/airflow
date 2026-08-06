@@ -558,10 +558,18 @@ var SCHEDULE_STEP_TIME_BUDGET_MS_ = 4.5 * 60 * 1000;
  * previousSteps 是「上一次執行紀錄」的 steps 陣列，取 startIndex 之前的部分直接沿用
  * （不重跑，保留原本的起訖時間/狀態/摘要），讓畫面上的時間軸不管重跑幾次、跨幾個 tick，
  * 都是完整的 5 步紀錄。
+ *
+ * overallStartedAt 只用來給「最近一次排程執行」畫面顯示總耗時（可能橫跨好幾個 tick），
+ * 絕對不能拿來算這次 tick 的時間預算截止點——實測真的踩過這個 bug：某次繼續執行的
+ * tick 因為一次性觸發器延遲了將近 8 小時才真的被觸發，如果預算是從 overallStartedAt
+ * 算，這次 tick 一開始檢查就會發現「早就超過預算了」，一步都還沒跑就立刻放棄、又排下
+ * 一次 tick，永遠沒辦法真的往前推進，卡在原地無限循環。時間預算一定要「這次 tick 自己
+ * 開始執行的當下」重新算滿滿的 4.5 分鐘，Apps Script 的 6 分鐘上限本來就是「每次執行」
+ * 各自獨立算的，不是累加的。
  */
-function runScheduledSteps_(startIndex, previousSteps, budgetStartMs) {
+function runScheduledSteps_(startIndex, previousSteps, overallStartedAt) {
   var tickStart = Date.now();
-  var budgetDeadline = (budgetStartMs || tickStart) + SCHEDULE_STEP_TIME_BUDGET_MS_;
+  var budgetDeadline = tickStart + SCHEDULE_STEP_TIME_BUDGET_MS_;
   var steps = (previousSteps || []).slice(0, startIndex);
   var today = new Date();
   var ctx = {
@@ -595,7 +603,7 @@ function runScheduledSteps_(startIndex, previousSteps, budgetStartMs) {
     (stillPending ? '（時間預算用完，已自動排下一段繼續）' : '');
   logRun_('每日排程', hasFailed ? '失敗' : (stillPending ? '執行中' : (overallStatus === 'partial' ? '部分成功' : '成功')),
     summary, Math.round((Date.now() - tickStart) / 1000));
-  saveLastScheduledRunSteps_(steps, overallStatus, summary, budgetStartMs || tickStart);
+  saveLastScheduledRunSteps_(steps, overallStatus, summary, overallStartedAt || tickStart);
   return { steps: steps, overallStatus: overallStatus, summary: summary, nextStepIndex: stillPending ? i : null };
 }
 

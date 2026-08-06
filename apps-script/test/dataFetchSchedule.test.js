@@ -180,20 +180,23 @@ function makeCallSpy() {
   console.log('Test runScheduledSteps_ (resume from step index -> reuses earlier steps) passed.');
 }
 
-// --- runScheduledSteps_: 時間預算在第一步開始前就已經用完（例如上一段 tick 已經跑了很
-// 久）-> 一步都不跑，直接回傳 nextStepIndex=startIndex，狀態是 'running'（不是失敗）,
-// 讓呼叫端知道要排下一次 tick 繼續。這是修「Apps Script 單次執行 6 分鐘上限會直接砍斷、
-// 任何 try/catch 都接不住」這個實際發生過的問題的核心機制。 ---
+// --- runScheduledSteps_: overallStartedAt 是很久以前（實測真的發生過：一次性觸發器延遲
+// 將近 8 小時才真的被觸發），時間預算絕對不能拿 overallStartedAt 去算，只能用「這次呼叫
+// 當下」重新算滿的 4.5 分鐘——這是修過的一個真實 bug：舊版拿 overallStartedAt 當預算起點，
+// 導致任何延遲很久才觸發的 tick 一開始檢查就發現「早就超過預算」，一步都還沒跑就立刻
+// 放棄、又排下一次 tick，永遠沒辦法真的往前推進，卡在原地無限循環。這裡驗證修好之後，
+// 就算帶著 8 小時前的 overallStartedAt 呼叫，也應該正常跑完全部步驟，不會被誤判成超時。 ---
 {
   resetFakeProps();
   const calls = makeCallSpy();
-  const longAgoBudgetStart = Date.now() - context.SCHEDULE_STEP_TIME_BUDGET_MS_ - 1000;
-  const result = context.runScheduledSteps_(0, null, longAgoBudgetStart);
-  assert.strictEqual(result.overallStatus, 'running', '時間預算用完不該算失敗，只是這段先停在這裡');
-  assert.strictEqual(result.nextStepIndex, 0, '一步都還沒開始跑，下一次應該從第 0 步繼續');
-  assert.strictEqual(result.steps.length, 0);
-  assert.strictEqual(calls.step1, 0, '時間預算已經用完，第 1 步不該被呼叫');
-  console.log('Test runScheduledSteps_ (time budget already exhausted -> stops before any step, status running) passed.');
+  const eightHoursAgo = Date.now() - 8 * 60 * 60 * 1000;
+  const result = context.runScheduledSteps_(0, null, eightHoursAgo);
+  assert.strictEqual(result.overallStatus, 'success', 'overallStartedAt 很舊不該讓時間預算誤判成早就用完');
+  assert.strictEqual(result.nextStepIndex, null, '應該正常跑完，不需要再排下一次 tick');
+  assert.strictEqual(result.steps.length, 5);
+  assert.strictEqual(calls.step1, 1, '時間預算要用「這次呼叫當下」重新算，不能因為 overallStartedAt 很舊就不執行');
+  assert.strictEqual(calls.step5, 1);
+  console.log('Test runScheduledSteps_ (stale overallStartedAt must not cause false timeout) passed.');
 }
 
 // --- processScheduleResumeJobTick_: runScheduledSteps_ 回傳 nextStepIndex 非 null（時間
