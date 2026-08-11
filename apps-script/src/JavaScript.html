@@ -2207,6 +2207,9 @@
       escapeHtml(run.summary || '') + '　' + new Date(run.startedAt).toLocaleString('zh-TW') + ' ～ ' +
       new Date(run.endedAt).toLocaleTimeString('zh-TW') + '（共 ' + totalSec + ' 秒）</div>';
     if (!run.steps || !run.steps.length) { el.innerHTML = header; return; }
+    // 每個步驟的時間都要含日期（用 toLocaleString，不是只有時間的 toLocaleTimeString）——
+    // 實測真的發生過「續跑」的一次性觸發器延遲了將近 8 小時才觸發，同一次執行紀錄裡不同
+    // 步驟橫跨到隔天，只顯示時分秒會誤以為是同一天、看不出中間卡了多久。
     var stepsHtml = '<div class="md-table-cards">' + run.steps.map(function (s, i) {
       var sec = Math.round((s.endedAt - s.startedAt) / 1000);
       var resumeBtn = s.status === 'failed'
@@ -2215,7 +2218,7 @@
       return '<div class="md-table-card">' +
         '<div class="md-table-card-title">' + (i + 1) + '. ' + escapeHtml(s.label) + ' ' + (SCHEDULED_STEP_STATUS_ICON_[s.status] || '') + '</div>' +
         '<div class="kv-row"><span class="kv-label">時間</span><span class="kv-value">' +
-        new Date(s.startedAt).toLocaleTimeString('zh-TW') + ' ～ ' + new Date(s.endedAt).toLocaleTimeString('zh-TW') + '（' + sec + ' 秒）</span></div>' +
+        new Date(s.startedAt).toLocaleString('zh-TW') + ' ～ ' + new Date(s.endedAt).toLocaleString('zh-TW') + '（' + sec + ' 秒）</span></div>' +
         (s.detail ? '<div class="kv-row"><span class="kv-label">摘要</span><span class="kv-value">' + escapeHtml(s.detail) + '</span></div>' : '') +
         resumeBtn +
         '</div>';
