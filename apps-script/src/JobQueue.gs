@@ -48,7 +48,13 @@ function jobQueueDefs_() {
     { key: 'backtest', label: 'v17.0 策略回測', getStatus: getBacktestV17JobStatus },
     { key: 'aiTask', label: 'AI 診斷／續抱／Top3', getStatus: getAiDiagnosisJobStatus },
     { key: 'industryMap', label: '產業對照表', getStatus: getIndustryMapRefreshJobStatus },
-    { key: 'scheduleResume', label: '每日排程重跑', getStatus: getResumeScheduledRunJobStatus }
+    // 'dailySchedule'（真正的每日時間觸發器）跟 'scheduleResume'（使用者手動「從這步重跑」／
+    // 「立即測試」）故意分成兩張獨立卡片、各自獨立的 job 狀態——早期版本兩者共用同一個狀態，
+    // 使用者手動測試時剛好真正的排程也在等續跑的觸發器，會互相蓋掉進度（見 DataFetch.gs
+    // 的說明），分開後兩邊互不影響，畫面上也才看得出「今晚真正排程」跟「我剛剛手動測試」
+    // 是兩件不同的事，不會再對不起來。
+    { key: 'dailySchedule', label: '每日排程（自動觸發）', getStatus: getDailyScheduleJobStatus },
+    { key: 'scheduleResume', label: '每日排程重跑（手動測試/續跑）', getStatus: getResumeScheduledRunJobStatus }
   ];
 }
 
@@ -119,10 +125,10 @@ function jobQueueDetail_(key, state) {
       (s.coverage && s.coverage.checked ? '　涵蓋率 ' + s.coverage.coveragePct + '%' : '') +
       (s.tpexWarning ? '　⚠️ ' + s.tpexWarning : '');
   }
-  if (key === 'scheduleResume') {
+  if (key === 'scheduleResume' || key === 'dailySchedule') {
     if (state.status === 'idle') return '';
     var stepLabel = (SCHEDULE_STEP_DEFS_[state.stepIndex] && SCHEDULE_STEP_DEFS_[state.stepIndex].label) || ('第 ' + (state.stepIndex + 1) + ' 步');
-    return '從「' + stepLabel + '」開始重跑' + (state.status === 'error' ? '：' + state.errorMessage : '');
+    return '從「' + stepLabel + '」開始' + (state.status === 'error' ? '：' + state.errorMessage : '');
   }
   return '';
 }
@@ -179,6 +185,12 @@ function restartJob(key) {
     return startAiDiagnosisJob(aiState.taskType, aiState.payload);
   }
   if (key === 'industryMap') return startIndustryMapRefreshJob();
+  if (key === 'dailySchedule') {
+    var dailyState = getDailyScheduleJobStatus();
+    if (!dailyState || dailyState.stepIndex === undefined) throw new Error('沒有可重新啟動的每日排程工作');
+    startDailyScheduleJob_(dailyState.stepIndex);
+    return { status: 'running' };
+  }
   if (key === 'scheduleResume') {
     var resumeState = getResumeScheduledRunJobStatus();
     if (!resumeState || resumeState.stepIndex === undefined) throw new Error('沒有可重新啟動的每日排程重跑工作');
@@ -196,23 +208,26 @@ function deleteJob(key) {
   if (key === 'backtest') return clearBacktestV17Job_();
   if (key === 'aiTask') return clearAiDiagnosisJob_();
   if (key === 'industryMap') return clearIndustryMapRefreshJob_();
+  if (key === 'dailySchedule') return clearDailyScheduleJob_();
   if (key === 'scheduleResume') return clearScheduleResumeJob_();
   throw new Error('未知的工作類型：' + key);
 }
 
-/** 八種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
- *  不會碰到「每日自動排程」（scheduledDailyFetch，見 Scheduler.gs，那是核心功能本身，
- *  不是這裡管的「背景 job」）。 */
+/** 九種背景 job 的時間觸發器 handler 函式名稱——「強制清空所有背景工作」只會動這幾個，
+ *  不會碰到「每日自動排程」的 CLOCK 觸發器本身（scheduledDailyFetch，見 Scheduler.gs，
+ *  那是每天固定時間觸發的核心功能，不是這裡管的一次性背景 job；但它排出來的
+ *  processDailyScheduleJobTick_ 一次性續跑觸發器，如果剛好卡在執行中，還是會被這裡清掉，
+ *  跟其他背景 job 一樣）。 */
 function knownJobTickHandlers_() {
   return ['processAnalysisJobTick_', 'processBackfillJobTick_', 'processFactorRegressionJobTick_',
     'processMaterializeJobTick_', 'processBacktestV17JobTick_', 'processAiDiagnosisJobTick_',
-    'processIndustryMapJobTick_', 'processScheduleResumeJobTick_'];
+    'processIndustryMapJobTick_', 'processDailyScheduleJobTick_', 'processScheduleResumeJobTick_'];
 }
 
 /**
- * 排程佇列的「強制清空所有背景工作」按鈕：把七個 job 的狀態都清回 idle，同時直接掃過整個
- * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這七種 tick 函式的觸發器。
- * 不是只呼叫七個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
+ * 排程佇列的「強制清空所有背景工作」按鈕：把九個 job 的狀態都清回 idle，同時直接掃過整個
+ * 專案目前註冊的觸發器列表，刪掉任何 handler 名稱符合這九種 tick 函式的觸發器。
+ * 不是只呼叫九個 clearXJob_（那些各自只刪自己認得的 handler，理論上涵蓋範圍一樣，但這裡
  * 用「直接掃過觸發器列表」再確認一次，避免萬一有某個角落遺留、沒有被任何 job 狀態追蹤到
  * 的孤兒觸發器——例如很久以前用過的 handler 名稱、或某次刪除呼叫剛好失敗——這種觸發器
  * 不會出現在排程佇列的任何一張卡片裡，卻仍然會在排定的時間自己觸發、佔用執行配額，
@@ -226,6 +241,7 @@ function stopAllJobs() {
   clearBacktestV17Job_();
   clearAiDiagnosisJob_();
   clearIndustryMapRefreshJob_();
+  clearDailyScheduleJob_();
   clearScheduleResumeJob_();
   var handlers = knownJobTickHandlers_();
   var removed = 0;
@@ -235,7 +251,7 @@ function stopAllJobs() {
       removed++;
     }
   });
-  logRun_('強制清空背景工作', '成功', '已清空 8 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
+  logRun_('強制清空背景工作', '成功', '已清空 9 個背景 job 狀態，額外刪除 ' + removed + ' 個殘留觸發器', 0);
   return { removedTriggerCount: removed };
 }
 

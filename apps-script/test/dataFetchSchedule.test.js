@@ -43,7 +43,13 @@ const context = {
   PropertiesService: PropertiesService,
   ScriptApp: ScriptApp,
   Date: Date,
-  CONFIG: { PROP_KEYS: { LAST_SCHEDULED_RUN: 'LAST_SCHEDULED_RUN', SCHEDULE_RESUME_JOB_STATE: 'SCHEDULE_RESUME_JOB_STATE' } }
+  CONFIG: {
+    PROP_KEYS: {
+      LAST_SCHEDULED_RUN: 'LAST_SCHEDULED_RUN',
+      SCHEDULE_RESUME_JOB_STATE: 'SCHEDULE_RESUME_JOB_STATE',
+      DAILY_SCHEDULE_JOB_STATE: 'DAILY_SCHEDULE_JOB_STATE'
+    }
+  }
 };
 vm.createContext(context);
 function loadIntoContext(relPath) {
@@ -210,9 +216,9 @@ function makeCallSpy() {
   context.runScheduledSteps_ = function () {
     return { steps: [{ label: '補抓資料', status: 'partial', detail: 'x', startedAt: 1, endedAt: 2 }], overallStatus: 'running', summary: 'x', nextStepIndex: 2 };
   };
-  context.saveScheduleResumeJobState_({ status: 'running', stepIndex: 0, overallStartedAt: Date.now(), updatedAt: Date.now() });
+  context.saveJobLaneState_(context.CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, { status: 'running', stepIndex: 0, overallStartedAt: Date.now(), updatedAt: Date.now() });
   context.processScheduleResumeJobTick_();
-  const state = context.getScheduleResumeJobState_();
+  const state = context.getJobLaneState_(context.CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
   assert.strictEqual(state.status, 'running', '時間預算用完時這次 tick 不該把工作標記成 done');
   assert.strictEqual(state.stepIndex, 2, '進度應該更新成 runScheduledSteps_ 回傳的 nextStepIndex');
   assert.ok(newTriggerCalls.indexOf('processScheduleResumeJobTick_') !== -1, '應該要排一個新的一次性觸發器繼續下一段');
@@ -229,9 +235,9 @@ function makeCallSpy() {
   context.runScheduledSteps_ = function () {
     return { steps: [], overallStatus: 'failed', summary: '第 2 步：failed', nextStepIndex: null };
   };
-  context.saveScheduleResumeJobState_({ status: 'running', stepIndex: 0, overallStartedAt: Date.now(), updatedAt: Date.now() });
+  context.saveJobLaneState_(context.CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, { status: 'running', stepIndex: 0, overallStartedAt: Date.now(), updatedAt: Date.now() });
   context.processScheduleResumeJobTick_();
-  const state2 = context.getScheduleResumeJobState_();
+  const state2 = context.getJobLaneState_(context.CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
   assert.strictEqual(state2.status, 'error', 'runScheduledSteps_ 回傳失敗時，job 狀態也該是 error');
   assert.ok(state2.errorMessage.indexOf('failed') !== -1);
   assert.strictEqual(newTriggerCalls.indexOf('processScheduleResumeJobTick_'), -1, '已經跑到底了，不該再排下一次 tick');
@@ -241,18 +247,54 @@ function makeCallSpy() {
 
 // --- scheduledDailyFetch: 正常情況（不略過）現在應該是「排一個背景 job 就馬上回傳」，
 // 不再是「同步跑完整套 5 個步驟」——這正是這次要修的問題本身：同步跑完整套很容易超過
-// Apps Script 6 分鐘單次執行上限，被平台直接砍斷。 ---
+// Apps Script 6 分鐘單次執行上限，被平台直接砍斷。要排的是 'daily' 車道（不是 'resume'
+// 車道），見下面「車道分離」測試的說明。 ---
 {
   resetFakeProps();
   const calls = makeCallSpy();
   context.shouldSkipToday_ = function () { return { skip: false, reason: '' }; };
   context.scheduledDailyFetch();
-  const jobState = context.getScheduleResumeJobState_();
-  assert.ok(jobState, '應該要排一個背景 job');
+  const jobState = context.getJobLaneState_(context.CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE);
+  assert.ok(jobState, '應該要排一個背景 job（daily 車道）');
   assert.strictEqual(jobState.status, 'running');
   assert.strictEqual(jobState.stepIndex, 0);
   assert.strictEqual(calls.step1, 0, 'scheduledDailyFetch 本身不該同步執行任何步驟——那是 tick 的工作');
   console.log('Test scheduledDailyFetch (normal case -> starts background job instead of running synchronously) passed.');
+}
+
+// --- 車道分離：scheduledDailyFetch()（'daily' 車道）跟前端「從這步重跑」／「立即測試」
+// （'resume' 車道）用的是完全獨立的 Script Properties 狀態鍵跟一次性觸發器 handler，
+// 不能互相蓋掉——這是實際發生過的 bug：早期版本兩者共用同一組狀態，真正的排程半夜自動
+// 觸發、跑到一半在等續跑的一次性觸發器時，使用者剛好按了「立即測試」，會把真正排程的
+// 進度直接蓋回第 0 步重新開始，導致 RunLog 裡同一個步驟成功兩次、但工作卡片的進度卻
+// 詭異地停在很前面，兩邊對不起來。這裡驗證：啟動 'daily' 車道不會動到 'resume' 車道的
+// 既有狀態/觸發器，反之亦然。 ---
+{
+  resetFakeProps();
+  newTriggerCalls = [];
+  fakeTriggers.length = 0;
+  // 先假設 'resume' 車道已經有一個正在跑、卡在第 3 步的工作（例如使用者手動重跑到一半）。
+  context.startResumeScheduledRunJob(3);
+  const resumeStateBefore = context.getJobLaneState_(context.CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
+  assert.strictEqual(resumeStateBefore.stepIndex, 3);
+
+  // 這時候真正的每日排程觸發，啟動 'daily' 車道（stepIndex 固定從 0 開始）。
+  newTriggerCalls = [];
+  context.startDailyScheduleJob_(0);
+  const dailyState = context.getJobLaneState_(context.CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE);
+  assert.strictEqual(dailyState.stepIndex, 0);
+
+  // 'resume' 車道的狀態應該完全沒被動到，還停在原本的第 3 步。
+  const resumeStateAfter = context.getJobLaneState_(context.CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
+  assert.strictEqual(resumeStateAfter.stepIndex, 3, '啟動 daily 車道不該動到 resume 車道既有的進度');
+
+  // 啟動 daily 車道時，只該刪除 daily 車道自己的觸發器（processDailyScheduleJobTick_），
+  // 不該去刪 resume 車道的觸發器（processScheduleResumeJobTick_）——用呼叫端傳給
+  // ScriptApp.deleteTrigger 的次數間接驗證：這裡改用更直接的方式，檢查 newTriggerCalls
+  // 只新增了 daily 車道的 handler。
+  assert.deepStrictEqual(newTriggerCalls, ['processDailyScheduleJobTick_'],
+    '啟動 daily 車道應該只排 processDailyScheduleJobTick_ 的觸發器，不該動到 resume 車道的 handler');
+  console.log('Test job lane separation (starting daily lane does not clobber resume lane progress) passed.');
 }
 
 // --- scheduledDailyFetch: 最外層安全網——就算某個步驟之外的地方（例如 shouldSkipToday_）

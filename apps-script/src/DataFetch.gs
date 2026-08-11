@@ -610,13 +610,15 @@ function runScheduledSteps_(startIndex, previousSteps, overallStartedAt) {
 /**
  * 由時間觸發器呼叫的每日排程進入點（實作在 Scheduler.gs 的 shouldSkipToday_ 一起使用）。
  * 只做「檢查今天該不該跑」+ 排一個背景 job 就馬上回傳，實際 5 個步驟在另一次獨立觸發的
- * 執行裡進行（跟「從這步重跑」共用同一套機制，見下方）——這支函式本身現在只做很少的事，
- * 幾乎不可能跑到接近 6 分鐘上限，這正是要修的問題本身：改之前這裡直接同步跑完整套 5 個
- * 步驟，補抓資料天數多、或 AI 診斷要對好幾檔股票各自呼叫 AI API 時很容易超過 Apps Script
- * 6 分鐘的單次執行上限，被平台直接強制終止（不是拋出例外，任何 try/catch 都接不住），
- * 導致「最近一次排程執行」永遠是 null。外層仍然包一層 try/catch 當最後防線，防的是
- * shouldSkipToday_/startResumeScheduledRunJob 本身丟出的例外（例如試算表讀取失敗），
- * 兩者都是快速操作，不會有超時風險。
+ * 執行裡進行——這支函式本身現在只做很少的事，幾乎不可能跑到接近 6 分鐘上限，這正是要修
+ * 的問題本身：改之前這裡直接同步跑完整套 5 個步驟，補抓資料天數多、或 AI 診斷要對好幾檔
+ * 股票各自呼叫 AI API 時很容易超過 Apps Script 6 分鐘的單次執行上限，被平台直接強制終止
+ * （不是拋出例外，任何 try/catch 都接不住），導致「最近一次排程執行」永遠是 null。外層
+ * 仍然包一層 try/catch 當最後防線，防的是 shouldSkipToday_/startDailyScheduleJob_ 本身
+ * 丟出的例外（例如試算表讀取失敗），兩者都是快速操作，不會有超時風險。
+ *
+ * 排的是「daily」車道的 job（見下方說明），不是「resume」車道——這兩條車道故意分開，
+ * 不能共用，見下方完整說明。
  */
 function scheduledDailyFetch() {
   var startTime = Date.now();
@@ -628,7 +630,7 @@ function scheduledDailyFetch() {
       saveLastScheduledRunSteps_([], 'skipped', skip.reason, startTime);
       return;
     }
-    startResumeScheduledRunJob(0);
+    startDailyScheduleJob_(0);
   } catch (e) {
     logRun_('每日排程', '失敗', '未預期的例外（步驟外層）：' + String(e.message || e), Math.round((Date.now() - startTime) / 1000));
     saveLastScheduledRunSteps_([], 'failed', '未預期的例外：' + String(e.message || e), startTime);
@@ -636,54 +638,51 @@ function scheduledDailyFetch() {
 }
 
 // ============================================================
-// 每日排程實際執行的背景 job（機制跟其他背景 job 相同）：scheduledDailyFetch() 跟前端
-// 「從這步重跑」／「立即測試整套排程流程」都是排這個 job，只是起始 stepIndex 不同
-// （0＝從頭開始，N＝從失敗那步繼續）。單一 tick 跑不完（時間預算用完）會自動排下一次
-// tick 從中斷的地方繼續，不會被 Apps Script 6 分鐘單次執行上限打斷（見 runScheduledSteps_
-// 的說明）。
+// 每日排程實際執行的背景 job（機制跟其他背景 job 相同），分成兩條完全獨立的「車道」：
+//   - 'daily'：scheduledDailyFetch()（真正的每日時間觸發器）專用，使用者不會直接操作。
+//   - 'resume'：前端「從這步重跑」／「立即測試整套排程流程」按鈕專用。
+// 兩條車道各自有自己的 Script Properties 狀態鍵跟一次性觸發器 handler，故意不共用——
+// 早期版本兩者共用同一組狀態/觸發器，實測真的踩到問題：真正的排程半夜自動觸發、跑到一半
+// 因為單一 tick 的時間預算用完，正在等下一段續跑的一次性觸發器（有可能延遲很久才被觸發，
+// 見 runScheduledSteps_ 的說明），這時候如果使用者剛好按了「立即測試整套排程流程」，
+// 兩邊共用同一個狀態鍵，後者的 startXxxJob 會刪掉前者還沒觸發的續跑觸發器、把進度直接
+// 蓋回第 0 步重新開始——從使用者角度看就是：RunLog 裡看得到同一個步驟（例如 BigQuery
+// 整理）成功了兩次、但工作卡片上的進度卻詭異地停在很前面的步驟，兩邊對不起來，因為工作
+// 卡片顯示的其實是「最後一次覆蓋」的那個車道的進度，不是實際發生過的完整過程。分成兩條
+// 各自獨立的車道之後，不管使用者什麼時候手動測試，都不會影響到真正排程正在進行中的續跑。
+// 兩條車道都共用同一套 runScheduledSteps_ 執行引擎跟同一份「最近一次排程執行」顯示
+// （getLastScheduledRunSteps），只有各自的「進度追蹤 + 觸發器」是分開的。
 // ============================================================
 
-function getScheduleResumeJobState_() {
-  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
+function getJobLaneState_(propKey) {
+  var raw = PropertiesService.getScriptProperties().getProperty(propKey);
   return raw ? JSON.parse(raw) : null;
 }
 
-function saveScheduleResumeJobState_(state) {
-  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, JSON.stringify(state));
+function saveJobLaneState_(propKey, state) {
+  PropertiesService.getScriptProperties().setProperty(propKey, JSON.stringify(state));
 }
 
-function deleteScheduleResumeJobTriggers_() {
+function deleteJobLaneTriggers_(handlerName) {
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'processScheduleResumeJobTick_') ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === handlerName) ScriptApp.deleteTrigger(t);
   });
 }
 
-/** 排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，實際重跑在另一次獨立觸發的執行裡
+/** 排一個幾乎立刻觸發的一次性時間觸發器就馬上回傳，實際執行在另一次獨立觸發的執行裡
  *  進行，不受這次呼叫端（瀏覽器連線或時間觸發器本身）影響。stepIndex 是 0-based 的步驟
  *  編號（0=檢查最新資料日期 ... 4=每日自動AI診斷）。overallStartedAt 是這整段（可能跨
- *  多個 tick）的起始時間，用來算時間預算的截止點跟畫面上顯示的總耗時——每次呼叫這個
- *  函式都視為一次新的開始（不管是真正排程觸發、使用者按「從這步重跑」、還是「立即測試」），
- *  重設成現在時間。 */
-function startResumeScheduledRunJob(stepIndex) {
-  deleteScheduleResumeJobTriggers_();
-  saveScheduleResumeJobState_({ status: 'running', stepIndex: stepIndex, overallStartedAt: Date.now(), updatedAt: Date.now() });
-  ScriptApp.newTrigger('processScheduleResumeJobTick_').timeBased().after(3000).create();
-  return { status: 'running' };
+ *  多個 tick）的起始時間，用來算畫面上顯示的總耗時（不影響時間預算，見 runScheduledSteps_
+ *  的說明）——每次呼叫都視為這條車道一次新的開始，重設成現在時間。 */
+function startJobLane_(propKey, handlerName, stepIndex) {
+  deleteJobLaneTriggers_(handlerName);
+  saveJobLaneState_(propKey, { status: 'running', stepIndex: stepIndex, overallStartedAt: Date.now(), updatedAt: Date.now() });
+  ScriptApp.newTrigger(handlerName).timeBased().after(3000).create();
 }
 
-function getResumeScheduledRunJobStatus() {
-  return autoHealStaleJobState_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, getScheduleResumeJobState_() || { status: 'idle' });
-}
-
-function clearScheduleResumeJob_() {
-  deleteScheduleResumeJobTriggers_();
-  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
-  return { status: 'idle' };
-}
-
-function processScheduleResumeJobTick_() {
-  deleteScheduleResumeJobTriggers_();
-  var state = getScheduleResumeJobState_();
+function processJobLaneTick_(propKey, handlerName) {
+  deleteJobLaneTriggers_(handlerName);
+  var state = getJobLaneState_(propKey);
   if (!state || state.status !== 'running') return;
   try {
     var last = getLastScheduledRunSteps();
@@ -692,8 +691,8 @@ function processScheduleResumeJobTick_() {
       // 時間預算用完，還沒跑到底：更新進度、排下一次 tick 繼續，這次 tick 先不標記成 done。
       state.stepIndex = result.nextStepIndex;
       state.updatedAt = Date.now();
-      saveScheduleResumeJobState_(state);
-      ScriptApp.newTrigger('processScheduleResumeJobTick_').timeBased().after(3000).create();
+      saveJobLaneState_(propKey, state);
+      ScriptApp.newTrigger(handlerName).timeBased().after(3000).create();
       return;
     }
     state.status = result.overallStatus === 'failed' ? 'error' : 'done';
@@ -703,5 +702,46 @@ function processScheduleResumeJobTick_() {
     state.errorMessage = String(e.message || e);
   }
   state.updatedAt = Date.now();
-  saveScheduleResumeJobState_(state);
+  saveJobLaneState_(propKey, state);
+}
+
+// ---- 'daily' 車道：scheduledDailyFetch() 專用 ----
+
+function startDailyScheduleJob_(stepIndex) {
+  startJobLane_(CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE, 'processDailyScheduleJobTick_', stepIndex);
+}
+
+function getDailyScheduleJobStatus() {
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE, getJobLaneState_(CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE) || { status: 'idle' });
+}
+
+function clearDailyScheduleJob_() {
+  deleteJobLaneTriggers_('processDailyScheduleJobTick_');
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE);
+  return { status: 'idle' };
+}
+
+function processDailyScheduleJobTick_() {
+  processJobLaneTick_(CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE, 'processDailyScheduleJobTick_');
+}
+
+// ---- 'resume' 車道：前端「從這步重跑」／「立即測試整套排程流程」按鈕專用 ----
+
+function startResumeScheduledRunJob(stepIndex) {
+  startJobLane_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, 'processScheduleResumeJobTick_', stepIndex);
+  return { status: 'running' };
+}
+
+function getResumeScheduledRunJobStatus() {
+  return autoHealStaleJobState_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, getJobLaneState_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE) || { status: 'idle' });
+}
+
+function clearScheduleResumeJob_() {
+  deleteJobLaneTriggers_('processScheduleResumeJobTick_');
+  PropertiesService.getScriptProperties().deleteProperty(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE);
+  return { status: 'idle' };
+}
+
+function processScheduleResumeJobTick_() {
+  processJobLaneTick_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, 'processScheduleResumeJobTick_');
 }

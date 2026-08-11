@@ -41,7 +41,8 @@ var CONFIG = {
     LAST_SCHEDULED_RUN: 'LAST_SCHEDULED_RUN', // 最近一次「每日自動排程」依序執行的每個步驟起訖時間/狀態（見 DataFetch.gs scheduledDailyFetch）
     INDUSTRY_MAP_LAST_REFRESH: 'INDUSTRY_MAP_LAST_REFRESH', // 產業對照表上次重新整理的結果摘要（見 IndustryMap.gs）
     INDUSTRY_MAP_JOB_STATE: 'INDUSTRY_MAP_JOB_STATE', // 「重新整理產業對照表」背景 job 的目前狀態（見 IndustryMap.gs）
-    SCHEDULE_RESUME_JOB_STATE: 'SCHEDULE_RESUME_JOB_STATE' // 「每日自動排程」某一步失敗後「從這步重跑」背景 job 的目前狀態（見 DataFetch.gs）
+    SCHEDULE_RESUME_JOB_STATE: 'SCHEDULE_RESUME_JOB_STATE', // 「每日自動排程」使用者手動「從這步重跑」／「立即測試」背景 job 的目前狀態（見 DataFetch.gs）
+    DAILY_SCHEDULE_JOB_STATE: 'DAILY_SCHEDULE_JOB_STATE' // 真正的每日時間觸發器（scheduledDailyFetch）自己專用的背景 job 狀態，故意跟上面那個分開，避免使用者手動測試時互相蓋掉進度（見 DataFetch.gs 的說明）
   },
 
   // 使用者指定的 Drive 資料夾：App 的 Spreadsheet + Reports/Regression 資料夾都會直接放這裡面，
