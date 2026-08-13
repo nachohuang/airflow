@@ -137,4 +137,34 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   console.log('Test 7 (extractShortlistCodes_) passed.');
 }
 
+// --- 8. getAiDiagnosisHistoryForCodes_：批次版本的核心純函式（不含讀表本身）——「戰報與
+//    個股」／「持股庫存」原本一次要顯示 N 檔股票就各自呼叫一次單筆版本、各自把整份表格
+//    掃描一次，是這兩個頁面讀取超慢的主因，改成只讀一次表、依代號分組回傳。這裡驗證分組
+//    邏輯本身：多檔股票各自的紀錄要分開、依日期新到舊排序、代號要補零成 4 碼比對、查無
+//    資料的代號要回傳空陣列（不是 undefined）、不在查詢清單內的代號要被忽略。 ---
+{
+  const rows = [
+    { '證券代號': '2330', '日期': '2026-08-01', '最終建議': '分批布局', '診斷類型': '深度診斷', '診斷內容': 'a', 'Armor_Score': '80', '時間戳記': '' },
+    { '證券代號': '2330', '日期': '2026-08-05', '最終建議': '觀望不追', '診斷類型': '深度診斷', '診斷內容': 'b', 'Armor_Score': '70', '時間戳記': '' },
+    { '證券代號': '2603', '日期': '2026-08-03', '最終建議': '立刻退出', '診斷類型': '深度診斷', '診斷內容': 'c', 'Armor_Score': '60', '時間戳記': '' },
+    // 這筆代號不在查詢清單內（只查 2330/2603/0330），要被忽略，不能混進任何一檔的結果裡
+    { '證券代號': '9999', '日期': '2026-08-04', '最終建議': '分批布局', '診斷類型': '深度診斷', '診斷內容': 'd', 'Armor_Score': '50', '時間戳記': '' }
+  ];
+  const result = context.getAiDiagnosisHistoryForCodes_(rows, ['2330', '2603', '330']);
+
+  assert.strictEqual(result['2330'].length, 2, '2330 應該有兩筆，且不該混進其他代號的紀錄');
+  // vm context 產生的陣列跟外層 Node realm 的 Array 建構子不同（跟本檔案 extractShortlistCodes_
+  // 測試碰過的 cross-realm 問題一樣），deepStrictEqual 對建構子比對很嚴格，用 spread 複製成
+  // 外層陣列再比對。
+  assert.deepStrictEqual([...result['2330'].map(function (h) { return h.date; })], ['2026-08-05', '2026-08-01'], '同一檔股票要依日期新到舊排序');
+  assert.strictEqual(result['2330'][0].verdict, '觀望不追');
+
+  assert.strictEqual(result['2603'].length, 1);
+  assert.strictEqual(result['2603'][0].verdict, '立刻退出');
+
+  assert.deepStrictEqual([...result['0330']], [], '查無資料的代號要回傳空陣列，不是 undefined，前端才不用額外判斷');
+  assert.strictEqual(Object.keys(result).length, 3, '不在查詢清單內的代號（9999）不該出現在回傳結果的 key 裡');
+  console.log('Test 8 (getAiDiagnosisHistoryForCodes_) passed.');
+}
+
 console.log('All AiDiagnosis.gs tests passed.');

@@ -316,10 +316,23 @@
       listEl.querySelectorAll('.stock-card-open').forEach(function (headEl) {
         headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code')); });
       });
-      result.report.forEach(function (r) {
-        var code = r['證券代號'];
-        initAiDiagnosisSection_(document.getElementById('aiResult-' + code), code, '深度診斷', '🧠 AI 深度診斷', function () {
-          return runAiTaskAsJob_('diagnosis', { codes: [code] }).then(function (results) { return results[0]; });
+      // 一次批次查完當天全部訊號股票的 AI 診斷歷史，不要每檔股票各自呼叫一次 RPC——訊號
+      // 一多（可能好幾十檔）會變成好幾十次「整份表格掃描」同時發生，是這個頁面讀取超慢的
+      // 主因（見 getAiDiagnosisHistoryForCodes 的說明）。
+      var reportCodes = result.report.map(function (r) { return r['證券代號']; });
+      callServer('getAiDiagnosisHistoryForCodes', reportCodes).then(function (historyMap) {
+        result.report.forEach(function (r) {
+          var code = r['證券代號'];
+          renderAiDiagnosisSectionFromHistory_(document.getElementById('aiResult-' + code), historyMap[code], '深度診斷', '🧠 AI 深度診斷', function () {
+            return runAiTaskAsJob_('diagnosis', { codes: [code] }).then(function (results) { return results[0]; });
+          });
+        });
+      }).catch(function () {
+        result.report.forEach(function (r) {
+          var code = r['證券代號'];
+          renderAiDiagnosisSectionFromHistory_(document.getElementById('aiResult-' + code), [], '深度診斷', '🧠 AI 深度診斷', function () {
+            return runAiTaskAsJob_('diagnosis', { codes: [code] }).then(function (results) { return results[0]; });
+          });
         });
       });
       initTopPicksSection_(document.getElementById('aiTopPicksSection'));
@@ -507,18 +520,19 @@
   }
 
   /**
-   * 共用「cache-first AI 診斷區塊」：容器一開始先查同一檔股票／同一種診斷類型過去是否已經
-   * 存過結果，有的話直接顯示（標明是快取），主按鈕降級成次要的「🔄 重新花費 API 重新分析」；
-   * 沒有快取才顯示主要按鈕、等使用者主動點才花錢呼叫 API。
+   * 共用「cache-first AI 診斷區塊」渲染邏輯：history 是呼叫端已經拿到的這檔股票完整
+   * 診斷紀錄陣列（不含 RPC 呼叫本身——「戰報與個股」／「持股庫存」用
+   * getAiDiagnosisHistoryForCodes 一次批次查完全部股票再逐一呼叫這裡；股票詳情 modal
+   * 用 getAiDiagnosisHistoryForCode 查單一股票再呼叫這裡，兩種情境都不用各自查一次，
+   * 是這幾個頁面讀取速度的關鍵，見 loadDashboard/loadPortfolio/renderStockDetailInto_
+   * 的說明）。有快取的話直接顯示（標明是快取），主按鈕降級成次要的「🔄 重新花費 API
+   * 重新分析」；沒有快取才顯示主要按鈕、等使用者主動點才花錢呼叫 API。
    * runFn() 要回傳 promise，resolve 出單一結果物件 { ok, verdict, text, cost, error }
    * （runAiDiagnosis 回傳的是陣列，呼叫端要自己取 results[0] 再包一層 promise 傳進來）。
    */
-  function initAiDiagnosisSection_(containerEl, code, diagnosisType, primaryLabel, runFn) {
-    containerEl.innerHTML = '<div class="loading">載入診斷紀錄中...</div>';
-    callServer('getAiDiagnosisHistoryForCode', code).then(function (history) {
-      var cached = history.filter(function (h) { return h.diagnosisType === diagnosisType; })[0] || null;
-      renderAiDiagnosisSection_(containerEl, primaryLabel, cached, runFn);
-    }).catch(function () { renderAiDiagnosisSection_(containerEl, primaryLabel, null, runFn); });
+  function renderAiDiagnosisSectionFromHistory_(containerEl, history, diagnosisType, primaryLabel, runFn) {
+    var cached = (history || []).filter(function (h) { return h.diagnosisType === diagnosisType; })[0] || null;
+    renderAiDiagnosisSection_(containerEl, primaryLabel, cached, runFn);
   }
 
   function renderAiDiagnosisSection_(containerEl, primaryLabel, entry, runFn) {
@@ -553,18 +567,19 @@
   }
 
   /** 更早的診斷紀錄（排除目前已經顯示在上面的最新一筆），收合在最下面，需要時才展開看，
-   *  只有股票詳情 modal 這種本來就有較多版面的地方才顯示，戰報卡片、持股卡片不放。 */
-  function loadOlderAiDiagnosisHistoryInto_(code, el, diagnosisType) {
+   *  只有股票詳情 modal 這種本來就有較多版面的地方才顯示，戰報卡片、持股卡片不放。
+   *  history 是呼叫端已經拿到的這檔股票完整診斷紀錄陣列（不含 RPC 呼叫本身，見
+   *  renderStockDetailInto_——跟上面顯示最新一筆的區塊共用同一份查詢結果，不用各自
+   *  查一次同一檔股票的診斷歷史）。 */
+  function renderOlderAiDiagnosisHistoryInto_(el, history, diagnosisType) {
     if (!el) return;
-    callServer('getAiDiagnosisHistoryForCode', code).then(function (history) {
-      var older = history.filter(function (h) { return h.diagnosisType === diagnosisType; }).slice(1);
-      if (!older.length) { el.innerHTML = ''; return; }
-      el.innerHTML = '<details class="info-collapse"><summary>更早的診斷紀錄（' + older.length + ' 筆）</summary><div class="info-body">' +
-        older.map(function (h) {
-          return '<div class="ai-report"><div class="meta-bar">' + escapeHtml(h.date) + '　最終建議：<span class="ai-verdict-badge">' + escapeHtml(h.verdict) + '</span></div>' +
-            renderAiDiagnosisReportBody_(h.text) + '</div>';
-        }).join('') + '</div></details>';
-    }).catch(function () { el.innerHTML = ''; });
+    var older = (history || []).filter(function (h) { return h.diagnosisType === diagnosisType; }).slice(1);
+    if (!older.length) { el.innerHTML = ''; return; }
+    el.innerHTML = '<details class="info-collapse"><summary>更早的診斷紀錄（' + older.length + ' 筆）</summary><div class="info-body">' +
+      older.map(function (h) {
+        return '<div class="ai-report"><div class="meta-bar">' + escapeHtml(h.date) + '　最終建議：<span class="ai-verdict-badge">' + escapeHtml(h.verdict) + '</span></div>' +
+          renderAiDiagnosisReportBody_(h.text) + '</div>';
+      }).join('') + '</div></details>';
   }
 
   /** 「AI 掃描全部候選，推薦前三檔」：cache-first，跟單檔深度診斷不同量級的任務，只用戰報
@@ -625,9 +640,21 @@
       }
       listEl.innerHTML = items.map(renderPortfolioCard_).join('');
       wirePortfolioCardEvents_(listEl);
-      items.forEach(function (it) {
-        initAiDiagnosisSection_(document.getElementById('pfHoldResult-' + it.code), it.code, '持股續抱診斷', '🧠 持股續抱診斷', function () {
-          return runAiTaskAsJob_('hold', { code: it.code });
+      // 一次批次查完全部持股的 AI 診斷歷史，不要每檔持股各自呼叫一次 RPC——理由跟「戰報與
+      // 個股」那邊一樣（見 getAiDiagnosisHistoryForCodes 的說明），這是「持股庫存」讀取
+      // 超慢的主因。
+      var holdCodes = items.map(function (it) { return it.code; });
+      callServer('getAiDiagnosisHistoryForCodes', holdCodes).then(function (historyMap) {
+        items.forEach(function (it) {
+          renderAiDiagnosisSectionFromHistory_(document.getElementById('pfHoldResult-' + it.code), historyMap[it.code], '持股續抱診斷', '🧠 持股續抱診斷', function () {
+            return runAiTaskAsJob_('hold', { code: it.code });
+          });
+        });
+      }).catch(function () {
+        items.forEach(function (it) {
+          renderAiDiagnosisSectionFromHistory_(document.getElementById('pfHoldResult-' + it.code), [], '持股續抱診斷', '🧠 持股續抱診斷', function () {
+            return runAiTaskAsJob_('hold', { code: it.code });
+          });
         });
       });
     }).catch(function (err) { listEl.innerHTML = errorBox(err); });
@@ -927,12 +954,20 @@
     renderPriceChartInto_(priceCanvasId, prefix, data.series);
     renderInstChartInto_(instCanvasId, prefix, data.series);
     wireRealtimeQuoteBtn_(prefix, data.code);
-    initAiDiagnosisSection_(
-      document.getElementById('stockAiSection-' + prefix), data.code, '深度診斷',
-      '🧠 針對 ' + data.code + ' 跑一次 AI 診斷',
-      function () { return runAiTaskAsJob_('diagnosis', { codes: [data.code] }).then(function (results) { return results[0]; }); }
-    );
-    loadOlderAiDiagnosisHistoryInto_(data.code, document.getElementById('stockAiHistory-' + prefix), '深度診斷');
+    // 下面「AI 深度診斷」跟「更早的診斷紀錄」兩個區塊都是同一檔股票（data.code）的診斷
+    // 歷史，只是一個取最新一筆、一個取其餘的——原本各自獨立呼叫 initAiDiagnosisSection_／
+    // loadOlderAiDiagnosisHistoryInto_，等於同一檔股票的歷史被整份表格掃描了兩次，改成
+    // 只查一次、兩邊共用同一份結果。
+    var stockAiSectionEl = document.getElementById('stockAiSection-' + prefix);
+    var stockAiHistoryEl = document.getElementById('stockAiHistory-' + prefix);
+    stockAiSectionEl.innerHTML = '<div class="loading">載入診斷紀錄中...</div>';
+    var diagnosisRunFn = function () { return runAiTaskAsJob_('diagnosis', { codes: [data.code] }).then(function (results) { return results[0]; }); };
+    callServer('getAiDiagnosisHistoryForCode', data.code).then(function (history) {
+      renderAiDiagnosisSectionFromHistory_(stockAiSectionEl, history, '深度診斷', '🧠 針對 ' + data.code + ' 跑一次 AI 診斷', diagnosisRunFn);
+      renderOlderAiDiagnosisHistoryInto_(stockAiHistoryEl, history, '深度診斷');
+    }).catch(function () {
+      renderAiDiagnosisSectionFromHistory_(stockAiSectionEl, [], '深度診斷', '🧠 針對 ' + data.code + ' 跑一次 AI 診斷', diagnosisRunFn);
+    });
     document.getElementById('quickAddBtn-' + prefix).addEventListener('click', function () {
       openQuickAddPortfolio_(data.code, data.name, data.series);
     });

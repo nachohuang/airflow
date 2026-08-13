@@ -518,25 +518,50 @@ function getLatestReportRowForCode_(code) {
 
 /** 供「個股分析」/「股票詳情」頁面顯示某檔股票過去的 AI 診斷紀錄（新到舊）——
  *  「戰報與個股」點進來的股票詳情 modal 靠這個函式做「預設顯示最近一次快取結果，
- *  不用每次都花錢重新呼叫 API」，見前端 initStockAiSection_。 */
+ *  不用每次都花錢重新呼叫 API」，見前端 initStockAiSection_。
+ *  單一代號版本，內部直接借用批次版本（見 getAiDiagnosisHistoryForCodes_），避免同一段
+ *  篩選/整理邏輯寫兩份。 */
 function getAiDiagnosisHistoryForCode(code) {
   var target = zfill4(String(code || '').trim());
-  return readSheetObjects_(getAiDiagnosisSheet_())
-    .filter(function (r) { return zfill4(String(r['證券代號']).trim()) === target; })
-    .map(function (r) {
-      return {
-        date: normalizeDateStr(r['日期']),
-        verdict: r['最終建議'],
-        diagnosisType: r['診斷類型'] || '深度診斷',
-        text: r['診斷內容'],
-        armorScore: toNumberOrNull(r['Armor_Score']),
-        // '時間戳記' 存的是「台股監控 yyyy-MM-dd HH:mm」這種帶文字前綴的字串，Google Sheets
-        // 通常不會把它自動轉成 Date（整格內容要「看起來像日期」才會被轉），但還是照established
-        // 的防護寫法處理一次，不假設一定安全（見 sanitizeRowForRpc_ 的說明）。
-        timestamp: (r['時間戳記'] instanceof Date) ? formatDateForRpc_(r['時間戳記']) : (r['時間戳記'] || '')
-      };
-    })
-    .sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+  return getAiDiagnosisHistoryForCodes_(readSheetObjects_(getAiDiagnosisSheet_()), [target])[target];
+}
+
+/** 批次版本：一次讀取整份 AI 診斷歷史表，依股票代號分組回傳——「戰報與個股」／
+ *  「持股庫存」這種一次要顯示 N 檔股票各自 AI 診斷區塊的畫面，改成先呼叫這支一次拿到
+ *  全部股票的診斷歷史，不要 N 檔股票各自呼叫一次 getAiDiagnosisHistoryForCode（那樣會
+ *  變成 N 次「整份表格掃描」同時發生，是這兩個頁面讀取超慢的主因，實測發現的）。
+ *  回傳格式：{ [四位數證券代號]: 該股票的診斷紀錄陣列（新到舊，欄位格式跟單筆版本一樣）}，
+ *  查無資料的代號其 value 會是空陣列，不是 undefined，前端不用額外判斷。 */
+function getAiDiagnosisHistoryForCodes(codes) {
+  return getAiDiagnosisHistoryForCodes_(readSheetObjects_(getAiDiagnosisSheet_()), codes);
+}
+
+/** 上面兩個 RPC 共用的純函式：rows 是已經讀出來的整份 AI 診斷歷史表，只在這裡跑一次
+ *  分組/整理邏輯。抽出來是為了單筆版本／批次版本都只需要讀一次表（單筆版本原本也是
+ *  自己讀一次表、篩一個代號，跟批次版本讀全部代號在「讀表」這一步骨子裡是同一件事）。 */
+function getAiDiagnosisHistoryForCodes_(rows, codes) {
+  var targets = (codes || []).map(function (c) { return zfill4(String(c || '').trim()); });
+  var byCode = {};
+  targets.forEach(function (t) { byCode[t] = []; });
+  rows.forEach(function (r) {
+    var code = zfill4(String(r['證券代號']).trim());
+    if (!byCode.hasOwnProperty(code)) return;
+    byCode[code].push({
+      date: normalizeDateStr(r['日期']),
+      verdict: r['最終建議'],
+      diagnosisType: r['診斷類型'] || '深度診斷',
+      text: r['診斷內容'],
+      armorScore: toNumberOrNull(r['Armor_Score']),
+      // '時間戳記' 存的是「台股監控 yyyy-MM-dd HH:mm」這種帶文字前綴的字串，Google Sheets
+      // 通常不會把它自動轉成 Date（整格內容要「看起來像日期」才會被轉），但還是照established
+      // 的防護寫法處理一次，不假設一定安全（見 sanitizeRowForRpc_ 的說明）。
+      timestamp: (r['時間戳記'] instanceof Date) ? formatDateForRpc_(r['時間戳記']) : (r['時間戳記'] || '')
+    });
+  });
+  Object.keys(byCode).forEach(function (code) {
+    byCode[code].sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+  });
+  return byCode;
 }
 
 // ---------------- 對外主要進入點 ----------------
