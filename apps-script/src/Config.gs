@@ -198,9 +198,14 @@ var CONFIG = {
   // 對應欄位而直接跳過那一項（見該函式「理論上不會發生...保守跳過」的既有防呆邏輯），
   // 不會出錯、也不會讓預測分數變成 null——但也不會真的把這些因子的貢獻算進即時預測分數。
   // 等確認哪些因子在訓練結果裡真的有效，才值得投入去同步改那兩支 SQL（下一階段）。
+  // 'inst_accum_divergence_20d'／'days_since_new_low' 是「動能時機」候選因子，見
+  // FactorRegression.gs buildFeatureViewSql_ 開頭的說明——原本的 10 個因子（trend_score、
+  // bias60 等）都要等趨勢已經確立才會亮燈，這兩個因子想抓更早期的訊號（法人買超但股價
+  // 還沒反應、股價不再創新低但還沒真的上漲）。
   FACTOR_CANDIDATE_COLUMNS: [
     'inst_participation', 'inst_part_ma5', 'ibf_20d', 'trend_score', 'ma20_slope',
-    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio'
+    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio',
+    'inst_accum_divergence_20d', 'days_since_new_low'
   ],
 
   // 產業資金流向的候選因子矩陣：4 種法人類別（三大法人合計 + 外資/投信/自營商各自）

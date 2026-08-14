@@ -162,8 +162,8 @@ loadIntoContext('FactorRegression.gs');
   context.CONFIG.FACTOR_CANDIDATE_COLUMNS.forEach(function (col) {
     assert.ok(sql.indexOf(col) !== -1, 'missing candidate column: ' + col);
   });
-  assert.strictEqual(context.CONFIG.FACTOR_CANDIDATE_COLUMNS.length, 46,
-    '10 個原本的因子 + 24 個產業資金流向 + 12 個產業相對大盤強度 = 46 個候選因子');
+  assert.strictEqual(context.CONFIG.FACTOR_CANDIDATE_COLUMNS.length, 48,
+    '10 個原本的因子 + 2 個動能時機因子 + 24 個產業資金流向 + 12 個產業相對大盤強度 = 48 個候選因子');
   // 要 LEFT JOIN 產業對照表，且用「排除自己」的同業平均（減掉自己的來源欄位，除以「產業家數-1」），
   // 不能是單純加總（會把自己的買賣超算進自己的因子值，變成循環相關）——四種法人類別都要各自算過
   assert.ok(sql.indexOf('LEFT JOIN `proj.ds.industry_map` im ON h.stock_id = im.stock_id') !== -1);
@@ -222,6 +222,32 @@ loadIntoContext('FactorRegression.gs');
     ' ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY industry_rel_mkt_ma_all_1d) END AS industry_rel_mkt_all_1d') !== -1);
   assert.ok(sql.indexOf('COALESCE(industry_rel_mkt_foreign_20d, 0.5) AS industry_rel_mkt_foreign_20d') !== -1,
     '產業相對大盤強度因子缺值時也要 COALESCE 成 0.5');
+
+  // --- 動能時機因子：inst_accum_divergence_20d（法人安靜吃貨）／days_since_new_low
+  // （距離上次創新低的天數）---
+  // 法人買超強度跟股價漲幅都要各自轉成橫斷面排名，再相減，不能直接比較原始量級
+  assert.ok(sql.indexOf('SUM(inst_net) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS inst_net_sum_20d') !== -1,
+    '要有 20 天法人買超強度（原始加總，排除自己股票在這裡沒有意義）');
+  assert.ok(sql.indexOf('SAFE_DIVIDE(close, LAG(close, 20) OVER (PARTITION BY stock_id ORDER BY dt)) - 1 AS price_change_20d') !== -1,
+    '要有 20 天股價漲跌幅');
+  assert.ok(sql.indexOf("CASE WHEN inst_net_sum_20d IS NULL THEN 0.5 ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY inst_net_sum_20d) END AS inst_rank_20d") !== -1);
+  assert.ok(sql.indexOf("CASE WHEN price_change_20d IS NULL THEN 0.5 ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY price_change_20d) END AS price_rank_20d") !== -1);
+  assert.ok(sql.indexOf('(inst_rank_20d - price_rank_20d) AS inst_accum_divergence_20d') !== -1,
+    '兩個排名相減，正值代表買超排名遠高於漲幅排名（安靜吃貨）');
+  assert.ok(sql.indexOf('COALESCE(inst_accum_divergence_20d, 0) AS inst_accum_divergence_20d') !== -1,
+    '兩個排名相減的中性值是 0（0.5-0.5），不是 0.5，COALESCE 要對應調整');
+
+  // 距離上次創新低的天數：先標記今天是不是 20 天新低，用「找最近一次事件發生日期」的標準
+  // 寫法（MAX(CASE WHEN ... THEN dt END) OVER UNBOUNDED PRECEDING）算出最近一次創新低是
+  // 哪天，兩個日期相減成天數，再轉排名（原始天數量級跟其他 0~1 因子差太多，有 v1
+  // industry_capital_flow 被 LASSO 壓到 0 的前車之鑒）
+  assert.ok(sql.indexOf('(close = low20d) AS is_new_low') !== -1, '要標記每一天是不是 20 天新低');
+  assert.ok(sql.indexOf('MAX(CASE WHEN is_new_low THEN dt END) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS last_new_low_date') !== -1,
+    '要用「找最近一次事件發生日期」的標準寫法算最近一次創新低的日期');
+  assert.ok(sql.indexOf('DATE_DIFF(dt, last_new_low_date, DAY) AS days_since_new_low_raw') !== -1);
+  assert.ok(sql.indexOf("CASE WHEN days_since_new_low_raw IS NULL THEN 0.5 ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY days_since_new_low_raw) END AS days_since_new_low") !== -1,
+    '距離創新低天數也要轉成橫斷面排名，避免原始量級被 LASSO 忽略');
+  assert.ok(sql.indexOf('COALESCE(days_since_new_low, 0.5) AS days_since_new_low') !== -1);
   console.log('Test buildFeatureViewSql_ passed.');
 }
 

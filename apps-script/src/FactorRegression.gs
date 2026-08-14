@@ -72,6 +72,25 @@
  *      訓練也更慢），「三大法人合計」做完整 6 種天期，但外資/投信/自營商三個分法人版本
  *      只做 1 天跟 20 天兩個代表性天期，總共 6+3*2=12 個（見
  *      CONFIG.industryRelMarketWindowsForType）。
+ *
+ * 「動能時機」候選因子（inst_accum_divergence_20d、days_since_new_low）：使用者提出的
+ * 問題是「現有的趨勢類因子（Trend_Score、BIAS_60）都是已經漲一段之後才會亮燈，能不能
+ * 抓更早期的訊號」，這兩個因子分別對應兩個方向：
+ *   - inst_accum_divergence_20d（法人安靜吃貨）：把「20天法人買超強度」（inst_net_sum_20d，
+ *     排除自己股票沒有意義，這裡就是自己這檔股票的原始買賣超加總）跟「20天股價漲跌幅」
+ *     （price_change_20d）都轉成當天全市場的橫斷面排名，兩者相減。正值越大代表「買超排名
+ *     遠高於漲幅排名」——法人買得兇但股價還沒什麼反應，是在確認的趨勢因子還沒亮燈前就可能
+ *     出現的訊號；負值代表股價漲幅超前買盤，可能是追價。
+ *   - days_since_new_low（距離上次創新低的天數）：抓「止跌」而不是「已經上漲」，比均線
+ *     黃金交叉（Trend_Score 的判定方式）更早——不用等均線翻揚，只要股價不再破 20 天新低，
+ *     這個數字就會持續變大。算法：先標記每一天是不是「20天新低」（收盤價等於近 20 天
+ *     的最低點），再用 MAX(CASE WHEN ... THEN dt END) OVER (... ROWS BETWEEN UNBOUNDED
+ *     PRECEDING AND CURRENT ROW) 這個「找最近一次事件發生日期」的標準寫法，算出「最近一次
+ *     創新低是哪一天」，兩個日期相減就是天數。原始天數量級跟其他 0~1 因子差太多（有 v1
+ *     industry_capital_flow 被 LASSO 壓到 0 的前車之鑒），一樣轉成橫斷面排名。
+ * 兩個都是股票自己的價量資料就能算，不需要外部資料源，NULL（資料不足 20 天，例如上市
+ * 未滿一個月）一樣給中性值 0.5（inst_accum_divergence_20d 因為是兩個排名相減，中性值是
+ * 0.5-0.5=0，不是 0.5，COALESCE 對應調整）。
  */
 function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
   var types = CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES;
@@ -175,7 +194,9 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '    SAFE_DIVIDE(close, LAG(close) OVER (PARTITION BY stock_id ORDER BY dt)) - 1 AS daily_return,',
     '    AVG(close) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS ma20,',
     '    AVG(close) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 59 PRECEDING AND CURRENT ROW) AS ma60,',
-    '    AVG(vol) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS vol_ma20',
+    '    AVG(vol) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS vol_ma20,',
+    '    MIN(close) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS low20d,',
+    '    SAFE_DIVIDE(close, LAG(close, 20) OVER (PARTITION BY stock_id ORDER BY dt)) - 1 AS price_change_20d',
     '  FROM base',
     '),',
     'step2 AS (',
@@ -186,6 +207,8 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '    SAFE_DIVIDE(vol, vol_ma20) AS vol_ratio,',
     '    SAFE_DIVIDE(close - ma60, ma60) AS bias60,',
     '    LAG(ma20, 3) OVER (PARTITION BY stock_id ORDER BY dt) AS ma20_3ago,',
+    '    (close = low20d) AS is_new_low,',
+    '    SUM(inst_net) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS inst_net_sum_20d,',
     industrySumLines.join(',\n') + ',',
     '    COUNT(*) OVER (PARTITION BY industry, dt) AS industry_stock_count,',
     '    SUM(vol) OVER (PARTITION BY industry, dt) AS industry_vol_sum,',
@@ -198,17 +221,22 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '    (ma20 - ma20_3ago) AS ma20_slope,',
     '    SUM(is_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS drop_count_20,',
     '    SUM(is_inst_buy_on_drop) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS buy_on_drop_20,',
+    '    MAX(CASE WHEN is_new_low THEN dt END) OVER (PARTITION BY stock_id ORDER BY dt ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS last_new_low_date,',
     rawFlowLines.join(',\n') + ',',
     relRawLines.join(',\n'),
     '  FROM step2',
     '),',
     'step3ma AS (',
     '  SELECT *,',
+    '    DATE_DIFF(dt, last_new_low_date, DAY) AS days_since_new_low_raw,',
     maLines.concat(relMaLines).join(',\n'),
     '  FROM step3',
     '),',
     'step3rank AS (',
     '  SELECT *,',
+    '    CASE WHEN inst_net_sum_20d IS NULL THEN 0.5 ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY inst_net_sum_20d) END AS inst_rank_20d,',
+    '    CASE WHEN price_change_20d IS NULL THEN 0.5 ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY price_change_20d) END AS price_rank_20d,',
+    '    CASE WHEN days_since_new_low_raw IS NULL THEN 0.5 ELSE PERCENT_RANK() OVER (PARTITION BY dt ORDER BY days_since_new_low_raw) END AS days_since_new_low,',
     rankLines.concat(relRankLines).join(',\n'),
     '  FROM step3ma',
     '),',
@@ -216,7 +244,8 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '  SELECT *,',
     '    CASE WHEN drop_count_20 IS NULL OR drop_count_20 = 0 THEN 0 ELSE buy_on_drop_20 / drop_count_20 END AS ibf_20d,',
     '    (CASE WHEN ma20 IS NOT NULL AND close > ma20 THEN 1 ELSE 0 END',
-    '      + CASE WHEN ma20_slope IS NOT NULL AND ma20_slope > 0 THEN 1 ELSE 0 END) AS trend_score',
+    '      + CASE WHEN ma20_slope IS NOT NULL AND ma20_slope > 0 THEN 1 ELSE 0 END) AS trend_score,',
+    '    (inst_rank_20d - price_rank_20d) AS inst_accum_divergence_20d',
     '  FROM step3rank',
     '),',
     'market AS (',
@@ -242,6 +271,8 @@ function buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) {
     '  dividend_yield_f AS dividend_yield, pe_ratio_f AS pe_ratio, pb_ratio_f AS pb_ratio,',
     finalFlowLines.join(',\n') + ',',
     relFinalLines.join(',\n') + ',',
+    '  COALESCE(inst_accum_divergence_20d, 0) AS inst_accum_divergence_20d,',
+    '  COALESCE(days_since_new_low, 0.5) AS days_since_new_low,',
     '  label_return_1m, label_downside_resistance',
     'FROM labeled'
   ].join('\n');
