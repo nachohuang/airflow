@@ -1886,9 +1886,11 @@
       // 2 個代表天期），依權重絕對值由大到小列出來，一眼看出哪個算法/法人類別/天期被 LASSO
       // 選中、貢獻最大，不用自己一個一個去核對代碼。全部剛好都是 0 才顯示「檢查資料分佈」的提示。
       var icfHtml = '';
+      var baseHtml = '';
       if (r.weights) {
+        var isIndustryKey_ = function (k) { return k.indexOf('industry_flow_') === 0 || k.indexOf('industry_rel_mkt_') === 0; };
         var icfEntries = Object.keys(r.weights)
-          .filter(function (k) { return k.indexOf('industry_flow_') === 0 || k.indexOf('industry_rel_mkt_') === 0; })
+          .filter(isIndustryKey_)
           .map(function (k) { return { code: k, weight: r.weights[k] }; })
           .sort(function (a, b) { return Math.abs(b.weight) - Math.abs(a.weight); });
         if (icfEntries.length) {
@@ -1902,9 +1904,25 @@
             (allZero ? '<div class="meta-bar">全部剛好是 0——按下面「🔬 產業資金流向資料檢查」確認是真的沒用，還是資料本身有問題</div>' : '') +
             '</div></details>';
         }
+        // 其餘（非產業相關）候選因子——含基本 10 個跟動能時機 2 個（inst_accum_divergence_20d、
+        // days_since_new_low）——不像產業因子有專屬收合區塊，只有擠進「目前生效模型」卡片前 5
+        // 名關鍵影響因子才看得到，這裡直接列出「全部」權重方便核對新加的因子有沒有被 LASSO 選中，
+        // 不用先套用版本才能看。
+        var baseEntries = Object.keys(r.weights)
+          .filter(function (k) { return !isIndustryKey_(k); })
+          .map(function (k) { return { code: k, weight: r.weights[k] }; })
+          .sort(function (a, b) { return Math.abs(b.weight) - Math.abs(a.weight); });
+        if (baseEntries.length) {
+          var baseRows = baseEntries.map(function (e) {
+            return '<div class="kv-row"><span class="kv-label">' + escapeHtml(factorCodeCn_(e.code)) + '</span>' +
+              '<span class="kv-value">' + fmtNum(e.weight, 6) + '</span></div>';
+          }).join('');
+          baseHtml = '<details class="info-collapse" style="margin-top:4px;"><summary>其餘候選因子權重（' +
+            baseEntries.length + ' 個，依影響力排序）</summary><div class="info-body">' + baseRows + '</div></details>';
+        }
       }
       return '<div class="compare-row"><span>' + escapeHtml(r.labelName) + '　新 R² ' + pctOrDash_(r.r2) +
-        (hasOld ? '　舊 R² ' + pctOrDash_(oldR2) : '') + '</span>' + deltaHtml + '</div>' + icfHtml;
+        (hasOld ? '　舊 R² ' + pctOrDash_(oldR2) : '') + '</span>' + deltaHtml + '</div>' + baseHtml + icfHtml;
     }).join('');
 
     var hasSuccess = results.some(function (r) { return !r.error; });
