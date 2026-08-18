@@ -3,12 +3,18 @@ const path = require('path');
 const vm = require('vm');
 const assert = require('assert');
 
-const context = { console: console };
+// getRealtimeQuote 除了純函式 computeBuySellVerdict_ 之外還會呼叫 UrlFetchApp，用一個
+// 可以每個測試各自覆寫 fetch 行為的 stub，模擬「連線層級直接失敗」（UrlFetchApp.fetch 本身
+// 拋例外，不是回傳錯誤狀態碼）跟「拿 cookie 那次呼叫失敗但不中斷後續」兩種情境。
+var fetchImpl = null;
+const UrlFetchApp = { fetch: function (url, opts) { return fetchImpl(url, opts); } };
+const context = { console: console, UrlFetchApp: UrlFetchApp };
 vm.createContext(context);
 function loadIntoContext(relPath) {
   const code = fs.readFileSync(path.join(__dirname, '..', 'src', relPath), 'utf8');
   vm.runInContext(code, context, { filename: relPath });
 }
+loadIntoContext('Utils.gs');
 loadIntoContext('Realtime.gs');
 
 // --- 1. 委買力道強 + 現價貼近當日低點 -> 高分、偏向有利買進 ---
@@ -54,6 +60,42 @@ loadIntoContext('Realtime.gs');
   assert.ok(!Number.isNaN(v.score), 'score should not be NaN when high === low');
   assert.ok(Math.abs(v.score - 56) < 0.01, 'expected score ~56, got ' + v.score);
   console.log('Test 5 (high === low -> neutral range score, no NaN) passed:', v.score);
+}
+
+// --- 6. getRealtimeQuote：連線層級直接失敗（UrlFetchApp.fetch 本身拋例外，例如這支非正式
+//    端點暫時拒絕連線）要被攔下來換成白話訊息，不能讓 Apps Script 原始的「無法開啟網址：
+//    <完整URL>」內部例外文字直接被拋到前端 ---
+{
+  var callCount = 0;
+  fetchImpl = function (url) {
+    callCount++;
+    if (url.indexOf('index.jsp') !== -1) throw new Error('無法開啟網址：https://mis.twse.com.tw/stock/index.jsp');
+    throw new Error('無法開啟網址：' + url);
+  };
+  assert.throws(function () { context.getRealtimeQuote('2330'); }, function (err) {
+    return err.message === '證交所即時報價伺服器暫時無法連線，可能是網路問題或剛好被限速，稍後再試一次。';
+  }, '連線層級失敗要換成白話訊息，不能洩漏原始例外文字（含內部網址）');
+  assert.ok(callCount >= 1, '至少要嘗試呼叫過 fetch');
+  console.log('Test 6 (connection-level fetch failure -> friendly error, not raw exception) passed.');
+}
+
+// --- 7. getRealtimeQuote：拿 cookie 那次呼叫失敗（fetchTwseMisCookie_ 內部已經 try/catch）
+//    不該中斷主要查詢，主要查詢本身正常回應時還是要能拿到報價 ---
+{
+  fetchImpl = function (url) {
+    if (url.indexOf('index.jsp') !== -1) throw new Error('無法開啟網址：https://mis.twse.com.tw/stock/index.jsp');
+    return {
+      getAllHeaders: function () { return {}; },
+      getResponseCode: function () { return 200; },
+      getContentText: function () {
+        return JSON.stringify({ msgArray: [{ n: '台積電', z: '600', o: '590', h: '605', l: '585', v: '12345', tlong: '1700000000000', b: '599.00_', g: '10_', a: '600.00_', f: '5_' }] });
+      }
+    };
+  };
+  var q = context.getRealtimeQuote('2330');
+  assert.strictEqual(q.ok, true);
+  assert.strictEqual(q.name, '台積電');
+  console.log('Test 7 (cookie fetch fails but main quote fetch still succeeds) passed.');
 }
 
 console.log('All Realtime.gs tests passed.');

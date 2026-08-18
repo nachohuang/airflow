@@ -83,10 +83,19 @@ function getRealtimeQuote(code) {
 
   var exCh = 'tse_' + c + '.tw|otc_' + c + '.tw';
   var url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=' + encodeURIComponent(exCh) + '&_=' + Date.now();
-  var resp = UrlFetchApp.fetch(url, {
-    muteHttpExceptions: true,
-    headers: cookie ? { Cookie: cookie } : {}
-  });
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: cookie ? { Cookie: cookie } : {}
+    });
+  } catch (e) {
+    // muteHttpExceptions 只會壓住「有回應但是錯誤狀態碼」的情況；連線層級直接失敗（例如
+    // 這支非正式端點暫時拒絕連線）UrlFetchApp 還是會直接拋例外，訊息是 Apps Script 內部
+    // 產生的「無法開啟網址：<完整URL>」，直接讓使用者看到既不好懂也沒必要暴露內部網址，
+    // 這裡攔下來換成跟下面 HTTP 錯誤狀態碼一致的白話訊息。
+    throw new Error('證交所即時報價伺服器暫時無法連線，可能是網路問題或剛好被限速，稍後再試一次。');
+  }
   if (resp.getResponseCode() !== 200) {
     throw new Error('證交所即時報價查詢失敗（HTTP ' + resp.getResponseCode() + '），可能是暫時性問題或剛好遇到限速，稍後再試一次。');
   }
