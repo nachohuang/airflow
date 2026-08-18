@@ -928,9 +928,17 @@ function runDailyAiDiagnosisForTopPicks() {
   var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
   if (!hasKey) return { skipped: true, reason: '尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰' };
 
+  // runAiShortlist_ 跟 runAiTopPicks 都需要「最新一次戰報全部候選，依 Armor_Score 排序」
+  // 這份清單，篩選/排序邏輯完全一樣，這裡只讀一次 Reports 表、排一次序，傳給兩邊共用（見
+  // getLatestReportCandidates_ 的說明）。這裡讀取失敗（例如完全沒有戰報資料）就讓
+  // sharedCandidates 維持 null，下面兩邊各自呼叫時会各自 fallback 重讀一次、各自照原本的
+  // 方式擷取自己的錯誤訊息，不會因為共用的讀取失敗就讓兩件事變成同一個籠統的錯誤。
+  var sharedCandidates = null;
+  try { sharedCandidates = getLatestReportCandidates_(); } catch (e) { /* 留給下面各自 fallback 處理 */ }
+
   var shortlistResult = { ok: false, error: null };
   try {
-    var shortlist = runAiShortlist_(settings.topN);
+    var shortlist = runAiShortlist_(settings.topN, sharedCandidates);
     var codes = extractShortlistCodes_(shortlist.text, settings.topN);
     if (codes.length === 0) {
       shortlistResult.error = '無法從 AI 候選名單中取出股票代號';
@@ -943,12 +951,30 @@ function runDailyAiDiagnosisForTopPicks() {
 
   var topPicksResult = { ok: false, error: null };
   try {
-    topPicksResult = { ok: true, result: runAiTopPicks() };
+    topPicksResult = { ok: true, result: runAiTopPicks(sharedCandidates) };
   } catch (e) {
     topPicksResult.error = String(e.message || e);
   }
 
   return { skipped: false, shortlist: shortlistResult, topPicks: topPicksResult };
+}
+
+/** runAiShortlist_（每日候選名單橫向比較）跟 runAiTopPicks（Top3 橫向比較，也是「AI 掃描
+ *  全部候選，推薦前三檔」按鈕用的同一支函式）都需要「最新一次戰報全部候選，依 Armor_Score
+ *  高到低排序」這份清單，篩選/排序邏輯原本兩邊各寫一份、完全相同——抽出來共用，
+ *  runDailyAiDiagnosisForTopPicks 一天呼叫兩邊時只需要讀一次 Reports 表，不用各自重讀重排。 */
+function getLatestReportCandidates_() {
+  var reportRows = readSheetObjects_(getReportsSheet_());
+  if (reportRows.length === 0) throw new Error('目前沒有任何戰報資料，請先產生一次戰報。');
+  var latestDate = null;
+  reportRows.forEach(function (r) {
+    var d = normalizeDateStr(r['日期']);
+    if (!latestDate || d > latestDate) latestDate = d;
+  });
+  var candidates = reportRows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDate; });
+  if (candidates.length === 0) throw new Error('最新一次戰報沒有任何候選股票可以比較。');
+  candidates.sort(function (a, b) { return toNumber(b['Armor_Score']) - toNumber(a['Armor_Score']); });
+  return { latestDate: latestDate, candidates: candidates };
 }
 
 /**
@@ -1003,22 +1029,17 @@ function buildShortlistPrompt_(candidates, timestampLabel, count) {
   return lines.join('\n');
 }
 
-/** 每日排程用：橫向比較選出一份大小為 count 的候選名單（給 runDailyAiDiagnosisForTopPicks 用）。 */
-function runAiShortlist_(count) {
+/** 每日排程用：橫向比較選出一份大小為 count 的候選名單（給 runDailyAiDiagnosisForTopPicks 用）。
+ *  preFetchedCandidates（選填）：呼叫端已經有 getLatestReportCandidates_() 的結果時可以直接
+ *  傳進來共用，不用再讀一次 Reports 表——目前 runDailyAiDiagnosisForTopPicks 就是這樣跟
+ *  runAiTopPicks 共用同一次讀取結果。不傳就照舊自己讀一次。 */
+function runAiShortlist_(count, preFetchedCandidates) {
   var settings = getAiSettings();
   var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
   if (!hasKey) throw new Error('尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰，請先到後台管理輸入。');
 
-  var reportRows = readSheetObjects_(getReportsSheet_());
-  if (reportRows.length === 0) throw new Error('目前沒有任何戰報資料，請先產生一次戰報。');
-  var latestDate = null;
-  reportRows.forEach(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    if (!latestDate || d > latestDate) latestDate = d;
-  });
-  var candidates = reportRows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDate; });
-  if (candidates.length === 0) throw new Error('最新一次戰報沒有任何候選股票可以比較。');
-  candidates.sort(function (a, b) { return toNumber(b['Armor_Score']) - toNumber(a['Armor_Score']); });
+  var lr = preFetchedCandidates || getLatestReportCandidates_();
+  var latestDate = lr.latestDate, candidates = lr.candidates;
 
   var timestampLabel = '台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm');
   var startTime = Date.now();
@@ -1142,22 +1163,17 @@ function buildTopPicksPrompt_(candidates, timestampLabel) {
   return lines.join('\n');
 }
 
-/** 前端「AI 掃描全部，推薦前三檔」按鈕：對最新一次戰報的全部候選做一次橫向比較。 */
-function runAiTopPicks() {
+/** 前端「AI 掃描全部，推薦前三檔」按鈕：對最新一次戰報的全部候選做一次橫向比較。
+ *  preFetchedCandidates（選填）：同 runAiShortlist_ 的說明，runDailyAiDiagnosisForTopPicks
+ *  每日排程呼叫時會傳入跟 shortlist 共用的同一份候選清單；按鈕直接呼叫（前端 callServer）
+ *  不會帶這個參數，照舊自己讀一次 Reports 表。 */
+function runAiTopPicks(preFetchedCandidates) {
   var settings = getAiSettings();
   var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
   if (!hasKey) throw new Error('尚未設定 ' + (settings.provider === 'gemini' ? 'Gemini' : 'Claude') + ' API 金鑰，請先到後台管理輸入。');
 
-  var reportRows = readSheetObjects_(getReportsSheet_());
-  if (reportRows.length === 0) throw new Error('目前沒有任何戰報資料，請先產生一次戰報。');
-  var latestDate = null;
-  reportRows.forEach(function (r) {
-    var d = normalizeDateStr(r['日期']);
-    if (!latestDate || d > latestDate) latestDate = d;
-  });
-  var candidates = reportRows.filter(function (r) { return normalizeDateStr(r['日期']) === latestDate; });
-  if (candidates.length === 0) throw new Error('最新一次戰報沒有任何候選股票可以比較。');
-  candidates.sort(function (a, b) { return toNumber(b['Armor_Score']) - toNumber(a['Armor_Score']); });
+  var lr = preFetchedCandidates || getLatestReportCandidates_();
+  var latestDate = lr.latestDate, candidates = lr.candidates;
 
   var timestampLabel = '台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm');
   var startTime = Date.now();

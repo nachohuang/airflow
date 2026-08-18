@@ -107,6 +107,7 @@ function loadIntoContext(relPath) {
 loadIntoContext('Config.gs');
 loadIntoContext('Utils.gs');
 loadIntoContext('SheetUtils.gs');
+loadIntoContext('Analysis.gs'); // getReportsSheet_／getLatestReportCandidates_ 用
 loadIntoContext('AiDiagnosis.gs');
 fakeProps[context.CONFIG.PROP_KEYS.SPREADSHEET_ID] = 'fake-spreadsheet-id'; // 讓 getSpreadsheet_ 走 openById 這條路，不會嘗試真的 SpreadsheetApp.create
 
@@ -514,6 +515,30 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
     { cacheCreationInputTokens: result.cacheCreationInputTokens, cacheReadInputTokens: result.cacheReadInputTokens });
   assert.ok(!Number.isNaN(cost), '沒有 cache 欄位時，算出來的費用不能是 NaN');
   console.log('Test 17b (callClaude_ defaults missing cache fields to 0) passed.');
+}
+
+// --- 18. getLatestReportCandidates_：從 runAiShortlist_／runAiTopPicks 兩邊原本各自重複
+//    一份的「讀 Reports 表→找最新一天→篩選→依 Armor_Score 排序」邏輯抽出來的共用函式，
+//    驗證抽出來之後邏輯還是完全一樣 ---
+{
+  fakeSheets = {};
+  var sheet = context.getReportsSheet_();
+  context.writeSheetObjects_(sheet, context.CONFIG.REPORT_COLUMNS, [
+    { '日期': '2026-08-01', '證券代號': '2330', '證券名稱': '台積電', 'Armor_Score': 80 },
+    { '日期': '2026-08-05', '證券代號': '2603', '證券名稱': '長榮', 'Armor_Score': 95 }, // 最新一天，分數最高
+    { '日期': '2026-08-05', '證券代號': '2330', '證券名稱': '台積電', 'Armor_Score': 90 }, // 最新一天，分數次高
+    { '日期': '2026-08-03', '證券代號': '1101', '證券名稱': '台泥', 'Armor_Score': 99 } // 分數最高但不是最新一天，不該入選
+  ]);
+  var result = context.getLatestReportCandidates_();
+  assert.strictEqual(result.latestDate, '2026-08-05', '要挑出全表裡最新的日期');
+  assert.strictEqual(result.candidates.length, 2, '只有最新一天的列才算候選，1101 那筆（較早日期）不該混進來');
+  assert.strictEqual(result.candidates[0]['證券代號'], '2603', '要依 Armor_Score 高到低排序');
+  assert.strictEqual(result.candidates[1]['證券代號'], '2330');
+
+  fakeSheets = {};
+  context.getReportsSheet_(); // 建立一張空表（只有標題列）
+  assert.throws(function () { context.getLatestReportCandidates_(); }, /目前沒有任何戰報資料/, '完全沒有戰報資料要拋出明確的錯誤，不能靜默回傳空結果');
+  console.log('Test 18 (getLatestReportCandidates_) passed.');
 }
 
 console.log('All AiDiagnosis.gs tests passed.');

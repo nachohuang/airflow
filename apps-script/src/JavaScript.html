@@ -42,12 +42,29 @@
   var loadedTabs = {};
 
   function activateTab(tab) {
+    var previousTab = document.querySelector('.nav-btn.active');
+    previousTab = previousTab ? previousTab.getAttribute('data-tab') : null;
     document.querySelectorAll('.tab-panel').forEach(function (el) { el.classList.remove('active'); });
     document.querySelectorAll('.nav-btn').forEach(function (el) { el.classList.remove('active'); });
     document.getElementById('tab-' + tab).classList.add('active');
     document.querySelector('.nav-btn[data-tab="' + tab + '"]').classList.add('active');
     document.getElementById('topbarTitle').textContent = TAB_TITLES[tab];
+    // 排程佇列總覽的背景輪詢（jobQueuePollTimer_，見下面 renderJobQueue_）只在使用者實際
+    // 看著「系統與資料後台」分頁時才需要繼續打——切去別的分頁時停止，回到這個分頁時重新整理
+    // 一次（如果剛好有工作在跑，renderJobQueue_ 本身就會自動重新啟動輪詢）。不影響任何
+    // 特定工作自己頁籤上的專屬輪詢（例如因子迴歸模型分頁自己的 factorRegressionPollTimer_），
+    // 那些跟使用者現在停在哪個分頁無關，維持原本各自的行為不變。只在「真的切換分頁」時處理，
+    // 重複點擊目前已經在看的分頁不用多打一次請求。
+    var wasAlreadyLoaded = !!loadedTabs[tab];
     ensureTabLoaded(tab);
+    if (tab === previousTab) return;
+    if (tab === 'admin') {
+      // 分頁「第一次」打開時 ensureTabLoaded 會呼叫 loadAdmin()，loadAdmin() 自己就含一次
+      // loadJobQueue_()，這裡不用再多打一次；只有「再次」切回這個分頁時才需要自己重新整理。
+      if (wasAlreadyLoaded) loadJobQueue_();
+    } else if (previousTab === 'admin') {
+      stopJobQueuePoll_();
+    }
   }
 
   function ensureTabLoaded(tab, force) {
@@ -1137,6 +1154,7 @@
         var targetId = btn.getAttribute('data-target');
         document.getElementById(targetId).classList.add('active');
         if (targetId === 'pftab-history') loadPortfolioHistory_();
+        ensureAdminSubtabLoaded_(targetId);
       });
     });
   });
@@ -1407,25 +1425,54 @@
     }
   }
 
+  // 「系統與資料後台」預設只會顯示「排程與監控」子分頁，其餘 3 個子分頁（資料庫與模式／
+  // 資料修復與工具／系統與 AI 設定）要使用者自己點進去才看得到。loadAdmin() 過去不管使用者
+  // 實際要看哪個子分頁，一開這個主分頁就把 4 個子分頁全部的 RPC 一次打完（將近 15 支），
+  // 改成只先載入預設顯示的「排程與監控」，其餘 3 個子分頁比照分頁本身
+  // （ensureTabLoaded／loadedTabs）的做法，第一次點進去才載入、之後重複點同一個子分頁不再
+  // 重打（各子分頁都有自己的「重新整理」按鈕可以手動刷新，不影響需要手動更新資料的情境）。
   function loadAdmin() {
     populateTimeSelects();
     document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
-    // loadBqMaterializedStatus_ 跟 loadHistoryOverview_ 過去各自獨立呼叫 getHistoryOverview()，
-    // 在 BigQuery external/materialized 模式下這是一次真正的 BigQuery 查詢，等於每次開這個
-    // 分頁白白多打一次——這裡只查一次，兩邊共用同一份結果（查詢失敗就退回各自獨立重查，
-    // 不影響原本的錯誤處理行為）。
-    var historyOverviewPromise = callServer('getHistoryOverview').catch(function () { return null; });
-    return Promise.all([
-      loadScheduleSettings(), loadLastScheduledRunSteps_(), loadRunLog(), loadFileList(currentFolder),
-      loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
-      loadHistoryFolderStatus_(), loadStorageDiagnostics_(),
-      loadBqSettings_(), historyOverviewPromise.then(function (o) { return loadBqMaterializedStatus_(o || undefined); }),
-      loadJobQueue_(),
-      historyOverviewPromise.then(function (o) { return loadHistoryOverview_(o || undefined); }),
-      loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_(),
-      checkMaterializeJobOnLoad_(),
-      loadIndustryMapStatus_(), checkIndustryMapJobOnLoad_()
-    ]);
+    var promises = [loadScheduleSettings(), loadLastScheduledRunSteps_(), loadRunLog(), loadJobQueue_()];
+    // 頂部「🔄」重新整理按鈕在使用者停留在「系統與資料後台」時也會呼叫這支函式（見主 Tab
+    // 切換那段），如果使用者當下正停在排程與監控以外的子分頁（資料庫與模式／資料修復與
+    // 工具／系統與 AI 設定），畫面上看得到的內容也要跟著重新整理，不能因為只重打了排程與
+    // 監控的資料，按下去卻讓使用者當下正在看的內容完全沒有變化。第一次打開就正好停在
+    // 這幾個子分頁不會發生（預設一定是排程與監控），只有「按重新整理鍵時人正好在別的
+    // 子分頁」才會用到這段。
+    var activeSubtabBtn = document.querySelector('#tab-admin .sub-tab-btn.active');
+    var activeSubtabId = activeSubtabBtn ? activeSubtabBtn.getAttribute('data-target') : null;
+    if (activeSubtabId && activeSubtabId !== 'subtab-schedule') {
+      loadedAdminSubtabs_[activeSubtabId] = false;
+      ensureAdminSubtabLoaded_(activeSubtabId);
+    }
+    return Promise.all(promises);
+  }
+
+  var loadedAdminSubtabs_ = {};
+
+  /** 「系統與資料後台」的子分頁切換時呼叫（見下面共用的 .sub-tabs 點擊事件），對非管理頁的
+   *  其他子分頁（研究頁的回測/因子迴歸、持股庫存的持有中/歷史結案）targetId 都對不上這裡任何
+   *  一個分支，直接無事發生地回傳，可以放心讓所有 .sub-tabs 群組共用同一個點擊處理流程呼叫。 */
+  function ensureAdminSubtabLoaded_(targetId) {
+    if (loadedAdminSubtabs_[targetId]) return;
+    loadedAdminSubtabs_[targetId] = true;
+    if (targetId === 'subtab-database') {
+      // loadBqMaterializedStatus_ 需要 getHistoryOverview()，這個子分頁裡只有它需要，直接查
+      // 一次即可（跟 subtab-datafix 的 loadHistoryOverview_ 不再共用同一次查詢——兩邊現在是
+      // 各自獨立點開才載入，不像過去兩者一定綁在同一次 loadAdmin() 裡，共用反而沒有意義）。
+      var historyOverviewPromise = callServer('getHistoryOverview').catch(function () { return null; });
+      Promise.all([
+        loadBqSettings_(), historyOverviewPromise.then(function (o) { return loadBqMaterializedStatus_(o || undefined); }),
+        loadStorageDiagnostics_(), loadBqUsage_(), loadBqPricing_(), loadHistoryFolderStatus_(),
+        loadIndustryMapStatus_(), checkIndustryMapJobOnLoad_(), checkMaterializeJobOnLoad_()
+      ]);
+    } else if (targetId === 'subtab-datafix') {
+      Promise.all([loadHistoryOverview_(), checkBackfillStatusOnLoad_()]);
+    } else if (targetId === 'subtab-sysconfig') {
+      Promise.all([loadAiSettings(), loadAiUsage_(), loadAiPricing_(), loadFileList(currentFolder)]);
+    }
   }
 
   function loadResearchTab_() {
