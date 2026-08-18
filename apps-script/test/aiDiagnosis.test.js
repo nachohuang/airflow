@@ -16,7 +16,89 @@ const PropertiesService = {
   }
 };
 
-const context = { console: console, PropertiesService: PropertiesService, logRun_: function () {} };
+// fetchTwseOfficialFinancialsDatasets_ 用的 UrlFetchApp stub：可以每個測試各自覆寫 fetch
+// 行為、順便計算呼叫次數，驗證「整批只抓一次」這個優化本身有沒有真的生效（不是只驗證輸出
+// 內容對，呼叫次數才是這次優化實際要驗證的東西）。
+var fetchImpl = null;
+var fetchCallLog = [];
+const UrlFetchApp = {
+  fetch: function (url, opts) {
+    fetchCallLog.push(url);
+    return fetchImpl(url, opts);
+  }
+};
+
+// createAiDiagnosisBatchUpserter_ 需要真的走一次 getAiDiagnosisSheet_ -> ensureSheetWithHeaders_
+// -> getSpreadsheet_ -> SpreadsheetApp.openById 這條鏈，才能驗證「多數情況直接 append、只有
+// 撞到既有紀錄才整份重寫」這個分支邏輯本身有沒有正確運作（這是這次優化最容易寫錯、也最需要
+// 驗證「沒有造成新問題」的地方：一旦分支邏輯錯了，可能悄悄產生重複列或蓋掉別的紀錄）。用一個
+// 最小的記憶體版假 Sheet，撐住 readSheetObjects_/writeSheetObjects_/appendSheetObjects_ 實際會
+// 呼叫的 getRange/getValues/setValues/clearContents 這幾個方法，不用真的接 Google Sheets。
+function makeFakeSheet_() {
+  var grid = [];
+  var clearContentsCallCount = 0;
+  return {
+    getLastRow: function () { return grid.length; },
+    getLastColumn: function () { return grid.length ? grid[0].length : 0; },
+    getRange: function (row, col, numRows, numCols) {
+      numRows = numRows || 1;
+      numCols = numCols || 1;
+      return {
+        getValues: function () {
+          var out = [];
+          for (var r = 0; r < numRows; r++) {
+            var rowArr = grid[row - 1 + r] || [];
+            var line = [];
+            for (var c = 0; c < numCols; c++) line.push(rowArr[col - 1 + c] !== undefined ? rowArr[col - 1 + c] : '');
+            out.push(line);
+          }
+          return out;
+        },
+        setValues: function (values) {
+          for (var r = 0; r < values.length; r++) {
+            var targetRow = row - 1 + r;
+            while (grid.length <= targetRow) grid.push([]);
+            for (var c = 0; c < values[r].length; c++) grid[targetRow][col - 1 + c] = values[r][c];
+          }
+        }
+      };
+    },
+    clearContents: function () { grid = []; clearContentsCallCount++; },
+    setFrozenRows: function () {},
+    _clearContentsCallCount: function () { return clearContentsCallCount; }
+  };
+}
+
+var fakeSheets = {};
+const SpreadsheetApp = {
+  openById: function () {
+    return {
+      getSheetByName: function (name) { return fakeSheets[name] || null; },
+      insertSheet: function (name) { var s = makeFakeSheet_(); fakeSheets[name] = s; return s; }
+    };
+  }
+};
+
+// 載入 SheetUtils.gs 之後，裡面的真正 logRun_ 定義會蓋掉這裡先設的 stub（跟正式環境同一個
+// vm context 共用全域一樣），真正版本會呼叫 Utilities.formatDate——補一個最小可用的實作，
+// 不用精確到時區，只要不噴例外、格式看起來對就好，這幾個測試都不斷言記錄下來的文字內容。
+const Utilities = {
+  formatDate: function (date, tz, fmt) {
+    function pad(n) { return String(n).padStart(2, '0'); }
+    return fmt
+      .replace('yyyy', date.getFullYear())
+      .replace('MM', pad(date.getMonth() + 1))
+      .replace('dd', pad(date.getDate()))
+      .replace('HH', pad(date.getHours()))
+      .replace('mm', pad(date.getMinutes()))
+      .replace('ss', pad(date.getSeconds()));
+  }
+};
+
+const context = {
+  console: console, PropertiesService: PropertiesService, logRun_: function () {},
+  UrlFetchApp: UrlFetchApp, SpreadsheetApp: SpreadsheetApp, Utilities: Utilities
+};
 vm.createContext(context);
 function loadIntoContext(relPath) {
   const code = fs.readFileSync(path.join(__dirname, '..', 'src', relPath), 'utf8');
@@ -24,7 +106,9 @@ function loadIntoContext(relPath) {
 }
 loadIntoContext('Config.gs');
 loadIntoContext('Utils.gs');
+loadIntoContext('SheetUtils.gs');
 loadIntoContext('AiDiagnosis.gs');
+fakeProps[context.CONFIG.PROP_KEYS.SPREADSHEET_ID] = 'fake-spreadsheet-id'; // 讓 getSpreadsheet_ 走 openById 這條路，不會嘗試真的 SpreadsheetApp.create
 
 function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < eps; }
 
@@ -165,6 +249,271 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   assert.deepStrictEqual([...result['0330']], [], '查無資料的代號要回傳空陣列，不是 undefined，前端才不用額外判斷');
   assert.strictEqual(Object.keys(result).length, 3, '不在查詢清單內的代號（9999）不該出現在回傳結果的 key 裡');
   console.log('Test 8 (getAiDiagnosisHistoryForCodes_) passed.');
+}
+
+// --- 9. buildTwseOfficialFinancialsTextForCode_：純函式，從「已經抓好的」3 份全市場資料集
+//    篩出單一代號要用的文字——這是把 fetchTwseOfficialFinancialsText_ 拆成「抓資料」跟
+//    「篩選/組字」兩段之後，可以獨立測試的核心邏輯，不用真的打網路 ---
+{
+  const datasets = [
+    { label: '上市公司每月營業收入彙總表', rows: [
+      { '公司代號': '2330', '公司名稱': '台積電', '營業收入': '1000000' },
+      { '公司代號': '2603', '公司名稱': '長榮', '營業收入': '500000' }
+    ] },
+    { label: '上市公司綜合損益表（一般業）', rows: [
+      { '公司代號': '2330', '本期淨利': '400000' }
+    ] },
+    { label: '上市公司資產負債表（一般業）', rows: [] } // 這個資料集剛好篩不到任何列（例如暫時性失敗)
+  ];
+  const text2330 = context.buildTwseOfficialFinancialsTextForCode_('2330', datasets);
+  assert.ok(text2330.indexOf('上市公司每月營業收入彙總表') !== -1);
+  assert.ok(text2330.indexOf('公司代號：2330') !== -1);
+  assert.ok(text2330.indexOf('本期淨利：400000') !== -1);
+  assert.ok(text2330.indexOf('長榮') === -1, '不該混進其他代號的資料');
+
+  const textMissing = context.buildTwseOfficialFinancialsTextForCode_('9999', datasets);
+  assert.ok(textMissing.indexOf('查無此股票代號') !== -1, '三份資料集都篩不到時要回傳明確的缺漏說明，不能拋例外或回傳空字串');
+  console.log('Test 9 (buildTwseOfficialFinancialsTextForCode_) passed.');
+}
+
+// --- 10. fetchTwseOfficialFinancialsDatasets_：3 個資料集各自獨立抓取，單一資料集失敗
+//    （非 200 / 例外 / 回傳不是陣列）不該影響其他資料集，也不該讓整支函式拋例外 ---
+{
+  fetchCallLog.length = 0;
+  var urls = context.TWSE_OFFICIAL_FINANCIALS_DATASETS_.map(function (d) { return d.url; });
+  fetchImpl = function (url) {
+    if (url === urls[0]) {
+      return { getResponseCode: function () { return 200; }, getContentText: function () { return JSON.stringify([{ '公司代號': '2330', '營業收入': '1000000' }]); } };
+    }
+    if (url === urls[1]) {
+      return { getResponseCode: function () { return 500; }, getContentText: function () { return 'error'; } }; // 非 200，該資料集要回空陣列
+    }
+    throw new Error('模擬逾時'); // 第三個資料集直接拋例外，也要被吃掉
+  };
+  const datasets = context.fetchTwseOfficialFinancialsDatasets_();
+  assert.strictEqual(fetchCallLog.length, 3, '3 個資料集都要各打一次');
+  assert.strictEqual(datasets.length, 3);
+  assert.strictEqual(datasets[0].rows.length, 1, '成功的資料集要正常回傳解析後的列');
+  assert.deepStrictEqual([...datasets[1].rows], [], '非 200 的資料集要回空陣列，不拋例外');
+  assert.deepStrictEqual([...datasets[2].rows], [], '拋例外的資料集也要被吃掉、回空陣列，不能讓整支函式跟著掛掉');
+  console.log('Test 10 (fetchTwseOfficialFinancialsDatasets_ per-dataset failure isolation) passed.');
+}
+
+// --- 11. 這次優化要驗證的核心行為：對一批股票代號跑診斷時，3 份全市場資料集只應該抓
+//    「一次」，不是「每檔股票各抓一次」——runAiDiagnosis 原本的寫法是迴圈裡每檔股票各自呼叫
+//    fetchTwseOfficialFinancialsText_(code)，等於 N 檔股票就打 3N 次網路；改成迴圈外先呼叫
+//    fetchTwseOfficialFinancialsDatasets_() 一次，迴圈內只呼叫不打網路的
+//    buildTwseOfficialFinancialsTextForCode_ ---
+{
+  fetchCallLog.length = 0;
+  var urls2 = context.TWSE_OFFICIAL_FINANCIALS_DATASETS_.map(function (d) { return d.url; });
+  fetchImpl = function (url) {
+    var idx = urls2.indexOf(url);
+    var rowsByIdx = [
+      [{ '公司代號': '2330', 'X': '1' }, { '公司代號': '2603', 'X': '2' }],
+      [{ '公司代號': '2330', 'Y': '3' }],
+      [{ '公司代號': '2603', 'Z': '4' }]
+    ];
+    return { getResponseCode: function () { return 200; }, getContentText: function () { return JSON.stringify(rowsByIdx[idx]); } };
+  };
+  const datasets = context.fetchTwseOfficialFinancialsDatasets_();
+  assert.strictEqual(fetchCallLog.length, 3, '抓 datasets 這一次應該剛好打 3 次網路');
+
+  // 模擬 runAiDiagnosis 對 5 檔股票的迴圈，每檔都用同一份 datasets 篩選
+  var codes = ['2330', '2603', '0330', '9910', '1101'];
+  var texts = codes.map(function (c) { return context.buildTwseOfficialFinancialsTextForCode_(c, datasets); });
+  assert.strictEqual(fetchCallLog.length, 3, '批次篩選 5 檔股票之後，網路呼叫次數應該還是 3 次，不會隨股票數增加');
+  assert.ok(texts[0].indexOf('公司代號：2330') !== -1 && texts[0].indexOf('X：1') !== -1 && texts[0].indexOf('Y：3') !== -1, '2330 要拿到自己在營收表跟損益表的資料');
+  assert.ok(texts[1].indexOf('公司代號：2603') !== -1 && texts[1].indexOf('Z：4') !== -1, '2603 要拿到自己在資產負債表的資料');
+  assert.ok(texts[0].indexOf('公司代號：2603') === -1, '2330 的結果不該混進 2603 的列');
+  console.log('Test 11 (batched datasets fetched once, reused across N codes with zero extra network calls) passed.');
+}
+
+// --- 12. fetchTwseOfficialFinancialsText_（單一代號版本，給 runPortfolioHoldDiagnosis 這種
+//    一次只診斷一檔的呼叫端用，沒有批次可以攤提）內部還是會抓 3 次網路，但輸出結果要跟
+//    「批次版本篩同一個代號」完全一致，確認拆分後兩條路徑邏輯沒有跑掉 ---
+{
+  fetchCallLog.length = 0;
+  var urls3 = context.TWSE_OFFICIAL_FINANCIALS_DATASETS_.map(function (d) { return d.url; });
+  fetchImpl = function (url) {
+    var idx = urls3.indexOf(url);
+    var rowsByIdx = [[{ '公司代號': '2330', 'X': '1' }], [{ '公司代號': '2330', 'Y': '2' }], []];
+    return { getResponseCode: function () { return 200; }, getContentText: function () { return JSON.stringify(rowsByIdx[idx]); } };
+  };
+  const singleText = context.fetchTwseOfficialFinancialsText_('2330');
+  assert.strictEqual(fetchCallLog.length, 3, '單一代號版本沒有批次可以攤提，還是要打 3 次');
+
+  fetchCallLog.length = 0;
+  const datasets = context.fetchTwseOfficialFinancialsDatasets_();
+  const batchedText = context.buildTwseOfficialFinancialsTextForCode_('2330', datasets);
+  assert.strictEqual(singleText, batchedText, '單一代號版本跟批次版本篩同一個代號，結果要完全一致');
+  console.log('Test 12 (single-code wrapper output matches batched path) passed.');
+}
+
+// --- 13. pickLatestReportRowsByCode_：純函式，從「已經讀出來的」整份 Reports 表依代號分組，
+//    each 找出「這個代號最新一天」的那一列——runAiDiagnosis 對一批候選股票跑診斷時用這支
+//    一次找出全部代號的最新列，不要 N 檔股票各自呼叫 getLatestReportRowForCode_（那樣是
+//    N 次「整份表格掃描」） ---
+{
+  const rows = [
+    { '證券代號': '2330', '日期': '2026-08-01', 'Armor_Score': 80 },
+    { '證券代號': '2330', '日期': '2026-08-05', 'Armor_Score': 90 }, // 2330 最新一天
+    { '證券代號': '2603', '日期': '2026-08-03', 'Armor_Score': 70 },
+    // 這筆代號不在查詢清單內（只查 2330/2603/0330），要被忽略
+    { '證券代號': '9999', '日期': '2026-08-04', 'Armor_Score': 60 }
+  ];
+  const result = context.pickLatestReportRowsByCode_(rows, ['2330', '2603', '330']);
+  assert.strictEqual(result['2330']['日期'], '2026-08-05', '同一代號要挑「最新一天」那一列，不是隨便一列');
+  assert.strictEqual(result['2330']['Armor_Score'], 90);
+  assert.strictEqual(result['2603']['日期'], '2026-08-03');
+  assert.strictEqual(result['0330'], null, '查無資料的代號要回傳 null，不是 undefined，呼叫端才不用額外判斷');
+  assert.strictEqual(Object.keys(result).length, 3, '不在查詢清單內的代號（9999）不該出現在回傳結果的 key 裡');
+  console.log('Test 13 (pickLatestReportRowsByCode_) passed.');
+}
+
+// --- 14. aiDiagnosisRowKey_：跟 upsertAiDiagnosisRow_ 原本「代號+日期+診斷類型」的比對邏輯
+//    要一致，且對已經正規化過的既有列跟新記錄套用同一個 key 函式要得到相同的 key（idempotent）---
+{
+  const existingRow = { '證券代號': '2330', '日期': '2026-08-05', '診斷類型': '深度診斷' };
+  const newRecord = { '證券代號': '2330', '日期': '2026-08-05', '診斷類型': '深度診斷' };
+  assert.strictEqual(context.aiDiagnosisRowKey_(existingRow), context.aiDiagnosisRowKey_(newRecord), '同一筆邏輯上的紀錄，兩邊算出來的 key 要一樣');
+  assert.notStrictEqual(
+    context.aiDiagnosisRowKey_({ '證券代號': '2330', '日期': '2026-08-05', '診斷類型': '深度診斷' }),
+    context.aiDiagnosisRowKey_({ '證券代號': '2330', '日期': '2026-08-05', '診斷類型': '持股續抱診斷' }),
+    '同一天同一檔股票但診斷類型不同，要是不同的 key（不能互相覆蓋）'
+  );
+  assert.strictEqual(
+    context.aiDiagnosisRowKey_({ '證券代號': '2330', '日期': '2026-08-05' }),
+    context.aiDiagnosisRowKey_({ '證券代號': '2330', '日期': '2026-08-05', '診斷類型': '深度診斷' }),
+    '沒帶診斷類型要預設視為深度診斷，對應改版前的舊資料'
+  );
+  console.log('Test 14 (aiDiagnosisRowKey_) passed.');
+}
+
+// --- 15. createAiDiagnosisBatchUpserter_：這次優化裡最需要驗證「沒有造成新問題」的部分——
+//    多數情況（新的 代號+日期+診斷類型 組合）要直接 append，不整份重寫；只有真的撞到既有
+//    紀錄才整份重寫；同一個批次裡如果撞到自己剛剛才新增的那筆（例如候選名單代號重複），
+//    也要正確處理、不能產生重複列 ---
+{
+  fakeSheets = {}; // 每個測試案例用全新的假 Sheet，不共用前一個測試案例殘留的資料
+  var sheet = context.getAiDiagnosisSheet_();
+  // 預先塞一筆既有紀錄：2330 在 2026-08-05 已經跑過深度診斷
+  context.writeSheetObjects_(sheet, context.CONFIG.AI_DIAGNOSIS_COLUMNS, [{
+    '日期': '2026-08-05', '證券代號': '2330', '證券名稱': '台積電', 'Armor_Score': 80,
+    '操作策略': '', '最終建議': '分批布局', '診斷類型': '深度診斷', '診斷內容': '舊的診斷內容', '時間戳記': ''
+  }]);
+  var clearCountBeforeUpserter = sheet._clearContentsCallCount();
+
+  var upsert = context.createAiDiagnosisBatchUpserter_();
+
+  // (a) 全新的 代號+日期+診斷類型 組合 -> 應該直接 append，不觸發整份重寫（clearContents 不會被呼叫）
+  upsert({
+    '日期': '2026-08-05', '證券代號': '2603', '證券名稱': '長榮', 'Armor_Score': 70,
+    '操作策略': '', '最終建議': '分批布局', '診斷類型': '深度診斷', '診斷內容': '2603 的新診斷', '時間戳記': ''
+  });
+  var rowsAfterA = context.readSheetObjects_(sheet);
+  assert.strictEqual(rowsAfterA.length, 2, '新增一筆新的代號，總列數應該是 1(既有) + 1(新增) = 2');
+  assert.strictEqual(sheet._clearContentsCallCount(), clearCountBeforeUpserter, '全新組合應該走 append 路徑，不該觸發整份重寫（clearContents 不該被呼叫）');
+
+  // (b) 撞到既有紀錄（2330 同一天同一種診斷類型）-> 應該退回整份重寫路徑，內容被正確取代、
+  //     不會產生重複列
+  upsert({
+    '日期': '2026-08-05', '證券代號': '2330', '證券名稱': '台積電', 'Armor_Score': 85,
+    '操作策略': '', '最終建議': '強力買入', '診斷類型': '深度診斷', '診斷內容': '2330 的新診斷（取代舊的）', '時間戳記': ''
+  });
+  var rowsAfterB = context.readSheetObjects_(sheet);
+  assert.strictEqual(rowsAfterB.length, 2, '撞到既有紀錄是「取代」不是「新增」，總列數應該還是 2，不是 3');
+  var row2330 = rowsAfterB.filter(function (r) { return r['證券代號'] === '2330'; });
+  assert.strictEqual(row2330.length, 1, '2330 不該有重複列');
+  assert.strictEqual(row2330[0]['診斷內容'], '2330 的新診斷（取代舊的）', '舊內容要被新的取代');
+  assert.strictEqual(row2330[0]['最終建議'], '強力買入');
+
+  // (c) 同一批次裡再對「剛剛才新增的」2603 用同一個 key 呼叫一次（模擬候選名單代號重複的
+  //     邊界情況）-> 也要被偵測到是撞到既有紀錄（這次是撞到同一批次裡自己剛新增的那筆），
+  //     退回整份重寫，不能產生重複列
+  upsert({
+    '日期': '2026-08-05', '證券代號': '2603', '證券名稱': '長榮', 'Armor_Score': 72,
+    '操作策略': '', '最終建議': '強力買入', '診斷類型': '深度診斷', '診斷內容': '2603 同批次重複呼叫', '時間戳記': ''
+  });
+  var rowsAfterC = context.readSheetObjects_(sheet);
+  assert.strictEqual(rowsAfterC.length, 2, '同一批次重複撞到自己剛新增的那筆，也要是取代、不是新增，總列數維持 2');
+  var row2603 = rowsAfterC.filter(function (r) { return r['證券代號'] === '2603'; });
+  assert.strictEqual(row2603.length, 1, '2603 不該有重複列');
+  assert.strictEqual(row2603[0]['診斷內容'], '2603 同批次重複呼叫');
+
+  console.log('Test 15 (createAiDiagnosisBatchUpserter_ — append for new keys, safe fallback for collisions, no duplicate rows) passed.');
+}
+
+// --- 16. calcCost_ 加上 prompt caching 的計費倍率之後：(a) 沒帶第 4 個參數／帶了但都是 0，
+//    算出來的費用要跟開快取以前完全一樣（向後相容，其他呼叫端沒改也不受影響）；(b) 帶了
+//    cache_creation/cache_read tokens 時，要分別用 1.25 倍／0.1 倍 base 輸入單價計算，不能
+//    直接漏掉（漏掉就會低估實際費用，Anthropic 這兩類 tokens 一樣要計費）---
+{
+  const withoutCache = context.calcCost_('claude', 1000000, 0);
+  const withZeroCache = context.calcCost_('claude', 1000000, 0, { cacheCreationInputTokens: 0, cacheReadInputTokens: 0 });
+  const withUndefinedFields = context.calcCost_('claude', 1000000, 0, {});
+  const withNoFourthArg = context.calcCost_('claude', 1000000, 0);
+  assert.ok(approxEqual(withoutCache, withZeroCache), '沒帶 cacheTokens 跟帶了全 0 的 cacheTokens，費用要一樣');
+  assert.ok(approxEqual(withoutCache, withUndefinedFields), '帶空物件（欄位都是 undefined）也要當作 0，不能是 NaN');
+  assert.ok(approxEqual(withoutCache, withNoFourthArg), '這是既有呼叫端（B3 這次沒改的其餘呼叫端）的向後相容基準');
+
+  const pricing = context.getPricingSettings();
+  const withCache = context.calcCost_('claude', 0, 0, { cacheCreationInputTokens: 1000000, cacheReadInputTokens: 1000000 });
+  const expectedCacheCost = (1000000 / 1e6) * pricing.claudeInputPerM * 1.25 + (1000000 / 1e6) * pricing.claudeInputPerM * 0.1;
+  assert.ok(approxEqual(withCache, expectedCacheCost), 'got ' + withCache + ' expected ' + expectedCacheCost + '：cache_creation 要算 1.25 倍、cache_read 要算 0.1 倍 base 輸入單價');
+
+  const geminiWithCache = context.calcCost_('gemini', 1000000, 0, { cacheCreationInputTokens: 1000000, cacheReadInputTokens: 1000000 });
+  const geminiWithoutCache = context.calcCost_('gemini', 1000000, 0);
+  assert.ok(approxEqual(geminiWithCache, geminiWithoutCache + (1000000 / 1e6) * pricing.geminiInputPerM * 1.35), 'Gemini 呼叫端目前不會帶 cache tokens，但萬一帶了也要照 Gemini 自己的單價算，不能誤用 Claude 單價');
+  console.log('Test 16 (calcCost_ prompt-caching-aware pricing, backward compatible) passed.');
+}
+
+// --- 17. callClaude_：system prompt 要用 cache_control 包住的陣列格式送出（不是純字串），
+//    且要正確把回應裡的 cache_creation_input_tokens／cache_read_input_tokens 解析進回傳值——
+//    這兩個數字接下來會餵給 calcCost_ 算費用，解析錯了費用估算就會跟著錯 ---
+{
+  fakeProps[context.CONFIG.PROP_KEYS.ANTHROPIC_API_KEY] = 'fake-key';
+  var capturedPayload = null;
+  fetchImpl = function (url, opts) {
+    capturedPayload = JSON.parse(opts.payload);
+    return {
+      getResponseCode: function () { return 200; },
+      getContentText: function () {
+        return JSON.stringify({
+          content: [{ text: '診斷內容' }],
+          usage: { input_tokens: 50, output_tokens: 200, cache_creation_input_tokens: 900, cache_read_input_tokens: 0 }
+        });
+      }
+    };
+  };
+  const result = context.callClaude_('系統提示詞', '使用者提示詞');
+  assert.ok(Array.isArray(capturedPayload.system), 'system 欄位要是陣列格式，不能是純字串，才能帶 cache_control');
+  assert.strictEqual(capturedPayload.system[0].text, '系統提示詞');
+  assert.strictEqual(capturedPayload.system[0].cache_control.type, 'ephemeral');
+  assert.strictEqual(result.inputTokens, 50);
+  assert.strictEqual(result.outputTokens, 200);
+  assert.strictEqual(result.cacheCreationInputTokens, 900, '要正確解析 cache_creation_input_tokens，不能漏掉');
+  assert.strictEqual(result.cacheReadInputTokens, 0);
+  console.log('Test 17 (callClaude_ sends cache_control, parses cache usage fields) passed.');
+}
+
+// --- 17b. 回應完全沒有 cache 相關欄位時（例如剛好這次沒命中任何快取邏輯、或 Anthropic 之後
+//    改回應格式），cacheCreationInputTokens／cacheReadInputTokens 要預設 0，不能是 undefined
+//    或 NaN 一路傳到 calcCost_ 裡 ---
+{
+  fetchImpl = function () {
+    return {
+      getResponseCode: function () { return 200; },
+      getContentText: function () { return JSON.stringify({ content: [{ text: 'x' }], usage: { input_tokens: 10, output_tokens: 5 } }); }
+    };
+  };
+  const result = context.callClaude_('系統提示詞', '使用者提示詞');
+  assert.strictEqual(result.cacheCreationInputTokens, 0);
+  assert.strictEqual(result.cacheReadInputTokens, 0);
+  const cost = context.calcCost_(result.provider, result.inputTokens, result.outputTokens,
+    { cacheCreationInputTokens: result.cacheCreationInputTokens, cacheReadInputTokens: result.cacheReadInputTokens });
+  assert.ok(!Number.isNaN(cost), '沒有 cache 欄位時，算出來的費用不能是 NaN');
+  console.log('Test 17b (callClaude_ defaults missing cache fields to 0) passed.');
 }
 
 console.log('All AiDiagnosis.gs tests passed.');

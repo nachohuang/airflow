@@ -181,30 +181,52 @@ function fetchGoodinfoText_(code) {
  * 查無資料是預期行為，不是 bug——AI 看不到這段資料時，系統 prompt 規則 1 會要求它明確
  * 說明「此部分資料不足」，不會憑空捏造數字。
  */
-function fetchTwseOfficialFinancialsText_(code) {
-  var datasets = [
-    { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap05_L', label: '上市公司每月營業收入彙總表' },
-    { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci', label: '上市公司綜合損益表（一般業）' },
-    { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap07_L_ci', label: '上市公司資產負債表（一般業）' }
-  ];
+var TWSE_OFFICIAL_FINANCIALS_DATASETS_ = [
+  { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap05_L', label: '上市公司每月營業收入彙總表' },
+  { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci', label: '上市公司綜合損益表（一般業）' },
+  { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap07_L_ci', label: '上市公司資產負債表（一般業）' }
+];
+
+/**
+ * 抓 3 個 TWSE OpenAPI 全市場資料集（一次），回傳 [{label, rows}]，rows 是該資料集「全部
+ * 上市公司」的原始列，還沒篩選成單一股票代號。單一資料集抓取失敗（格式變動、逾時、非 200、
+ * 回傳不是陣列等）就讓那個資料集的 rows 是空陣列，不拋例外，靜默略過即可，不中斷整體流程——
+ * 這一段資料缺漏時，系統 prompt 規則 1 會要求 AI 明確講清楚。
+ *
+ * 抽成獨立函式是因為 runAiDiagnosis 對「一批」股票代號跑診斷時，這 3 份全市場資料對批次內
+ * 每一檔股票來說完全相同，不需要各自重抓——改成整批只抓一次，每檔股票輪流用
+ * buildTwseOfficialFinancialsTextForCode_ 篩選，原本是「每檔股票各抓 3 次」（N 檔就是 3N 次
+ * 重複抓同一份全市場 JSON），現在整批只抓 3 次。
+ */
+function fetchTwseOfficialFinancialsDatasets_() {
+  return TWSE_OFFICIAL_FINANCIALS_DATASETS_.map(function (ds) {
+    try {
+      var resp = UrlFetchApp.fetch(ds.url, { muteHttpExceptions: true });
+      if (resp.getResponseCode() !== 200) return { label: ds.label, rows: [] };
+      var rows = JSON.parse(resp.getContentText('UTF-8'));
+      return { label: ds.label, rows: Array.isArray(rows) ? rows : [] };
+    } catch (e) {
+      return { label: ds.label, rows: [] };
+    }
+  });
+}
+
+/**
+ * 純函式：從已經抓好的 3 份全市場資料集（見 fetchTwseOfficialFinancialsDatasets_）篩出單一
+ * 股票代號的資料，組成餵給 AI 的文字——篩選/組字邏輯跟原本合併在一起的版本完全相同，抽出來
+ * 純粹是為了讓 runAiDiagnosis 對一批股票跑診斷時，可以共用同一份已經抓好的 datasets，每檔
+ * 股票只需要呼叫這支「不會再打網路」的純函式篩選，不用各自重抓。
+ */
+function buildTwseOfficialFinancialsTextForCode_(code, datasets) {
   var MAX_CHARS = 4000;
   var parts = [];
   datasets.forEach(function (ds) {
-    try {
-      var resp = UrlFetchApp.fetch(ds.url, { muteHttpExceptions: true });
-      if (resp.getResponseCode() !== 200) return;
-      var rows = JSON.parse(resp.getContentText('UTF-8'));
-      if (!Array.isArray(rows)) return;
-      var matched = rows.filter(function (r) { return String(r['公司代號'] || '').trim() === code; });
-      if (matched.length === 0) return;
-      var text = matched.map(function (r) {
-        return Object.keys(r).map(function (k) { return k + '：' + r[k]; }).join('，');
-      }).join('\n');
-      parts.push('【' + ds.label + '】\n' + text);
-    } catch (e) {
-      // 單一資料集抓取失敗（格式變動、逾時等）不影響其他資料集，靜默略過即可，
-      // 不中斷整體診斷流程——這一段資料缺漏時，系統 prompt 規則 1 會要求 AI 明確講清楚。
-    }
+    var matched = ds.rows.filter(function (r) { return String(r['公司代號'] || '').trim() === code; });
+    if (matched.length === 0) return;
+    var text = matched.map(function (r) {
+      return Object.keys(r).map(function (k) { return k + '：' + r[k]; }).join('，');
+    }).join('\n');
+    parts.push('【' + ds.label + '】\n' + text);
   });
   if (parts.length === 0) {
     return '（查無此股票代號在證交所公開資訊觀測站的月營收／財報公開資料——可能是非「一般業」分類' +
@@ -212,6 +234,12 @@ function fetchTwseOfficialFinancialsText_(code) {
       '既有的知識判斷，並在報告中註明缺乏官方結構化財報資料）';
   }
   return parts.join('\n\n').slice(0, MAX_CHARS);
+}
+
+/** 只需要單一股票代號時用（例如 runPortfolioHoldDiagnosis，一次只診斷一檔，沒有批次可以
+ *  攤提抓取成本）：內部就是「抓一次 datasets + 篩一檔」，跟批次版本共用同一套邏輯。 */
+function fetchTwseOfficialFinancialsText_(code) {
+  return buildTwseOfficialFinancialsTextForCode_(code, fetchTwseOfficialFinancialsDatasets_());
 }
 
 // ---------------- Prompt 組裝 + Claude API ----------------
@@ -276,7 +304,13 @@ function callClaude_(systemPrompt, userPrompt) {
     payload: JSON.stringify({
       model: CONFIG.CLAUDE_MODEL,
       max_tokens: CONFIG.CLAUDE_MAX_TOKENS,
-      system: systemPrompt,
+      // system prompt（AI_DIAGNOSIS_SYSTEM_PROMPT／AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT，
+      // 上千字的固定規則/輸出格式規範）在候選名單一多的時候，同一天會被逐字重送好幾次
+      // （每檔股票深度診斷各一次）。改成帶 cache_control 標記這段可以快取，Anthropic 之後
+      // 5 分鐘內收到同樣內容會直接命中快取，這段固定內容按快取價計費（比原價便宜很多），
+      // 不影響輸出內容或診斷品質，純粹是計費層級的優化。userPrompt（每檔股票各不相同的
+      // 戰報/財報/Goodinfo資料）維持原樣不快取。
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: userPrompt }]
     }),
     muteHttpExceptions: true
@@ -294,6 +328,13 @@ function callClaude_(systemPrompt, userPrompt) {
     text: text,
     inputTokens: usage.input_tokens || 0,
     outputTokens: usage.output_tokens || 0,
+    // 開啟 prompt caching 之後，usage 會多出這兩個欄位：cache_creation_input_tokens
+    // （這次把 system prompt 寫入快取的 tokens，計費 1.25 倍）、cache_read_input_tokens
+    // （這次命中快取讀到的 tokens，計費 0.1 倍）——calcCost_ 需要這兩個數字才能算出正確的
+    // 預估費用，不然「輸入Tokens」只算到 input_tokens 會低估實際費用（快取這兩類 tokens
+    // 一樣要付錢，只是單價不同）。
+    cacheCreationInputTokens: usage.cache_creation_input_tokens || 0,
+    cacheReadInputTokens: usage.cache_read_input_tokens || 0,
     provider: 'claude',
     model: CONFIG.CLAUDE_MODEL
   };
@@ -411,11 +452,22 @@ function setPricingSettings(claudeIn, claudeOut, geminiIn, geminiOut) {
   return getPricingSettings();
 }
 
-function calcCost_(provider, inputTokens, outputTokens) {
+/**
+ * cacheTokens（選填）：{cacheCreationInputTokens, cacheReadInputTokens}，只有 Claude 開了
+ * prompt caching（見 callClaude_）才會有非 0 值，Gemini 呼叫端不會帶這個參數，等同 0。
+ * Anthropic 快取計費倍率是官方固定的：寫入快取這次算 1.25 倍base輸入單價，命中快取讀到的
+ * tokens 算 0.1 倍——不是可以自訂的價格，所以不開放使用者在「AI 費用單價」設定裡調整，
+ * 直接算進這支函式。沒有帶 cacheTokens 或都是 0 時，算出來的費用跟開快取以前完全一樣，
+ * 呼叫端不用改。
+ */
+function calcCost_(provider, inputTokens, outputTokens, cacheTokens) {
   var pricing = getPricingSettings();
   var inRate = provider === 'gemini' ? pricing.geminiInputPerM : pricing.claudeInputPerM;
   var outRate = provider === 'gemini' ? pricing.geminiOutputPerM : pricing.claudeOutputPerM;
-  return (inputTokens / 1e6) * inRate + (outputTokens / 1e6) * outRate;
+  var cacheCreationTokens = (cacheTokens && cacheTokens.cacheCreationInputTokens) || 0;
+  var cacheReadTokens = (cacheTokens && cacheTokens.cacheReadInputTokens) || 0;
+  return (inputTokens / 1e6) * inRate + (outputTokens / 1e6) * outRate +
+    (cacheCreationTokens / 1e6) * inRate * 1.25 + (cacheReadTokens / 1e6) * inRate * 0.1;
 }
 
 function getAiUsageSheet_() {
@@ -506,14 +558,80 @@ function upsertAiDiagnosisRow_(record) {
   writeSheetObjects_(sheet, CONFIG.AI_DIAGNOSIS_COLUMNS, rows);
 }
 
+/** 「代號＋日期＋診斷類型」比對鍵，跟 upsertAiDiagnosisRow_ 判斷是否為同一筆紀錄的邏輯
+ *  一致，抽出來給 createAiDiagnosisBatchUpserter_ 共用（normalizeDateStr／zfill4 都是
+ *  幂等操作，對已經正規化過的既有資料再處理一次不會改變結果，可以放心對「既有列」與
+ *  「新記錄」套用同一個 key 函式）。 */
+function aiDiagnosisRowKey_(r) {
+  return zfill4(String(r['證券代號'] || '').trim()) + '|' + normalizeDateStr(r['日期']) + '|' + (r['診斷類型'] || '深度診斷');
+}
+
+/**
+ * 給 runAiDiagnosis 對一批股票代號跑診斷時用：回傳一個「單筆 upsert」函式，重複呼叫多次
+ * （每檔股票診斷成功一次呼叫一次）。跟迴圈裡直接呼叫 upsertAiDiagnosisRow_ 的差別：
+ *   - upsertAiDiagnosisRow_ 每次呼叫都是「整份讀出→過濾掉舊的→整份寫回」，N 檔股票就是
+ *     整份表被讀 N 次、也被整份重寫 N 次（AiDiagnosis 表隨時間累積歷史診斷紀錄，只會越來
+ *     越慢）。
+ *   - 這裡改成一開始只讀一次表，記住目前有哪些「代號+日期+診斷類型」的既有紀錄；多數情況
+ *     （同一天同一檔股票同一種診斷類型是第一次跑）根本不用整份重寫，直接 appendSheetObjects_
+ *     新增一列就好；只有真的撞到既有紀錄（例如候選名單裡代號重複、或使用者對同一天同一檔
+ *     重新整理過一次）才退回 upsertAiDiagnosisRow_ 的整份讀寫路徑，且只有撞到的那一筆會走
+ *     這條慢路徑，不是整批都變慢。
+ * 刻意維持「每檔股票診斷成功就立刻寫進表」，不是收集全部診斷結果、迴圈跑完才一次寫入——
+ * Apps Script 有 6 分鐘執行上限，候選名單一多或某幾檔 AI 回應比較慢，整個 runAiDiagnosis
+ * 有可能中途被強制中斷；維持逐筆立即寫入，就算中途被中斷，已經成功、也已經花錢呼叫過 API
+ * 的診斷結果不會遺失。
+ */
+function createAiDiagnosisBatchUpserter_() {
+  var sheet = getAiDiagnosisSheet_();
+  var seenKeys = {};
+  readSheetObjects_(sheet).forEach(function (r) { seenKeys[aiDiagnosisRowKey_(r)] = true; });
+  return function (record) {
+    record['診斷類型'] = record['診斷類型'] || '深度診斷';
+    var key = aiDiagnosisRowKey_(record);
+    if (seenKeys[key]) {
+      upsertAiDiagnosisRow_(record); // 撞到既有紀錄，正確性優先，退回整份讀寫的慢路徑
+    } else {
+      appendSheetObjects_(sheet, CONFIG.AI_DIAGNOSIS_COLUMNS, [record]);
+    }
+    seenKeys[key] = true;
+  };
+}
+
+/** 單一代號版本，給只需要一檔股票的呼叫端用（例如 runPortfolioHoldDiagnosis，一次只診斷
+ *  一檔，沒有批次可以攤提）：內部直接借用批次版本，避免同一段「找每個代號最新一天」的邏輯
+ *  寫兩份。 */
 function getLatestReportRowForCode_(code) {
   var target = zfill4(String(code).trim());
-  var rows = readSheetObjects_(getReportsSheet_()).filter(function (r) {
-    return zfill4(String(r['證券代號']).trim()) === target;
+  return getLatestReportRowsForCodes_([target])[target];
+}
+
+/** 批次版本：一次讀 Reports 表，依股票代號分組找出「每個代號最新一天」的那一列——
+ *  runAiDiagnosis 對一批候選股票跑診斷時用這支，不要 N 檔股票各自呼叫
+ *  getLatestReportRowForCode_（那樣會變成 N 次「整份 Reports 表格掃描」，同一份表被讀 N 次，
+ *  跟批次版 getAiDiagnosisHistoryForCodes 要解決的是同一種問題）。查無資料的代號 value 會是
+ *  null，不是 undefined，呼叫端不用額外判斷。 */
+function getLatestReportRowsForCodes_(codes) {
+  return pickLatestReportRowsByCode_(readSheetObjects_(getReportsSheet_()), codes);
+}
+
+/** 上面兩個函式共用的純函式：rows 是已經讀出來的整份 Reports 表，只在這裡跑一次分組/取最新
+ *  一天的邏輯。 */
+function pickLatestReportRowsByCode_(rows, codes) {
+  var targets = (codes || []).map(function (c) { return zfill4(String(c || '').trim()); });
+  var byCode = {};
+  var latestDateByCode = {};
+  targets.forEach(function (t) { byCode[t] = null; });
+  rows.forEach(function (r) {
+    var code = zfill4(String(r['證券代號']).trim());
+    if (!byCode.hasOwnProperty(code)) return;
+    var d = normalizeDateStr(r['日期']);
+    if (!byCode[code] || d > latestDateByCode[code]) {
+      byCode[code] = r;
+      latestDateByCode[code] = d;
+    }
   });
-  if (rows.length === 0) return null;
-  rows.sort(function (a, b) { return normalizeDateStr(a['日期']) < normalizeDateStr(b['日期']) ? 1 : -1; });
-  return rows[0];
+  return byCode;
 }
 
 /** 供「個股分析」/「股票詳情」頁面顯示某檔股票過去的 AI 診斷紀錄（新到舊）——
@@ -574,24 +692,35 @@ function runAiDiagnosis(codes) {
   if (!Array.isArray(codes)) codes = [codes];
   var timestampLabel = '台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm');
   var results = [];
+  // 3 份 TWSE 全市場財報資料集對這批股票代號來說完全相同，整批只抓一次（見
+  // fetchTwseOfficialFinancialsDatasets_ 的說明），避免代號數量一多，同一份資料被重複抓
+  // 好幾次。Reports 表也是一次讀出「這批代號各自最新一天」的資料（見
+  // getLatestReportRowsForCodes_），不要 N 檔股票各自整份表格掃描一次。AiDiagnosis 表則是
+  // 用批次 upserter（見 createAiDiagnosisBatchUpserter_）：只讀一次表，多數情況下每檔股票
+  // 只是單純新增一列，不用整份重讀重寫，但仍然維持「每檔股票診斷成功就立刻寫進表」，中途
+  // 被 Apps Script 執行上限打斷也不會遺失已完成的診斷。codes 是空陣列時完全不用做這些準備。
+  var twseDatasets = codes.length > 0 ? fetchTwseOfficialFinancialsDatasets_() : [];
+  var reportRowByCode = codes.length > 0 ? getLatestReportRowsForCodes_(codes) : {};
+  var upsertAiDiagnosis_ = codes.length > 0 ? createAiDiagnosisBatchUpserter_() : null;
 
   codes.forEach(function (rawCode) {
     var code = zfill4(String(rawCode).trim());
     var startTime = Date.now();
     try {
-      var row = getLatestReportRowForCode_(code);
+      var row = reportRowByCode[code];
       if (!row) throw new Error('在 Reports 裡找不到這檔股票的戰報資料，請先確認它出現在某一天的戰報中。');
 
       var goodinfoText = fetchGoodinfoText_(code);
-      var twseOfficialText = fetchTwseOfficialFinancialsText_(code);
+      var twseOfficialText = buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
       var userPrompt = buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel);
       var llmResult = callLlm_(AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
       var diagnosisText = llmResult.text;
       var verdict = extractVerdict_(diagnosisText);
-      var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+      var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens,
+        { cacheCreationInputTokens: llmResult.cacheCreationInputTokens, cacheReadInputTokens: llmResult.cacheReadInputTokens });
       var todayStr = normalizeDateStr(new Date());
 
-      upsertAiDiagnosisRow_({
+      upsertAiDiagnosis_({
         '日期': normalizeDateStr(row['日期']),
         '證券代號': code,
         '證券名稱': row['證券名稱'],
@@ -738,7 +867,8 @@ function runPortfolioHoldDiagnosis(code) {
     var llmResult = callLlm_(AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT, userPrompt);
     var diagnosisText = llmResult.text;
     var verdict = extractVerdict_(diagnosisText);
-    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens,
+        { cacheCreationInputTokens: llmResult.cacheCreationInputTokens, cacheReadInputTokens: llmResult.cacheReadInputTokens });
     var todayStr = normalizeDateStr(new Date());
 
     upsertAiDiagnosisRow_({
@@ -896,7 +1026,8 @@ function runAiShortlist_(count) {
     var systemPrompt = AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE.replace(/__COUNT__/g, String(count));
     var userPrompt = buildShortlistPrompt_(candidates, timestampLabel, count);
     var llmResult = callLlm_(systemPrompt, userPrompt);
-    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens,
+        { cacheCreationInputTokens: llmResult.cacheCreationInputTokens, cacheReadInputTokens: llmResult.cacheReadInputTokens });
 
     logAiUsage_({
       '日期': normalizeDateStr(new Date()),
@@ -1033,7 +1164,8 @@ function runAiTopPicks() {
   try {
     var userPrompt = buildTopPicksPrompt_(candidates, timestampLabel);
     var llmResult = callLlm_(AI_TOP_PICKS_SYSTEM_PROMPT, userPrompt);
-    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens);
+    var cost = calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens,
+        { cacheCreationInputTokens: llmResult.cacheCreationInputTokens, cacheReadInputTokens: llmResult.cacheReadInputTokens });
 
     logAiUsage_({
       '日期': normalizeDateStr(new Date()),

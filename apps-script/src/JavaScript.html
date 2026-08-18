@@ -1410,13 +1410,19 @@
   function loadAdmin() {
     populateTimeSelects();
     document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
+    // loadBqMaterializedStatus_ 跟 loadHistoryOverview_ 過去各自獨立呼叫 getHistoryOverview()，
+    // 在 BigQuery external/materialized 模式下這是一次真正的 BigQuery 查詢，等於每次開這個
+    // 分頁白白多打一次——這裡只查一次，兩邊共用同一份結果（查詢失敗就退回各自獨立重查，
+    // 不影響原本的錯誤處理行為）。
+    var historyOverviewPromise = callServer('getHistoryOverview').catch(function () { return null; });
     return Promise.all([
       loadScheduleSettings(), loadLastScheduledRunSteps_(), loadRunLog(), loadFileList(currentFolder),
       loadAiSettings(), loadAiUsage_(), loadAiPricing_(),
       loadHistoryFolderStatus_(), loadStorageDiagnostics_(),
-      loadBqSettings_(), loadBqMaterializedStatus_(),
+      loadBqSettings_(), historyOverviewPromise.then(function (o) { return loadBqMaterializedStatus_(o || undefined); }),
       loadJobQueue_(),
-      loadHistoryOverview_(), loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_(),
+      historyOverviewPromise.then(function (o) { return loadHistoryOverview_(o || undefined); }),
+      loadBqUsage_(), loadBqPricing_(), checkBackfillStatusOnLoad_(),
       checkMaterializeJobOnLoad_(),
       loadIndustryMapStatus_(), checkIndustryMapJobOnLoad_()
     ]);
@@ -1744,8 +1750,13 @@
     }).catch(function () { /* 開機檢查失敗不擋其他頁面內容載入 */ });
   }
 
-  function loadBqMaterializedStatus_() {
-    return callServer('getHistoryOverview').then(function (o) {
+  /** preFetched：呼叫端已經有 getHistoryOverview() 的結果時可以直接傳進來共用，不用再打一次
+   *  RPC（BigQuery external/materialized 模式下這是一次真正的 BigQuery 查詢）——目前
+   *  loadAdmin() 就是這樣跟 loadHistoryOverview_ 共用同一次查詢結果。不傳就照舊自己查一次，
+   *  維持其他呼叫端（例如重新整理完成後）各自獨立呼叫時的行為不變。 */
+  function loadBqMaterializedStatus_(preFetched) {
+    var p = preFetched ? Promise.resolve(preFetched) : callServer('getHistoryOverview');
+    return p.then(function (o) {
       var el = document.getElementById('bqMaterializedStatus');
       if (o.mode !== 'materialized') { el.textContent = ''; return; }
       el.textContent = o.lastRefresh ? ('上次重新整理：' + o.lastRefresh) : '還沒重新整理過（第一次查詢或按「立即重新整理」時會自動建立）';
@@ -2747,10 +2758,13 @@
     }).catch(function (err) { alert(err.message || err); });
   });
 
-  function loadHistoryOverview_() {
+  /** preFetched：同 loadBqMaterializedStatus_ 的說明，呼叫端已經有結果時可以共用、不用重打
+   *  一次 getHistoryOverview()。 */
+  function loadHistoryOverview_(preFetched) {
     var el = document.getElementById('historyOverviewResult');
     el.innerHTML = '<div class="loading">讀取統計中...</div>';
-    return withSpin(callServer('getHistoryOverview')).then(function (o) {
+    var p = preFetched ? Promise.resolve(preFetched) : withSpin(callServer('getHistoryOverview'));
+    return p.then(function (o) {
       if (o.mode === 'external' || o.mode === 'materialized') {
         if (!o.min) { el.innerHTML = '<div class="empty-hint">歷史資料夾裡還沒有任何資料</div>'; return; }
         var modeLabel = o.mode === 'materialized' ? 'materialized，自動整理進 BigQuery 原生表' : 'external，直接讀 Drive 檔案';
