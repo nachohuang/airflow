@@ -173,11 +173,37 @@ function logRun_(type, status, message, durationSec) {
   }
 }
 
-/** 供前端「後台管理」頁面呼叫：取得最近的執行紀錄。「時間戳記」欄位是 'yyyy-MM-dd HH:mm:ss'
+/** 「類型」欄位分組用：取第一個「-」前的文字（例如「每日排程-補抓資料」歸進「每日排程」
+ *  這組），讓不同步驟/子動作各自寫的細分類型字串（logRun_ 呼叫端到處都有，沒有集中管理
+ *  的固定列舉）在「執行紀錄」的篩選下拉選單裡可以合併成同一個看得懂的大類。 */
+function runLogCategoryOf_(type) {
+  return String(type || '').split('-')[0];
+}
+
+/** 供前端「後台管理」頁面呼叫：取得最近的執行紀錄，可選擇只看某個類別（見
+ *  runLogCategoryOf_ 的分組邏輯）——篩選要在 reverse+slice「取最近 N 筆」之前做，不然
+ *  「最近 50 筆全部類型」裡剛好沒幾筆是你要的類別，篩完看起來會像是「幾乎沒有紀錄」，
+ *  其實只是被還沒篩選就先限制筆數的舊寫法擠掉了。「時間戳記」欄位是 'yyyy-MM-dd HH:mm:ss'
  *  格式的字串寫進去的，但 Google Sheets 常把這種看起來像日期時間的字串自動存成 Date 物件，
  *  讀回來直接回傳給前端有可能讓整包回傳值序列化失敗（見 sanitizeRowForRpc_ 的說明）。 */
-function getRecentRunLogs(limit) {
+function getRecentRunLogs(limit, category) {
   var rows = readSheetObjects_(ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.RUN_LOG, CONFIG.RUN_LOG_COLUMNS));
+  if (category) {
+    rows = rows.filter(function (r) { return runLogCategoryOf_(r['類型']) === category; });
+  }
   rows.reverse();
   return rows.slice(0, limit || 50).map(sanitizeRowForRpc_);
+}
+
+/** 執行紀錄篩選下拉選單用：掃過整份表（不受 limit 影響，才不會漏掉比較久以前才出現過、
+ *  但最近沒再發生的類別）取得目前實際出現過的所有分組，由新到舊沒有特別意義，這裡直接
+ *  排序成好找的字母序。 */
+function getRunLogCategories() {
+  var rows = readSheetObjects_(ensureSheetWithHeaders_(getSpreadsheet_(), CONFIG.SHEET_NAMES.RUN_LOG, CONFIG.RUN_LOG_COLUMNS));
+  var seen = {};
+  rows.forEach(function (r) {
+    var group = runLogCategoryOf_(r['類型']);
+    if (group) seen[group] = true;
+  });
+  return Object.keys(seen).sort();
 }

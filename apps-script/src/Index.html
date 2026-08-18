@@ -210,7 +210,18 @@
 
         <div id="subtab-schedule" class="sub-tab-panel active">
           <div class="admin-section">
-            <h3>每日自動排程</h3>
+            <h3>最近一次排程執行</h3>
+            <div class="meta-bar">
+              這裡只顯示「每日自動排程」真正被時間觸發器觸發時的執行結果，不會被下面「手動測試工具」的
+              測試/重跑蓋掉——想診斷「昨晚排程到底怎麼了」看這裡就對了。失敗的步驟卡片上可以直接按
+              「從這步重跑」，重跑的過程跟結果會顯示在下面「手動測試工具」區塊（重跑本身一律算手動操作，
+              不會冒充成另一次「真正排程」）。
+            </div>
+            <div id="lastDailyScheduledRun"></div>
+          </div>
+
+          <div class="admin-section">
+            <h3>排程設定</h3>
             <form id="scheduleForm" class="form-card" style="margin-bottom:0;">
               <label>啟動時間
                 <div class="time-row">
@@ -245,17 +256,9 @@
               </div>
               <div class="md-table-card">
                 <div class="md-table-card-title">5. 每日自動 AI 診斷</div>
-                候選名單深度診斷＋Top3 橫向比較（需開啟下面「AI 與系統」分頁的「每日排程自動產生 AI 診斷」）。
+                候選名單深度診斷＋Top3 橫向比較（需在「🔑 系統與 AI 設定」子分頁開啟「每日排程自動產生 AI 診斷」）。
               </div>
             </div>
-
-            <h4>最近一次排程執行</h4>
-            <div class="form-actions">
-              <button type="button" id="scheduleTestRunBtn" class="btn-secondary">🧪 立即測試整套排程流程</button>
-            </div>
-            <div class="meta-bar">跟真正的每日排程跑一模一樣的 5 個步驟（含硬停邏輯），只是繞過六日/停跑日檢查，方便現在就測試，不用等到排定時間。</div>
-            <div id="lastScheduledRun"></div>
-            <div id="scheduleResumeResult"></div>
 
             <h4>臨時停跑日（例如颱風假）</h4>
             <form id="skipDateForm" class="inline-form">
@@ -264,10 +267,25 @@
               <button type="submit" class="btn-secondary">新增</button>
             </form>
             <div id="skipDateList" class="chip-list"></div>
+          </div>
 
-            <div class="form-actions">
-              <button type="button" id="manualRunBtn" class="btn-primary">🚀 立即測試執行（抓今日資料＋重跑分析）</button>
+          <div class="admin-section">
+            <h3>手動測試工具</h3>
+            <div class="meta-bar">
+              兩個工具都繞過「六日不執行」／「臨時停跑日」設定，結果各自獨立顯示在下面，不會覆蓋上面
+              「最近一次排程執行」的真實紀錄：
+              <b>🧪 測試完整排程流程</b>跟真正的每日排程一模一樣，依序跑 5 個步驟（含任一步失敗就整個
+              硬停的邏輯），適合想確認排程改完之後有沒有正常運作，或針對某個失敗步驟重跑；
+              <b>⚡ 只抓今天資料＋重算戰報</b>只做其中 2 步（不含 BigQuery 整理／AI 診斷），
+              不經過背景 job、幾秒到幾十秒內就有結果，適合想快速看一下今天資料抓不抓得到、戰報有沒有更新，
+              跟「最新戰報」頁面的手動刷新是同一支功能。
             </div>
+            <div class="form-actions">
+              <button type="button" id="scheduleTestRunBtn" class="btn-secondary">🧪 測試完整排程流程（5 步驟）</button>
+              <button type="button" id="manualRunBtn" class="btn-primary">⚡ 只抓今天資料＋重算戰報（較快）</button>
+            </div>
+            <div id="lastResumeScheduledRun"></div>
+            <div id="scheduleResumeResult"></div>
             <div id="manualRunResult"></div>
           </div>
 
@@ -288,6 +306,12 @@
 
           <div class="admin-section">
             <h3>執行紀錄</h3>
+            <label style="display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--text-muted); margin-bottom:8px; max-width:280px;">
+              篩選類別
+              <select id="runLogFilterSelect">
+                <option value="">全部</option>
+              </select>
+            </label>
             <div id="runLogList" class="log-list"></div>
           </div>
         </div>

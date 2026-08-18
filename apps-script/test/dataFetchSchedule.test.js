@@ -45,7 +45,8 @@ const context = {
   Date: Date,
   CONFIG: {
     PROP_KEYS: {
-      LAST_SCHEDULED_RUN: 'LAST_SCHEDULED_RUN',
+      LAST_SCHEDULED_RUN_DAILY: 'LAST_SCHEDULED_RUN_DAILY',
+      LAST_SCHEDULED_RUN_RESUME: 'LAST_SCHEDULED_RUN_RESUME',
       SCHEDULE_RESUME_JOB_STATE: 'SCHEDULE_RESUME_JOB_STATE',
       DAILY_SCHEDULE_JOB_STATE: 'DAILY_SCHEDULE_JOB_STATE'
     }
@@ -92,7 +93,7 @@ function makeCallSpy() {
 {
   resetFakeProps();
   const calls = makeCallSpy();
-  const result = context.runScheduledSteps_(0, null);
+  const result = context.runScheduledSteps_('daily', 0, null);
   assert.strictEqual(result.overallStatus, 'success');
   assert.strictEqual(result.steps.length, 5);
   assert.strictEqual(calls.step1, 1);
@@ -107,7 +108,7 @@ function makeCallSpy() {
   resetFakeProps();
   const calls = makeCallSpy();
   context.getHistoryOverview = function () { calls.step1++; throw new Error('查詢最新資料日期失敗'); };
-  const result = context.runScheduledSteps_(0, null);
+  const result = context.runScheduledSteps_('daily', 0, null);
   assert.strictEqual(result.overallStatus, 'failed');
   assert.strictEqual(result.steps.length, 1, '只應該記錄第 1 步（失敗），不該有第 2~5 步的紀錄');
   assert.strictEqual(result.steps[0].status, 'failed');
@@ -124,7 +125,7 @@ function makeCallSpy() {
   resetFakeProps();
   const calls = makeCallSpy();
   context.backfillOneDay_ = function () { calls.step2++; return { kind: 'failed', date: '2026-08-04', error: 'TWSE 連線逾時' }; };
-  const result = context.runScheduledSteps_(0, null);
+  const result = context.runScheduledSteps_('daily', 0, null);
   assert.strictEqual(result.overallStatus, 'failed');
   assert.strictEqual(result.steps.length, 2);
   assert.strictEqual(result.steps[1].status, 'failed');
@@ -146,7 +147,7 @@ function makeCallSpy() {
       : { kind: 'failed', date: daysAgoStr_(0), error: '部分失敗' };
   };
   context.getHistoryOverview = function () { calls.step1++; return { max: daysAgoStr_(2) }; }; // 讓 cursor 涵蓋兩天（今天跟昨天）
-  const result = context.runScheduledSteps_(0, null);
+  const result = context.runScheduledSteps_('daily', 0, null);
   assert.strictEqual(result.steps[1].status, 'partial', '至少有一天成功，補抓資料這步不該算整步失敗');
   assert.strictEqual(result.overallStatus, 'partial');
   assert.strictEqual(calls.step3, 1, '有成功抓到新資料，後面步驟應該照常繼續跑');
@@ -159,7 +160,7 @@ function makeCallSpy() {
   resetFakeProps();
   const calls = makeCallSpy();
   context.runAnalysisAndSave = function () { calls.step4++; throw new Error('BigQuery 查詢失敗'); };
-  const result = context.runScheduledSteps_(0, null);
+  const result = context.runScheduledSteps_('daily', 0, null);
   assert.strictEqual(result.overallStatus, 'failed');
   assert.strictEqual(result.steps.length, 4);
   assert.strictEqual(result.steps[3].status, 'failed');
@@ -176,7 +177,7 @@ function makeCallSpy() {
     { label: '補抓資料', status: 'success', detail: '舊紀錄2', startedAt: 3, endedAt: 4 },
     { label: 'BigQuery 整理', status: 'failed', detail: '原本失敗的那次', startedAt: 5, endedAt: 6 }
   ];
-  const result = context.runScheduledSteps_(2, previousSteps);
+  const result = context.runScheduledSteps_('daily', 2, previousSteps);
   assert.strictEqual(result.steps[0].detail, '舊紀錄1', '重跑不該動到第 1 步的舊紀錄');
   assert.strictEqual(result.steps[1].detail, '舊紀錄2', '重跑不該動到第 2 步的舊紀錄');
   assert.strictEqual(calls.step1, 0, '從第 3 步重跑，第 1 步不該被重新呼叫');
@@ -196,7 +197,7 @@ function makeCallSpy() {
   resetFakeProps();
   const calls = makeCallSpy();
   const eightHoursAgo = Date.now() - 8 * 60 * 60 * 1000;
-  const result = context.runScheduledSteps_(0, null, eightHoursAgo);
+  const result = context.runScheduledSteps_('daily', 0, null, eightHoursAgo);
   assert.strictEqual(result.overallStatus, 'success', 'overallStartedAt 很舊不該讓時間預算誤判成早就用完');
   assert.strictEqual(result.nextStepIndex, null, '應該正常跑完，不需要再排下一次 tick');
   assert.strictEqual(result.steps.length, 5);
@@ -304,13 +305,60 @@ function makeCallSpy() {
 {
   resetFakeProps();
   context.shouldSkipToday_ = function () { throw new Error('讀取試算表失敗'); };
-  assert.strictEqual(context.getLastScheduledRunSteps(), null, '測試前提：一開始應該是 null（模擬「尚未執行過」）');
+  assert.strictEqual(context.getLastScheduledRunSteps('daily'), null, '測試前提：一開始應該是 null（模擬「尚未執行過」）');
   context.scheduledDailyFetch();
-  const last = context.getLastScheduledRunSteps();
+  const last = context.getLastScheduledRunSteps('daily');
   assert.ok(last, '就算最外層丟出未預期的例外，也應該要有紀錄，不能還是 null');
   assert.strictEqual(last.overallStatus, 'failed');
   assert.ok(last.summary.indexOf('讀取試算表失敗') !== -1, '要看得到實際的錯誤訊息，不能只講「失敗」');
   console.log('Test scheduledDailyFetch (uncaught exception outside steps still gets recorded) passed.');
+}
+
+// --- 「最近一次排程執行」的 daily／resume 兩份紀錄要完全獨立，互不覆蓋——這是使用者實際
+// 反映過的問題：手動按「立即測試整套排程流程」（resume 車道）會把「昨晚真正排程到底發生
+// 什麼事」（daily 車道）的紀錄整個蓋掉，事後想診斷真正排程的失敗原因反而看不到。這裡驗證
+// runScheduledSteps_ 帶 lane='daily' 執行，不會動到 lane='resume' 既有的紀錄，反之亦然。 ---
+{
+  resetFakeProps();
+  const calls1 = makeCallSpy();
+  context.runScheduledSteps_('daily', 0, null);
+  const dailyAfterFirstRun = context.getLastScheduledRunSteps('daily');
+  assert.ok(dailyAfterFirstRun, 'daily 車道跑完應該要有紀錄');
+  assert.strictEqual(context.getLastScheduledRunSteps('resume'), null, 'resume 車道還沒跑過，不該平白冒出紀錄');
+
+  // 現在讓「resume」車道也跑一次，且用一個一定會失敗的版本，確保兩份紀錄的內容看得出差異
+  // （不是剛好長一樣、測不出到底有沒有真的分開存）。
+  context.runAnalysisAndSave = function () { calls1.step4++; throw new Error('resume 車道專用的失敗原因'); };
+  context.runScheduledSteps_('resume', 0, null);
+  const resumeAfterRun = context.getLastScheduledRunSteps('resume');
+  assert.strictEqual(resumeAfterRun.overallStatus, 'failed');
+  assert.ok(resumeAfterRun.summary.indexOf('resume 車道專用的失敗原因') === -1, 'summary 是步驟狀態摘要，不含例外訊息本身，改看 steps 裡的 detail');
+  assert.ok(resumeAfterRun.steps.some(function (s) { return s.detail.indexOf('resume 車道專用的失敗原因') !== -1; }));
+
+  // daily 車道原本成功的紀錄不該被 resume 車道這次失敗的執行影響。
+  const dailyAfterResumeRun = context.getLastScheduledRunSteps('daily');
+  assert.strictEqual(dailyAfterResumeRun.overallStatus, 'success', 'resume 車道執行（甚至失敗）不該動到 daily 車道既有的紀錄');
+  assert.deepStrictEqual(Object.assign({}, dailyAfterResumeRun), Object.assign({}, dailyAfterFirstRun), 'daily 車道的紀錄要跟 resume 車道跑之前完全一樣，一個欄位都不該變');
+  console.log('Test getLastScheduledRunSteps/saveLastScheduledRunSteps_ (daily and resume lanes never overwrite each other) passed.');
+}
+
+// --- 排程佇列「重新啟動」按鈕依賴的 job 狀態 stepIndex：任一步真的失敗（硬停，不是時間
+// 預算用完）時，要更新成「實際失敗的那一步」，不能維持這次 tick 開始時的舊值——之前這裡
+// 沒有更新，「重新啟動」永遠是從舊的 stepIndex 重來，白白重跑已經成功的前面幾步，跟步驟
+// 卡片自己「從這步重跑」（直接用該步驟的索引）的行為不一致。這裡從 stepIndex=0 開始跑，
+// 讓第 4 步（index=3，重新計算戰報）失敗，驗證 tick 結束後 job 狀態的 stepIndex 變成 3，
+// 不是還停在 0。 ---
+{
+  resetFakeProps();
+  const calls2 = makeCallSpy();
+  context.runAnalysisAndSave = function () { calls2.step4++; throw new Error('第 4 步失敗'); };
+  context.saveJobLaneState_(context.CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE,
+    { status: 'running', stepIndex: 0, overallStartedAt: Date.now(), updatedAt: Date.now() });
+  context.processDailyScheduleJobTick_();
+  const state = context.getJobLaneState_(context.CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE);
+  assert.strictEqual(state.status, 'error');
+  assert.strictEqual(state.stepIndex, 3, '硬停失敗後，job 狀態的 stepIndex 應該更新成實際失敗的那一步（index 3），不能停在這次 tick 開始時的舊值（0）');
+  console.log('Test processJobLaneTick_ (hard-stop failure updates stepIndex to the actually-failed step) passed.');
 }
 
 console.log('All DataFetch.gs schedule-engine tests passed.');

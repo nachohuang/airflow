@@ -1434,7 +1434,10 @@
   function loadAdmin() {
     populateTimeSelects();
     document.getElementById('spreadsheetLink').setAttribute('href', window.__spreadsheetUrl || '#');
-    var promises = [loadScheduleSettings(), loadLastScheduledRunSteps_(), loadRunLog(), loadJobQueue_()];
+    var promises = [
+      loadScheduleSettings(), loadLastDailyScheduledRunSteps_(), loadLastResumeScheduledRunSteps_(),
+      loadRunLog(), loadJobQueue_()
+    ];
     // 頂部「🔄」重新整理按鈕在使用者停留在「系統與資料後台」時也會呼叫這支函式（見主 Tab
     // 切換那段），如果使用者當下正停在排程與監控以外的子分頁（資料庫與模式／資料修復與
     // 工具／系統與 AI 設定），畫面上看得到的內容也要跟著重新整理，不能因為只重打了排程與
@@ -2298,22 +2301,32 @@
 
   var SCHEDULED_STEP_STATUS_ICON_ = { success: '✅', partial: '⚠️', failed: '❌', skipped: '⏭️' };
 
-  /** 「每日自動排程」區塊：最近一次 scheduledDailyFetch() 依序執行的每個步驟起訖時間/狀態，
+  /** 「最近一次排程執行」區塊：daily（真正的每日時間觸發器）跟 resume（手動測試/重跑）
+   *  各自獨立的一份步驟時間軸，互不覆蓋（見 DataFetch.gs getLastScheduledRunSteps 的說明）。
    *  不用只看 RunLog 裡零散的幾筆訊息自己拼湊「到底跑到哪一步、卡在哪裡、花了多久」。 */
-  function loadLastScheduledRunSteps_() {
-    return callServer('getLastScheduledRunSteps').then(renderLastScheduledRun_)
-      .catch(function (err) { document.getElementById('lastScheduledRun').innerHTML = errorBox(err); });
+  function loadLastDailyScheduledRunSteps_() {
+    return callServer('getLastScheduledRunSteps', 'daily').then(function (run) {
+      renderLastScheduledRun_('lastDailyScheduledRun', run);
+    }).catch(function (err) { document.getElementById('lastDailyScheduledRun').innerHTML = errorBox(err); });
+  }
+
+  function loadLastResumeScheduledRunSteps_() {
+    return callServer('getLastScheduledRunSteps', 'resume').then(function (run) {
+      renderLastScheduledRun_('lastResumeScheduledRun', run);
+    }).catch(function (err) { document.getElementById('lastResumeScheduledRun').innerHTML = errorBox(err); });
   }
 
   /** 排程任一步失敗就整個硬停（見 DataFetch.gs runScheduledSteps_ 的說明：後面步驟只會用
    *  同一份舊資料重算一次一模一樣的結果，沒有意義），所以最多只會有一個 status:'failed'
-   *  的步驟、而且一定是陣列裡最後一個——只在那一步顯示「從這步重跑」按鈕。
-   *  #scheduleResumeResult 是 Index.html 裡固定寫死、在 #lastScheduledRun 外面的容器，不是
-   *  這裡動態產生的——這裡每次都會整包覆蓋 #lastScheduledRun 的 innerHTML，如果結果容器放
-   *  在裡面，「立即測試整套排程流程」按鈕（跟 #lastScheduledRun 平行、不受這次覆蓋影響）
-   *  觸發的重跑訊息會在下一次 loadLastScheduledRunSteps_() 被整個蓋掉。 */
-  function renderLastScheduledRun_(run) {
-    var el = document.getElementById('lastScheduledRun');
+   *  的步驟、而且一定是陣列裡最後一個——只在那一步顯示「從這步重跑」按鈕，不管是掛在
+   *  daily 還是 resume 的時間軸上，按下去一律走 resume 車道（見下面的說明：「重跑」本身
+   *  一律算手動操作）。
+   *  #scheduleResumeResult 是 Index.html 裡固定寫死、在這兩個時間軸容器外面的容器，不是
+   *  這裡動態產生的——這裡每次都會整包覆蓋 containerId 的 innerHTML，如果結果容器放在裡面，
+   *  「測試完整排程流程」按鈕（跟這兩個容器平行、不受這次覆蓋影響）觸發的重跑訊息會在下一次
+   *  重新載入時被整個蓋掉。 */
+  function renderLastScheduledRun_(containerId, run) {
+    var el = document.getElementById(containerId);
     if (!run) { el.innerHTML = '<div class="empty-hint">尚未執行過</div>'; return; }
     var totalSec = Math.round((run.endedAt - run.startedAt) / 1000);
     var header = '<div class="meta-bar">整體：' + (SCHEDULED_STEP_STATUS_ICON_[run.overallStatus] || '') + ' ' +
@@ -2341,7 +2354,7 @@
       btn.addEventListener('click', function () {
         var stepIndex = parseInt(btn.getAttribute('data-step-index'), 10);
         var resultEl = document.getElementById('scheduleResumeResult');
-        resultEl.innerHTML = '<div class="loading">⏳ 背景重跑中，可以切到別的畫面或關掉螢幕，不會中斷，完成後這裡會自動更新...</div>';
+        resultEl.innerHTML = '<div class="loading">⏳ 背景重跑中，可以切到別的畫面或關掉螢幕，不會中斷，完成後「手動測試工具」區塊會自動更新...</div>';
         withSpin(callServer('startResumeScheduledRunJob', stepIndex)).then(function () {
           pollScheduleResumeJob_();
         }).catch(function (err) { resultEl.innerHTML = errorBox(err); });
@@ -2354,8 +2367,10 @@
     if (scheduleResumePollTimer_) { clearInterval(scheduleResumePollTimer_); scheduleResumePollTimer_ = null; }
   }
 
-  /** 「從這步重跑」是背景 job（機制跟其他背景 job 相同，避免長時間 RPC 在手機瀏覽器上
-   *  被中斷），完成後直接重新載入整份「最近一次排程執行」時間軸，不用自己拼湊局部更新。 */
+  /** 「從這步重跑」／「測試完整排程流程」都是背景 job（機制跟其他背景 job 相同，避免長時間
+   *  RPC 在手機瀏覽器上被中斷），完成後只重新載入 resume 車道自己的時間軸（#lastResumeScheduledRun），
+   *  不會動到上面「最近一次排程執行」（daily 車道）的紀錄——重跑一律算手動操作，不會冒充成
+   *  另一次「真正排程」。 */
   function pollScheduleResumeJob_() {
     stopScheduleResumePoll_();
     var poll = function () {
@@ -2364,7 +2379,7 @@
         stopScheduleResumePoll_();
         var resultEl = document.getElementById('scheduleResumeResult');
         if (resultEl) resultEl.innerHTML = state.status === 'error' ? errorBox(state.errorMessage || '重跑失敗') : '';
-        loadLastScheduledRunSteps_();
+        loadLastResumeScheduledRunSteps_();
       }).catch(function (err) {
         stopScheduleResumePoll_();
         var resultEl2 = document.getElementById('scheduleResumeResult');
@@ -2897,10 +2912,30 @@
     }).catch(function (err) { el.innerHTML = errorBox(err); });
   });
 
+  /** 「執行紀錄」類別下拉選單：只在還沒有任何選項（第一次載入）時才去查一次
+   *  getRunLogCategories()，之後切分頁/重新整理都不用重打，選項不會頻繁變動。 */
+  function ensureRunLogCategoryOptionsLoaded_() {
+    var sel = document.getElementById('runLogFilterSelect');
+    if (sel.children.length > 1) return Promise.resolve(); // 已經載過（只剩「全部」那個預設選項不算）
+    return callServer('getRunLogCategories').then(function (categories) {
+      categories.forEach(function (c) {
+        var opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c;
+        sel.appendChild(opt);
+      });
+    }).catch(function () { /* 篩選選項載入失敗不擋執行紀錄本身顯示 */ });
+  }
+
   function loadRunLog() {
-    return callServer('getRecentRunLogs', 50).then(function (logs) {
+    var category = document.getElementById('runLogFilterSelect').value;
+    return Promise.all([
+      ensureRunLogCategoryOptionsLoaded_(),
+      callServer('getRecentRunLogs', 50, category || undefined)
+    ]).then(function (results) {
+      var logs = results[1];
       var el = document.getElementById('runLogList');
-      if (!logs.length) { el.innerHTML = '<div class="empty-hint">尚無執行紀錄</div>'; return; }
+      if (!logs.length) { el.innerHTML = '<div class="empty-hint">' + (category ? '這個類別目前沒有執行紀錄' : '尚無執行紀錄') + '</div>'; return; }
       el.innerHTML = logs.map(function (l) {
         var cls = l['狀態'] === '成功' ? 'ok' : (l['狀態'] === '失敗' ? 'fail' : 'skip');
         return '<div class="log-item"><span class="log-status ' + cls + '">[' + escapeHtml(l['狀態']) + ']</span> ' +
@@ -2908,6 +2943,8 @@
       }).join('');
     });
   }
+
+  document.getElementById('runLogFilterSelect').addEventListener('change', function () { loadRunLog(); });
 
   var currentFolder = 'archive';
   document.querySelectorAll('.folder-tab-btn').forEach(function (btn) {

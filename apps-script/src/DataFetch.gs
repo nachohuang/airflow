@@ -421,16 +421,24 @@ function recordScheduledStep_(steps, label, status, detail, startedAt) {
   steps.push({ label: label, status: status, detail: detail || '', startedAt: startedAt, endedAt: Date.now() });
 }
 
-/** 供前端「每日自動排程」區塊顯示：最近一次 scheduledDailyFetch() 依序執行的每個步驟
- *  起訖時間、狀態、摘要——不用只看 RunLog 裡零散的幾筆訊息自己拼湊「到底跑到哪一步、
- *  卡在哪裡、花了多久」，一次看到完整時間軸。每次執行都會整包覆蓋，只保留最近一次。 */
-function getLastScheduledRunSteps() {
-  var raw = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN);
+/** lane：'daily'（真正的每日時間觸發器）或 'resume'（使用者手動「從這步重跑」／「立即
+ *  測試整套排程流程」）—— 兩者故意存成完全獨立的兩份紀錄，不會互相覆蓋（見 Config.gs
+ *  LAST_SCHEDULED_RUN_DAILY／LAST_SCHEDULED_RUN_RESUME 的說明）。不帶或帶未知值一律當
+ *  'daily' 處理。 */
+function lastScheduledRunPropKey_(lane) {
+  return lane === 'resume' ? CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN_RESUME : CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN_DAILY;
+}
+
+/** 供前端顯示：最近一次（依 lane 分開）依序執行的每個步驟起訖時間、狀態、摘要——不用只看
+ *  RunLog 裡零散的幾筆訊息自己拼湊「到底跑到哪一步、卡在哪裡、花了多久」，一次看到完整
+ *  時間軸。每次執行都會整包覆蓋同一個 lane 的紀錄，只保留該 lane 最近一次。 */
+function getLastScheduledRunSteps(lane) {
+  var raw = PropertiesService.getScriptProperties().getProperty(lastScheduledRunPropKey_(lane));
   return raw ? JSON.parse(raw) : null;
 }
 
-function saveLastScheduledRunSteps_(steps, overallStatus, summary, startedAt) {
-  PropertiesService.getScriptProperties().setProperty(CONFIG.PROP_KEYS.LAST_SCHEDULED_RUN, JSON.stringify({
+function saveLastScheduledRunSteps_(lane, steps, overallStatus, summary, startedAt) {
+  PropertiesService.getScriptProperties().setProperty(lastScheduledRunPropKey_(lane), JSON.stringify({
     steps: steps, overallStatus: overallStatus, summary: summary, startedAt: startedAt, endedAt: Date.now()
   }));
 }
@@ -549,6 +557,8 @@ function runScheduleStep5_(ctx) {
 var SCHEDULE_STEP_TIME_BUDGET_MS_ = 4.5 * 60 * 1000;
 
 /**
+ * lane：'daily' 或 'resume'（見 getLastScheduledRunSteps 的說明），決定這次執行結果存進
+ * 哪一份「最近一次排程執行」紀錄，兩個 lane 互不覆蓋。
  * 依序執行每日排程步驟，從 startIndex（0-based）開始，每個步驟開始前先檢查時間預算
  * （budgetStartMs 到現在經過的時間）夠不夠，預算用完就停在這裡（不算失敗，只是這次
  * tick 先做到這裡），回傳 nextStepIndex 讓呼叫端（processScheduleResumeJobTick_）知道
@@ -567,7 +577,7 @@ var SCHEDULE_STEP_TIME_BUDGET_MS_ = 4.5 * 60 * 1000;
  * 開始執行的當下」重新算滿滿的 4.5 分鐘，Apps Script 的 6 分鐘上限本來就是「每次執行」
  * 各自獨立算的，不是累加的。
  */
-function runScheduledSteps_(startIndex, previousSteps, overallStartedAt) {
+function runScheduledSteps_(lane, startIndex, previousSteps, overallStartedAt) {
   var tickStart = Date.now();
   var budgetDeadline = tickStart + SCHEDULE_STEP_TIME_BUDGET_MS_;
   var steps = (previousSteps || []).slice(0, startIndex);
@@ -603,7 +613,7 @@ function runScheduledSteps_(startIndex, previousSteps, overallStartedAt) {
     (stillPending ? '（時間預算用完，已自動排下一段繼續）' : '');
   logRun_('每日排程', hasFailed ? '失敗' : (stillPending ? '執行中' : (overallStatus === 'partial' ? '部分成功' : '成功')),
     summary, Math.round((Date.now() - tickStart) / 1000));
-  saveLastScheduledRunSteps_(steps, overallStatus, summary, overallStartedAt || tickStart);
+  saveLastScheduledRunSteps_(lane, steps, overallStatus, summary, overallStartedAt || tickStart);
   return { steps: steps, overallStatus: overallStatus, summary: summary, nextStepIndex: stillPending ? i : null };
 }
 
@@ -627,13 +637,13 @@ function scheduledDailyFetch() {
     var skip = shouldSkipToday_(today);
     if (skip.skip) {
       logRun_('每日排程', '略過', skip.reason, 0);
-      saveLastScheduledRunSteps_([], 'skipped', skip.reason, startTime);
+      saveLastScheduledRunSteps_('daily', [], 'skipped', skip.reason, startTime);
       return;
     }
     startDailyScheduleJob_(0);
   } catch (e) {
     logRun_('每日排程', '失敗', '未預期的例外（步驟外層）：' + String(e.message || e), Math.round((Date.now() - startTime) / 1000));
-    saveLastScheduledRunSteps_([], 'failed', '未預期的例外：' + String(e.message || e), startTime);
+    saveLastScheduledRunSteps_('daily', [], 'failed', '未預期的例外：' + String(e.message || e), startTime);
   }
 }
 
@@ -680,13 +690,15 @@ function startJobLane_(propKey, handlerName, stepIndex) {
   ScriptApp.newTrigger(handlerName).timeBased().after(3000).create();
 }
 
-function processJobLaneTick_(propKey, handlerName) {
+/** lane：'daily' 或 'resume'，決定讀寫哪一份「最近一次排程執行」紀錄（見
+ *  getLastScheduledRunSteps 的說明），跟 propKey/handlerName 一樣是每條車道各自固定的值。 */
+function processJobLaneTick_(propKey, handlerName, lane) {
   deleteJobLaneTriggers_(handlerName);
   var state = getJobLaneState_(propKey);
   if (!state || state.status !== 'running') return;
   try {
-    var last = getLastScheduledRunSteps();
-    var result = runScheduledSteps_(state.stepIndex, last ? last.steps : null, state.overallStartedAt);
+    var last = getLastScheduledRunSteps(lane);
+    var result = runScheduledSteps_(lane, state.stepIndex, last ? last.steps : null, state.overallStartedAt);
     if (result.nextStepIndex !== null) {
       // 時間預算用完，還沒跑到底：更新進度、排下一次 tick 繼續，這次 tick 先不標記成 done。
       state.stepIndex = result.nextStepIndex;
@@ -696,7 +708,15 @@ function processJobLaneTick_(propKey, handlerName) {
       return;
     }
     state.status = result.overallStatus === 'failed' ? 'error' : 'done';
-    if (result.overallStatus === 'failed') state.errorMessage = result.summary;
+    if (result.overallStatus === 'failed') {
+      state.errorMessage = result.summary;
+      // 失敗時也要把 stepIndex 更新成「真正失敗的那一步」（result.steps 硬停時最後一筆
+      // 一定是失敗的那步，見 runScheduledSteps_），不能維持這次 tick 開始時的舊值——
+      // 之前這裡沒有更新，排程佇列卡片的「重新啟動」會從舊的 stepIndex 重來，白白重跑
+      // 已經成功的前面幾步，跟步驟卡片自己的「從這步重跑」（直接用該步驟自己的索引）
+      // 行為不一致，也讓人搞不清楚「重新啟動」到底會從哪裡開始。
+      if (result.steps && result.steps.length > 0) state.stepIndex = result.steps.length - 1;
+    }
   } catch (e) {
     state.status = 'error';
     state.errorMessage = String(e.message || e);
@@ -722,7 +742,7 @@ function clearDailyScheduleJob_() {
 }
 
 function processDailyScheduleJobTick_() {
-  processJobLaneTick_(CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE, 'processDailyScheduleJobTick_');
+  processJobLaneTick_(CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE, 'processDailyScheduleJobTick_', 'daily');
 }
 
 // ---- 'resume' 車道：前端「從這步重跑」／「立即測試整套排程流程」按鈕專用 ----
@@ -743,5 +763,5 @@ function clearScheduleResumeJob_() {
 }
 
 function processScheduleResumeJobTick_() {
-  processJobLaneTick_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, 'processScheduleResumeJobTick_');
+  processJobLaneTick_(CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE, 'processScheduleResumeJobTick_', 'resume');
 }

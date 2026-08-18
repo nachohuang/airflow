@@ -38,7 +38,12 @@ var CONFIG = {
     BACKTEST_JOB_STATE: 'BACKTEST_JOB_STATE', // 「開始回測歷史戰報」背景 job 的目前狀態（見 Backtest.gs）
     AI_DIAGNOSIS_JOB_STATE: 'AI_DIAGNOSIS_JOB_STATE', // AI 診斷/續抱診斷/Top3 背景 job 的目前狀態（見 AiDiagnosis.gs）
     SCREENING_STRATEGY: 'SCREENING_STRATEGY', // 目前生效的「新進場訊號」篩選邏輯版本（見 Analysis.gs SCREENING_STRATEGIES）
-    LAST_SCHEDULED_RUN: 'LAST_SCHEDULED_RUN', // 最近一次「每日自動排程」依序執行的每個步驟起訖時間/狀態（見 DataFetch.gs scheduledDailyFetch）
+    // 「最近一次排程執行」的步驟時間軸，daily（真正的每日時間觸發器）跟 resume（使用者手動
+    // 「從這步重跑」／「立即測試整套排程流程」）故意分開存兩份——早期版本共用同一個鍵，
+    // 使用者手動測試一次就會把「昨晚真正排程到底發生了什麼事」整個蓋掉，事後想診斷真正
+    // 排程的失敗原因反而看不到，只看得到自己剛剛的測試結果（見 DataFetch.gs 的說明）。
+    LAST_SCHEDULED_RUN_DAILY: 'LAST_SCHEDULED_RUN_DAILY',
+    LAST_SCHEDULED_RUN_RESUME: 'LAST_SCHEDULED_RUN_RESUME',
     INDUSTRY_MAP_LAST_REFRESH: 'INDUSTRY_MAP_LAST_REFRESH', // 產業對照表上次重新整理的結果摘要（見 IndustryMap.gs）
     INDUSTRY_MAP_JOB_STATE: 'INDUSTRY_MAP_JOB_STATE', // 「重新整理產業對照表」背景 job 的目前狀態（見 IndustryMap.gs）
     SCHEDULE_RESUME_JOB_STATE: 'SCHEDULE_RESUME_JOB_STATE', // 「每日自動排程」使用者手動「從這步重跑」／「立即測試」背景 job 的目前狀態（見 DataFetch.gs）
