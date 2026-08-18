@@ -846,6 +846,12 @@ function bqFeatureViewRef_(settings) {
   return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_FEATURE_VIEW;
 }
 
+/** runFactorRegression 訓練兩個 label 用的一次性快照表，見 CONFIG.BIGQUERY_FEATURE_SNAPSHOT_TABLE
+ *  的說明。 */
+function bqFeatureSnapshotTableRef_(settings) {
+  return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_FEATURE_SNAPSHOT_TABLE;
+}
+
 function bqExternalTableRef_(settings) {
   return settings.projectId + '.' + settings.dataset + '.' + CONFIG.BIGQUERY_EXTERNAL_TABLE;
 }

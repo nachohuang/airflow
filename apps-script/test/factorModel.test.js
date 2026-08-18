@@ -688,4 +688,37 @@ loadIntoContext('FactorRegression.gs');
   console.log('Test mapStockIdQualityRows_ passed.');
 }
 
+// --- buildFeatureSnapshotSql_ / bqFeatureSnapshotTableRef_：runFactorRegression 對兩個 label
+//    訓練時，把 factor_features view 的結果先凍結成一份快照表共用，避免這段含大量 window
+//    function 的重 SQL 被重新跑兩次（見 CONFIG.BIGQUERY_FEATURE_SNAPSHOT_TABLE 的說明） ---
+{
+  const settings = { projectId: 'proj', dataset: 'ds' };
+  const snapshotRef = context.bqFeatureSnapshotTableRef_(settings);
+  assert.strictEqual(snapshotRef, 'proj.ds.factor_features_snapshot');
+
+  const viewRef = context.bqFeatureViewRef_(settings);
+  const sql = context.buildFeatureSnapshotSql_(viewRef, snapshotRef);
+  assert.ok(sql.indexOf('CREATE OR REPLACE TABLE `proj.ds.factor_features_snapshot`') !== -1,
+    '要用 CREATE OR REPLACE TABLE（固定表名、每次整份覆蓋），不能累積舊版本');
+  assert.ok(sql.indexOf('SELECT * FROM `proj.ds.factor_features`') !== -1, '要整份複製 view 當下的內容');
+  console.log('Test buildFeatureSnapshotSql_ / bqFeatureSnapshotTableRef_ passed.');
+}
+
+// --- trainFactorModel_ 的 sourceRef 參數：確認訓練 SQL 真的是讀傳進來的快照表，不是
+//    悄悄退回去讀 factor_features view（如果退回讀 view，這次優化就白做了，两個 label 訓練
+//    還是會各自重跑一次 view 的 SQL）---
+{
+  const calls = [];
+  context.runBqQuery_ = function (sql, label) { calls.push({ sql: sql, label: label }); return []; };
+  const settings = { projectId: 'proj', dataset: 'ds' };
+  const labelDef = { key: 'return1m', name: '後續1個月報酬率', column: 'label_return_1m' };
+  context.trainFactorModel_(settings, labelDef, 0.05, 'proj.ds.factor_features_snapshot');
+  const trainCall = calls.filter(function (c) { return c.label === 'train_model'; })[0];
+  assert.ok(trainCall, '要有呼叫 train_model 這個步驟');
+  assert.ok(trainCall.sql.indexOf('proj.ds.factor_features_snapshot') !== -1, '訓練 SQL 要讀傳進來的快照表');
+  assert.ok(trainCall.sql.indexOf('FROM `proj.ds.factor_features`\n') === -1 && trainCall.sql.indexOf('FROM `proj.ds.factor_features` ') === -1,
+    '不能悄悄退回去讀 factor_features view 本身');
+  console.log('Test trainFactorModel_ uses the passed-in sourceRef, not the view directly) passed.');
+}
+
 console.log('All FactorRegression/BigQuerySync pure-function tests passed.');

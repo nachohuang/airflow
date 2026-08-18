@@ -329,6 +329,14 @@ function buildIndustryCapitalFlowStatsSql_(viewRef, columnName) {
  *     有硬性上限「必須小於 50」（實測撞過這個限制，錯誤訊息明確要求改用 warm_start 才能
  *     跑更多輪），所以這裡只能設到 49，不能像原本想的設 100。
  */
+/** 把 factor_features view 的結果凍結成一份快照表，供 runFactorRegression 對兩個 label
+ *  訓練時共用，避免這段重 SQL 對同一個 view 跑兩次（見 CONFIG.BIGQUERY_FEATURE_SNAPSHOT_TABLE
+ *  的說明）。固定表名、每次都整份覆蓋，跟 buildMaterializeSql_ 的 CREATE OR REPLACE TABLE
+ *  是同一種模式，不會累積舊版本。 */
+function buildFeatureSnapshotSql_(viewRef, snapshotTableRef) {
+  return 'CREATE OR REPLACE TABLE `' + snapshotTableRef + '` AS SELECT * FROM `' + viewRef + '`';
+}
+
 function buildTrainModelSql_(modelRef, viewRef, labelColumn, featureColumns, l1Reg) {
   var selectCols = featureColumns.concat([labelColumn]).join(', ');
   var notNullConds = featureColumns.concat([labelColumn]).map(function (c) { return c + ' IS NOT NULL'; }).join(' AND ');
@@ -428,11 +436,13 @@ function ensureFeatureView_(settings) {
   runBqQuery_(buildFeatureViewSql_(bqActiveSourceTableRef_(settings), bqIndustryMapTableRef_(settings), bqFeatureViewRef_(settings)), 'feature_view');
 }
 
-function trainFactorModel_(settings, labelDef, l1Reg) {
+/** sourceRef：訓練實際要讀的來源表/view 參照（project.dataset.table 格式字串）。
+ *  runFactorRegression 對兩個 label 訓練時傳入同一份快照表的 ref 讓兩邊共用（見
+ *  buildFeatureSnapshotSql_ 的說明），避免 factor_features view 的特徵工程 SQL 被重跑兩次。 */
+function trainFactorModel_(settings, labelDef, l1Reg, sourceRef) {
   var modelRef = settings.projectId + '.' + settings.dataset + '.' + factorModelName_(labelDef.key);
-  var viewRef = bqFeatureViewRef_(settings);
 
-  runBqQuery_(buildTrainModelSql_(modelRef, viewRef, labelDef.column, CONFIG.FACTOR_CANDIDATE_COLUMNS, l1Reg), 'train_model');
+  runBqQuery_(buildTrainModelSql_(modelRef, sourceRef, labelDef.column, CONFIG.FACTOR_CANDIDATE_COLUMNS, l1Reg), 'train_model');
 
   var evalRows = runBqQuery_(buildEvaluateSql_(modelRef), 'evaluate');
   var weightRows = runBqQuery_(buildWeightsSql_(modelRef), 'weights');
@@ -531,6 +541,12 @@ function logFactorModelRun_(result, timestamp) {
 function runFactorRegression(l1Reg) {
   var settings = requireBigQueryProjectId_();
   ensureFeatureView_(settings);
+  // factor_features 是 view，兩個 label 各自訓練一次模型如果都直接讀 view，BigQuery 會把這段
+  // 含大量 window function 的重 SQL 重新跑兩次。先把 view 結果凍結成一份快照表，兩個 label
+  // 都改讀這張表——同一次函式呼叫內凍結，中途不會有新資料寫入來源表，兩邊訓練資料保證完全
+  // 一致，見 buildFeatureSnapshotSql_ 的說明。
+  var snapshotRef = bqFeatureSnapshotTableRef_(settings);
+  runBqQuery_(buildFeatureSnapshotSql_(bqFeatureViewRef_(settings), snapshotRef), 'feature_snapshot');
 
   var reg = l1Reg || CONFIG.FACTOR_MODEL_L1_REG_DEFAULT;
   var timestamp = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
@@ -539,7 +555,7 @@ function runFactorRegression(l1Reg) {
   Object.keys(CONFIG.FACTOR_LABELS).forEach(function (key) {
     var labelDef = CONFIG.FACTOR_LABELS[key];
     try {
-      var result = trainFactorModel_(settings, labelDef, reg);
+      var result = trainFactorModel_(settings, labelDef, reg, snapshotRef);
       logFactorModelRun_(result, timestamp);
       results.push(result);
     } catch (e) {

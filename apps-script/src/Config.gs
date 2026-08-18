@@ -133,6 +133,16 @@ var CONFIG = {
   // 因為它是比較新鮮的直接寫入），materialized 模式讀的是這個 view，不是單一份表。
   BIGQUERY_UNIFIED_VIEW: 'history_unified',
   BIGQUERY_FEATURE_VIEW: 'factor_features',
+  // factor_features 是 view（SQL 定義），不是實際存資料的表——每次 SELECT FROM 它（含
+  // CREATE MODEL ... AS SELECT FROM）BigQuery 都會重新執行整段特徵工程 SQL。runFactorRegression
+  // 一次要對兩個 label（return_1m／downside_resistance）各訓練一個模型，如果兩邊都直接讀
+  // view，等於這段 48 欄位、含大量 window function 的重 SQL 要跑兩次。改成先把 view 的結果
+  // 物化成這張快照表（CREATE OR REPLACE TABLE，固定表名、每次執行都整份覆蓋，不會累積舊版本
+  // 佔用儲存空間），兩個 label 都改讀這張表，兩邊資料保證完全一致（同一次執行內凍結的快照，
+  // 中途不會有新資料寫入來源表）。只給 runFactorRegression 這個特定情境用；其他直接查
+  // factor_features view 的呼叫端（例如「檢查資料分佈」getIndustryCapitalFlowFactorStats）
+  // 不受影響，繼續讀 view 本身，拿到的一樣是當下最新資料。
+  BIGQUERY_FEATURE_SNAPSHOT_TABLE: 'factor_features_snapshot',
   // 產業對照表同步進 BigQuery 的小型參考表（見 IndustryMap.gs／BigQuerySync.gs），
   // 「重新整理產業對照表」成功後會盡量同步一份到這裡，只有設定了 BigQuery 才會同步，
   // 沒設定完全不影響 Phase 1/2 既有功能（Sheet 版本才是 Phase 1/2 唯一依賴的資料來源）。
