@@ -657,23 +657,6 @@
       }
       listEl.innerHTML = items.map(renderPortfolioCard_).join('');
       wirePortfolioCardEvents_(listEl);
-      // 一次批次查完全部持股的 AI 診斷歷史，不要每檔持股各自呼叫一次 RPC——理由跟「戰報與
-      // 個股」那邊一樣（見 getAiDiagnosisHistoryForCodes 的說明），這是「持股庫存」讀取
-      // 超慢的主因。
-      var holdCodes = items.map(function (it) { return it.code; });
-      callServer('getAiDiagnosisHistoryForCodes', holdCodes).then(function (historyMap) {
-        items.forEach(function (it) {
-          renderAiDiagnosisSectionFromHistory_(document.getElementById('pfHoldResult-' + it.code), historyMap[it.code], '持股續抱診斷', '🧠 持股續抱診斷', function () {
-            return runAiTaskAsJob_('hold', { code: it.code });
-          });
-        });
-      }).catch(function () {
-        items.forEach(function (it) {
-          renderAiDiagnosisSectionFromHistory_(document.getElementById('pfHoldResult-' + it.code), [], '持股續抱診斷', '🧠 持股續抱診斷', function () {
-            return runAiTaskAsJob_('hold', { code: it.code });
-          });
-        });
-      });
     }).catch(function (err) { listEl.innerHTML = errorBox(err); });
   }
 
@@ -711,13 +694,24 @@
       '<button type="button" class="btn-secondary pf-add-lot" data-code="' + escapeHtml(it.code) + '" data-name="' + escapeHtml(it.name) + '">＋ 加碼買進</button>' +
       '<button type="button" class="btn-primary pf-close-position" data-code="' + escapeHtml(it.code) + '" data-name="' + escapeHtml(it.name) + '" data-cost="' + it.cost + '" data-shares="' + it.totalShares + '">💰 標示已賣出/結案</button>' +
       '</div>' +
-      '<div id="pfHoldResult-' + escapeHtml(it.code) + '"></div>' +
+      '<div class="form-actions" style="margin-top:0;">' +
+      '<button type="button" class="btn-secondary pf-hold-diagnosis" data-code="' + escapeHtml(it.code) + '">🧠 持股續抱診斷</button>' +
+      '</div>' +
       '</div>';
   }
 
   function wirePortfolioCardEvents_(listEl) {
+    // isHolding=true：持股庫存點進去的股票詳情 modal 要多顯示一段「持股續抱診斷」（見
+    // renderStockDetailInto_ 的說明），跟「戰報與個股」／搜尋點進去的股票詳情（不是持股，
+    // 不該有續抱診斷這個選項）分開。
     listEl.querySelectorAll('.stock-card-open').forEach(function (headEl) {
-      headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code')); });
+      headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code'), true); });
+    });
+    listEl.querySelectorAll('.pf-hold-diagnosis').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        openStockDetailModal_(btn.getAttribute('data-code'), true);
+      });
     });
     listEl.querySelectorAll('.pf-add-lot').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
@@ -941,7 +935,13 @@
     '不看公司體質、不看持股成本、不是操作建議，資料來源是證交所看盤系統的即時報價端點，' +
     '只有交易時間內才查得到，且不是正式文件化的公開 API，沒有官方保證格式不會改版。';
 
-  function renderStockDetailInto_(containerEl, prefix, data) {
+  /** isHolding：見 openStockDetailModal_ 的說明，只有從「持股庫存」點進來才會是 true，
+   *  多顯示一段「持股續抱診斷」（跟「AI 深度診斷」是不同的診斷類型：深度診斷答「值不值得
+   *  買」，續抱診斷答「我已經持有，成本/損益考量下該怎麼辦」，各自對應不同的
+   *  AI_*_SYSTEM_PROMPT，見 AiDiagnosis.gs）。兩段共用同一次 getAiDiagnosisHistoryForCode
+   *  查詢結果（該次查詢本來就會回傳這檔股票全部診斷類型的歷史），不用為了續抱診斷再多打
+   *  一次 RPC。 */
+  function renderStockDetailInto_(containerEl, prefix, data, isHolding) {
     if (!data.series.length) {
       containerEl.innerHTML = '<div class="empty-hint">目前沒有 ' + escapeHtml(data.code) + ' 的歷史資料</div>';
       return;
@@ -964,6 +964,11 @@
       '<div class="form-actions" style="margin-bottom:2px;">' +
       '<button type="button" class="btn-secondary" id="quickAddBtn-' + prefix + '">+ 快捷加入持股</button>' +
       '</div>' +
+      (isHolding
+        ? '<div class="chart-card"><h4>🛡️ 持股續抱診斷</h4>' +
+          '<div class="meta-bar" style="margin-bottom:6px;">針對「我目前實際持有這筆部位」判斷接下來該續抱、加碼、減碼還是停損——跟下面的「AI 深度診斷」（值不值得買）是不同的診斷類型。</div>' +
+          '<div id="stockHoldAiSection-' + prefix + '"></div></div>'
+        : '') +
       '<div class="chart-card"><h4>AI 深度診斷</h4>' +
       '<div id="stockAiSection-' + prefix + '"></div>' +
       '<div id="stockAiHistory-' + prefix + '" style="margin-top:8px;"></div></div>';
@@ -971,19 +976,26 @@
     renderPriceChartInto_(priceCanvasId, prefix, data.series);
     renderInstChartInto_(instCanvasId, prefix, data.series);
     wireRealtimeQuoteBtn_(prefix, data.code);
-    // 下面「AI 深度診斷」跟「更早的診斷紀錄」兩個區塊都是同一檔股票（data.code）的診斷
-    // 歷史，只是一個取最新一筆、一個取其餘的——原本各自獨立呼叫 initAiDiagnosisSection_／
-    // loadOlderAiDiagnosisHistoryInto_，等於同一檔股票的歷史被整份表格掃描了兩次，改成
-    // 只查一次、兩邊共用同一份結果。
+    // 「AI 深度診斷」「更早的診斷紀錄」「持股續抱診斷」（isHolding 時才有）三個區塊都是
+    // 同一檔股票（data.code）的診斷歷史，只是各自取不同診斷類型/新舊——原本前兩者各自
+    // 獨立呼叫 initAiDiagnosisSection_／loadOlderAiDiagnosisHistoryInto_，等於同一檔股票
+    // 的歷史被整份表格掃描了兩次，改成只查一次、三邊共用同一份結果（見
+    // getAiDiagnosisHistoryForCode 一次會回傳這檔股票全部診斷類型的歷史，不是只有
+    // 「深度診斷」）。
     var stockAiSectionEl = document.getElementById('stockAiSection-' + prefix);
     var stockAiHistoryEl = document.getElementById('stockAiHistory-' + prefix);
+    var stockHoldAiSectionEl = isHolding ? document.getElementById('stockHoldAiSection-' + prefix) : null;
     stockAiSectionEl.innerHTML = '<div class="loading">載入診斷紀錄中...</div>';
+    if (stockHoldAiSectionEl) stockHoldAiSectionEl.innerHTML = '<div class="loading">載入診斷紀錄中...</div>';
     var diagnosisRunFn = function () { return runAiTaskAsJob_('diagnosis', { codes: [data.code] }).then(function (results) { return results[0]; }); };
+    var holdDiagnosisRunFn = function () { return runAiTaskAsJob_('hold', { code: data.code }); };
     callServer('getAiDiagnosisHistoryForCode', data.code).then(function (history) {
       renderAiDiagnosisSectionFromHistory_(stockAiSectionEl, history, '深度診斷', '🧠 針對 ' + data.code + ' 跑一次 AI 診斷', diagnosisRunFn);
       renderOlderAiDiagnosisHistoryInto_(stockAiHistoryEl, history, '深度診斷');
+      if (stockHoldAiSectionEl) renderAiDiagnosisSectionFromHistory_(stockHoldAiSectionEl, history, '持股續抱診斷', '🧠 持股續抱診斷', holdDiagnosisRunFn);
     }).catch(function () {
       renderAiDiagnosisSectionFromHistory_(stockAiSectionEl, [], '深度診斷', '🧠 針對 ' + data.code + ' 跑一次 AI 診斷', diagnosisRunFn);
+      if (stockHoldAiSectionEl) renderAiDiagnosisSectionFromHistory_(stockHoldAiSectionEl, [], '持股續抱診斷', '🧠 持股續抱診斷', holdDiagnosisRunFn);
     });
     document.getElementById('quickAddBtn-' + prefix).addEventListener('click', function () {
       openQuickAddPortfolio_(data.code, data.name, data.series);
@@ -1121,13 +1133,17 @@
   var stockDetailSheetBody = document.getElementById('stockDetailSheetBody');
   var stockDetailSheetTitle = document.getElementById('stockDetailSheetTitle');
 
-  function openStockDetailModal_(code) {
+  /** isHolding：只有從「持股庫存」點進來才會帶 true，額外顯示一段「持股續抱診斷」（見
+   *  renderStockDetailInto_ 的說明）——從「戰報與個股」卡片或搜尋點進來的股票不一定是
+   *  持有中，預設不顯示，避免點進去顯示的續抱診斷按鈕實際按下去卻因為「目前沒有持有」
+   *  被伺服器拒絕。 */
+  function openStockDetailModal_(code, isHolding) {
     stockDetailSheetTitle.textContent = code;
     stockDetailSheetBody.innerHTML = '<div class="loading">載入走勢中...</div>';
     openSheet_(stockDetailSheet);
     return callServer('getStockTimeSeries', code).then(function (data) {
       stockDetailSheetTitle.textContent = data.code + ' ' + data.name;
-      renderStockDetailInto_(stockDetailSheetBody, 'modal', data);
+      renderStockDetailInto_(stockDetailSheetBody, 'modal', data, isHolding);
     }).catch(function (err) { stockDetailSheetBody.innerHTML = errorBox(err); });
   }
   document.getElementById('stockDetailSheetCloseBtn').addEventListener('click', function () { closeSheet_(stockDetailSheet); });
