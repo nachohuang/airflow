@@ -1017,13 +1017,33 @@
       var tableRows = askRows.concat(bidRows).map(function (r) {
         return '<tr><td>' + r.label + '</td><td>' + fmtNum(r.price, 2) + '</td><td>' + fmtNum(r.volume, 0) + '</td></tr>';
       }).join('');
+      // 成交價欄位：latestPrice 是 null（證交所這個時間點還沒有明確成交價可以揭示）時，
+      // 如果後端有算出估算值（priceEstimate，見 Realtime.gs computeBookSpreadAndMidpoint_
+      // 的說明：用買一/賣一均價推算），改顯示這個估算值，但一定要清楚標明「(估算)」跟
+      // 推算方式，不能讓使用者誤以為是官方揭示的成交價；兩者都沒有才顯示「-」。
+      var priceHtml = q.latestPrice !== null
+        ? fmtNum(q.latestPrice, 2)
+        : (q.priceEstimate !== null
+          ? fmtNum(q.priceEstimate, 2) + '<span style="color:var(--text-muted);font-weight:400;">（估算，取買一/賣一均價，非官方成交價）</span>'
+          : '-');
+      // 今天開高低：後端本來就有算（拿來算「現價在今天區間相對位置」用），只是原本沒有
+      // 顯示在畫面上——不含任何預測，單純把已經有的客觀資料呈現出來，讓使用者自己判斷
+      // 現在這個價位落在今天區間的哪裡。
+      var rangeHtml = (q.openPrice !== null || q.highPrice !== null || q.lowPrice !== null)
+        ? '<div class="meta-bar">今日開 ' + fmtNum(q.openPrice, 2) + '　高 ' + fmtNum(q.highPrice, 2) + '　低 ' + fmtNum(q.lowPrice, 2) + '</div>'
+        : '';
+      // 價差／委買委賣合計量：量越薄、價差越大，代表這份買賣力道評估越容易被單一大單
+      // 打破，可信度越低，讓使用者自己判斷這次的「多空不明顯／偏多／偏空」有多穩。
+      var depthHtml = '<div class="meta-bar">價差 ' + fmtNum(q.spread, 2) +
+        '　五檔合計　買 ' + fmtNum(q.buyPressure, 0) + '　賣 ' + fmtNum(q.sellPressure, 0) + '</div>';
       bodyEl.innerHTML =
         '<div style="font-size:20px; font-weight:700; color:' + verdictColor + ';">' + escapeHtml(v.label || '') +
         (v.score === null || v.score === undefined ? '' : '　' + fmtNum(v.score, 1) + ' 分') + '</div>' +
         '<div class="meta-bar" style="margin:2px 0 8px;">' + escapeHtml(v.detail || '') +
         (q.buyRatio === null ? '' : '　委買力道 ' + fmtNum(q.buyRatio * 100, 1) + '%') + '</div>' +
-        '<div class="meta-bar">成交價 ' + fmtNum(q.latestPrice, 2) + '　累積成交量 ' + fmtNum(q.accumulatedVolume, 0) +
+        '<div class="meta-bar">成交價 ' + priceHtml + '　累積成交量 ' + fmtNum(q.accumulatedVolume, 0) +
         (q.timestamp ? '　' + new Date(q.timestamp).toLocaleTimeString('zh-TW') : '') + '</div>' +
+        rangeHtml + depthHtml +
         '<table class="simple-table" style="margin-top:6px;"><thead><tr><th>檔位</th><th>價格</th><th>量</th></tr></thead><tbody>' + tableRows + '</tbody></table>' +
         '<div class="form-actions" style="margin-top:6px; margin-bottom:0;">' +
         '<button type="button" class="btn-secondary" id="rtQuoteBtn-' + prefix + '">🔄 重新查詢</button></div>';

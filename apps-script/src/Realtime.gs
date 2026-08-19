@@ -70,6 +70,25 @@ function computeBuySellVerdict_(buyRatio, latestPrice, highPrice, lowPrice) {
 }
 
 /**
+ * 純函式：從五檔委買委賣算出「價差」（賣一－買一）跟「盤口中間價估算」——證交所有時候
+ * 這個時間點還沒有明確的最近成交價可以揭示（例如剛好卡在集合競價、還沒有明確一筆成交
+ * 記錄回傳），這時候 getRealtimeQuote 的 latestPrice 會是 null，畫面上原本就只能顯示
+ * 「成交價 -」，這裡算一個「買一/賣一均價」當備援參考值——這是我們自己用盤口價位反推
+ * 出來的估計值，不是證交所揭示的真正成交價，呼叫端顯示時一定要清楚標明「估算」，不能
+ * 跟真正的成交價混在一起看，避免使用者誤以為這是官方數字。任一邊沒有掛單（例如漲跌停
+ * 鎖死只剩單邊）就回傳 null，不硬算一個沒有意義的價差/中間價。
+ */
+function computeBookSpreadAndMidpoint_(bidLevels, askLevels) {
+  var bestBid = (bidLevels && bidLevels.length && bidLevels[0].price) ? bidLevels[0].price : null;
+  var bestAsk = (askLevels && askLevels.length && askLevels[0].price) ? askLevels[0].price : null;
+  if (bestBid === null || bestAsk === null) return { spread: null, midpointEstimate: null };
+  return {
+    spread: round_(bestAsk - bestBid, 2),
+    midpointEstimate: round_((bestAsk + bestBid) / 2, 2)
+  };
+}
+
+/**
  * 前端「個股詳情」畫面「查詢即時內外盤」按鈕呼叫。code 是 4 碼股票代號，不先判斷是上市
  * 還是上櫃，兩種前綴（tse_/otc_）用 "|" 合併成一次查詢，MIS 回傳的 msgArray 只會有真正
  * 存在的那一筆（同一個代號不可能同時是上市又是上櫃）。
@@ -129,12 +148,19 @@ function getRealtimeQuote(code) {
   var highPrice = q.h ? Number(q.h) : null;
   var lowPrice = q.l ? Number(q.l) : null;
   var verdict = computeBuySellVerdict_(buyRatio, latestPrice, highPrice, lowPrice);
+  var spreadInfo = computeBookSpreadAndMidpoint_(bidLevels, askLevels);
 
   return {
     code: c,
     ok: true,
     name: q.n || '',
     latestPrice: latestPrice,
+    // latestPrice 是 null（證交所這個時間點還沒有明確成交價可以揭示）時的備援參考值，
+    // 見 computeBookSpreadAndMidpoint_ 的說明：這是我們自己用買一/賣一均價推算的估計值，
+    // 不是官方成交價，前端顯示時一定要標明「估算」。latestPrice 有值時完全不需要它，
+    // 固定回傳 null，避免呼叫端不小心把估算值當成真正成交價使用。
+    priceEstimate: latestPrice === null ? spreadInfo.midpointEstimate : null,
+    spread: spreadInfo.spread,
     openPrice: q.o ? Number(q.o) : null,
     highPrice: highPrice,
     lowPrice: lowPrice,

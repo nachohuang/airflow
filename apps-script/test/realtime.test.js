@@ -98,4 +98,77 @@ loadIntoContext('Realtime.gs');
   console.log('Test 7 (cookie fetch fails but main quote fetch still succeeds) passed.');
 }
 
+// --- 8. computeBookSpreadAndMidpoint_：純函式，從五檔委買委賣算價差跟「買一/賣一均價」
+//    估算值——後者只在證交所沒有明確成交價可以揭示時當備援參考，不是真正的成交價 ---
+{
+  const r = context.computeBookSpreadAndMidpoint_(
+    [{ price: 68.6, volume: 14 }, { price: 68.5, volume: 11 }],
+    [{ price: 68.7, volume: 5 }, { price: 68.8, volume: 24 }]
+  );
+  assert.ok(Math.abs(r.spread - 0.1) < 1e-9, 'spread 應該是賣一(68.7) - 買一(68.6) = 0.1，got ' + r.spread);
+  assert.ok(Math.abs(r.midpointEstimate - 68.65) < 1e-9, 'midpointEstimate 應該是 (68.7+68.6)/2 = 68.65，got ' + r.midpointEstimate);
+
+  const emptyBid = context.computeBookSpreadAndMidpoint_([], [{ price: 68.7, volume: 5 }]);
+  assert.strictEqual(emptyBid.spread, null, '買方完全沒有掛單（例如跌停鎖死）不該硬算出一個沒意義的價差');
+  assert.strictEqual(emptyBid.midpointEstimate, null);
+
+  const emptyBoth = context.computeBookSpreadAndMidpoint_([], []);
+  assert.strictEqual(emptyBoth.spread, null);
+  assert.strictEqual(emptyBoth.midpointEstimate, null);
+  console.log('Test 8 (computeBookSpreadAndMidpoint_) passed.');
+}
+
+// --- 9. getRealtimeQuote：證交所有明確成交價（z 不是 '-'）時，priceEstimate 一定要是
+//    null——不能讓備援估算值跟真正的成交價同時存在，避免呼叫端搞混哪個才是官方數字 ---
+{
+  fetchImpl = function (url) {
+    if (url.indexOf('index.jsp') !== -1) throw new Error('無法開啟網址：https://mis.twse.com.tw/stock/index.jsp');
+    return {
+      getAllHeaders: function () { return {}; },
+      getResponseCode: function () { return 200; },
+      getContentText: function () {
+        return JSON.stringify({
+          msgArray: [{
+            n: '台積電', z: '600', o: '590', h: '605', l: '585', v: '12345', tlong: '1700000000000',
+            b: '599.00_598.00_', g: '10_8_', a: '600.00_601.00_', f: '5_3_'
+          }]
+        });
+      }
+    };
+  };
+  const q = context.getRealtimeQuote('2330');
+  assert.strictEqual(q.latestPrice, 600);
+  assert.strictEqual(q.priceEstimate, null, '有真正的成交價時，priceEstimate 要是 null，不能兩個都有值');
+  assert.ok(Math.abs(q.spread - 1) < 1e-9, '價差應該是賣一(600) - 買一(599) = 1');
+  assert.strictEqual(q.openPrice, 590);
+  assert.strictEqual(q.highPrice, 605);
+  assert.strictEqual(q.lowPrice, 585);
+  console.log('Test 9 (getRealtimeQuote with real latestPrice -> priceEstimate stays null) passed.');
+}
+
+// --- 10. getRealtimeQuote：證交所沒有明確成交價（z 是 '-'）時，priceEstimate 要用買一/
+//    賣一均價推算出一個備援值，讓畫面不用整個空著 ---
+{
+  fetchImpl = function (url) {
+    if (url.indexOf('index.jsp') !== -1) throw new Error('無法開啟網址：https://mis.twse.com.tw/stock/index.jsp');
+    return {
+      getAllHeaders: function () { return {}; },
+      getResponseCode: function () { return 200; },
+      getContentText: function () {
+        return JSON.stringify({
+          msgArray: [{
+            n: '某股', z: '-', o: '', h: '', l: '', v: '349', tlong: '1700000000000',
+            b: '68.60_68.50_', g: '14_11_', a: '68.70_68.80_', f: '5_24_'
+          }]
+        });
+      }
+    };
+  };
+  const q = context.getRealtimeQuote('9910');
+  assert.strictEqual(q.latestPrice, null, 'z 是 "-" 時 latestPrice 要是 null');
+  assert.ok(q.priceEstimate !== null, '沒有真正成交價時，priceEstimate 要有備援估算值可以顯示');
+  assert.ok(Math.abs(q.priceEstimate - 68.65) < 1e-9, '應該是買一(68.6)/賣一(68.7)均價 = 68.65，got ' + q.priceEstimate);
+  console.log('Test 10 (getRealtimeQuote with missing latestPrice -> priceEstimate falls back to bid/ask midpoint) passed.');
+}
+
 console.log('All Realtime.gs tests passed.');
