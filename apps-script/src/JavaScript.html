@@ -326,30 +326,21 @@
           predictedLine +
           '<div class="form-actions">' +
           '<a class="stock-card-link" href="' + escapeHtml(r['監控連結']) + '" target="_blank" rel="noopener">Goodinfo ↗</a>' +
+          '<button type="button" class="btn-secondary stock-card-ai-btn" data-code="' + escapeHtml(code) + '">🧠 AI 深度診斷</button>' +
           '</div>' +
-          '<div id="aiResult-' + escapeHtml(code) + '"></div>' +
           '</div>';
       }).join('');
       listEl.querySelectorAll('.stock-card-open').forEach(function (headEl) {
         headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code')); });
       });
-      // 一次批次查完當天全部訊號股票的 AI 診斷歷史，不要每檔股票各自呼叫一次 RPC——訊號
-      // 一多（可能好幾十檔）會變成好幾十次「整份表格掃描」同時發生，是這個頁面讀取超慢的
-      // 主因（見 getAiDiagnosisHistoryForCodes 的說明）。
-      var reportCodes = result.report.map(function (r) { return r['證券代號']; });
-      callServer('getAiDiagnosisHistoryForCodes', reportCodes).then(function (historyMap) {
-        result.report.forEach(function (r) {
-          var code = r['證券代號'];
-          renderAiDiagnosisSectionFromHistory_(document.getElementById('aiResult-' + code), historyMap[code], '深度診斷', '🧠 AI 深度診斷', function () {
-            return runAiTaskAsJob_('diagnosis', { codes: [code] }).then(function (results) { return results[0]; });
-          });
-        });
-      }).catch(function () {
-        result.report.forEach(function (r) {
-          var code = r['證券代號'];
-          renderAiDiagnosisSectionFromHistory_(document.getElementById('aiResult-' + code), [], '深度診斷', '🧠 AI 深度診斷', function () {
-            return runAiTaskAsJob_('diagnosis', { codes: [code] }).then(function (results) { return results[0]; });
-          });
+      // 「🧠 AI 深度診斷」按鈕直接開股票詳情，完整診斷報告（含快取歷史）只在那裡顯示，
+      // 卡片本身維持精簡——過去卡片會依「有沒有快取結果」整段內嵌完整報告，同一份清單裡
+      // 有跑過診斷跟沒跑過的卡片長得完全不一樣、版面高度落差很大，跟持股庫存卡片同樣的
+      // 問題，這裡比照同一套做法處理（見 renderPortfolioCard_ 的說明）。
+      listEl.querySelectorAll('.stock-card-ai-btn').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openStockDetailModal_(btn.getAttribute('data-code'));
         });
       });
       initTopPicksSection_(document.getElementById('aiTopPicksSection'));
