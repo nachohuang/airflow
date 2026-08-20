@@ -541,4 +541,61 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   console.log('Test 18 (getLatestReportCandidates_) passed.');
 }
 
+// --- 19. runAiDiagnosis：budgetDeadline 已經過期時，逐檔迴圈要在開始「第一檔」之前就
+//    收手，全部代號標記成 skipped 正常回傳（不拋例外），且不該對任何一檔實際呼叫 Goodinfo／
+//    LLM API——這是 2026-08-20 線上事故的修復：每日自動 AI 診斷對好幾檔股票各自呼叫外部
+//    AI API，單一步驟內部撞上 Apps Script 6 分鐘硬上限，job 卡片卡在「執行中」不會顯示
+//    完成，資料本身雖然沒有遺失（每檔完成就立刻寫進表），但排程的「完成」狀態永遠沒機會
+//    被儲存。這裡驗證：deadline 已過期時，連第一檔都不該真的發送外部請求。 ---
+{
+  fakeSheets = {};
+  fetchCallLog.length = 0;
+  var urls4 = context.TWSE_OFFICIAL_FINANCIALS_DATASETS_.map(function (d) { return d.url; });
+  fetchImpl = function (url) {
+    // 批次資料集的前置抓取是迴圈「外」一次性的準備工作（見 runAiDiagnosis 內的說明），不是
+    // 逐檔迴圈本身，budgetDeadline 不影響它，這裡讓它正常回應空陣列即可；如果 Goodinfo 或
+    // LLM API 這幾支被呼叫到，代表 skip 邏輯沒生效，直接丟例外讓測試失敗。
+    if (urls4.indexOf(url) !== -1) {
+      return { getResponseCode: function () { return 200; }, getContentText: function () { return JSON.stringify([]); } };
+    }
+    throw new Error('不該呼叫到這裡（Goodinfo 或 LLM API）——budgetDeadline 已過期，本次不該對任何一檔股票發送外部請求');
+  };
+
+  var pastDeadline = Date.now() - 1000;
+  var results = context.runAiDiagnosis(['2330', '2603', '0330'], pastDeadline);
+
+  assert.strictEqual(results.length, 3, '每個代號都要有對應結果，不能整批漏掉');
+  results.forEach(function (r) {
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.skipped, true, 'budgetDeadline 已過期時，每一檔都要標記成 skipped');
+  });
+  console.log('Test 19 (runAiDiagnosis stops before an already-past budgetDeadline, skips remaining codes without hitting external APIs) passed.');
+}
+
+// --- 20. runAiDiagnosis：不帶 budgetDeadline（例如手動從「AI 診斷」按鈕觸發的
+//    processAiDiagnosisJobTick_，維持原本行為）時，不該受任何預算檢查影響——這裡只驗證
+//    skip 檢查本身不會誤觸發（沒帶 deadline 時 Date.now() >= undefined 永遠是 false），
+//    不用真的走到 LLM 呼叫，用「找不到戰報資料」這個既有的錯誤路徑確認每一檔都有被
+//    實際嘗試處理過（不是被 skip 掉），而不是因為預算檢查誤判而整批被跳過 ---
+{
+  fakeSheets = {};
+  fetchCallLog.length = 0;
+  var urls5 = context.TWSE_OFFICIAL_FINANCIALS_DATASETS_.map(function (d) { return d.url; });
+  fetchImpl = function (url) {
+    if (urls5.indexOf(url) !== -1) {
+      return { getResponseCode: function () { return 200; }, getContentText: function () { return JSON.stringify([]); } };
+    }
+    throw new Error('這個測試案例不該打到 Goodinfo／LLM API（Reports 表是空的，會在拿到戰報資料列之前就先失敗）');
+  };
+
+  var results = context.runAiDiagnosis(['2330', '2603'], undefined);
+  assert.strictEqual(results.length, 2);
+  results.forEach(function (r) {
+    assert.strictEqual(r.ok, false);
+    assert.ok(!r.skipped, '沒帶 budgetDeadline 時，不該有任何一檔被標記成 skipped（要是真的被嘗試過、只是因為查無戰報資料才失敗）');
+    assert.ok(r.error.indexOf('找不到這檔股票的戰報資料') !== -1, 'got: ' + r.error);
+  });
+  console.log('Test 20 (runAiDiagnosis without budgetDeadline is unaffected by the skip check) passed.');
+}
+
 console.log('All AiDiagnosis.gs tests passed.');

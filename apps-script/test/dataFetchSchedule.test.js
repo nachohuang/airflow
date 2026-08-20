@@ -103,6 +103,31 @@ function makeCallSpy() {
   console.log('Test runScheduledSteps_ (all steps succeed) passed.');
 }
 
+// --- runScheduledSteps_: ctx.budgetDeadline 要傳到 runScheduleStep5_ -> runDailyAiDiagnosisForTopPicks
+// ——這是 2026-08-20 線上事故的修復：每日自動 AI 診斷對好幾檔候選股票各自呼叫外部 AI API，
+// 單一步驟內部有機會在還沒輪到「跨步驟之間」下一次預算檢查之前，就先撞上 Apps Script 6 分鐘
+// 的硬性執行上限，job 卡片卡在「執行中」、「完成」狀態永遠沒機會被存檔。修法是把這次 tick
+// 自己算出來的 budgetDeadline 透過 ctx 一路傳進 runDailyAiDiagnosisForTopPicks（再往下傳給
+// runAiDiagnosis 的逐檔迴圈自己檢查），這裡驗證傳進去的值就是這次呼叫當下算出來的截止時間點
+// （tickStart + 4.5 分鐘），不是 undefined、也不是隨便一個值。 ---
+{
+  resetFakeProps();
+  const calls = makeCallSpy();
+  let capturedBudgetDeadline = null;
+  const beforeCall = Date.now();
+  context.runDailyAiDiagnosisForTopPicks = function (budgetDeadline) {
+    calls.step5++;
+    capturedBudgetDeadline = budgetDeadline;
+    return { skipped: true, reason: '未開啟每日自動 AI 診斷' };
+  };
+  context.runScheduledSteps_('daily', 0, null);
+  const afterCall = Date.now();
+  assert.strictEqual(typeof capturedBudgetDeadline, 'number', 'budgetDeadline 應該要傳進 runDailyAiDiagnosisForTopPicks，不能是 undefined');
+  assert.ok(capturedBudgetDeadline >= beforeCall + 4 * 60 * 1000 && capturedBudgetDeadline <= afterCall + 4.5 * 60 * 1000,
+    'budgetDeadline 應該約等於這次呼叫當下 + 4.5 分鐘，got ' + capturedBudgetDeadline + '，呼叫區間 [' + beforeCall + ', ' + afterCall + ']');
+  console.log('Test runScheduledSteps_ (budgetDeadline threaded through ctx into runDailyAiDiagnosisForTopPicks) passed.');
+}
+
 // --- runScheduledSteps_: 第 1 步丟例外 -> 整個硬停，後面 4 步都不跑 ---
 {
   resetFakeProps();

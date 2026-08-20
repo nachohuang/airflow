@@ -678,8 +678,16 @@ function getAiDiagnosisHistoryForCodes_(rows, codes) {
 /**
  * 對一批股票代號跑 AI 深度診斷（會消耗 Claude API 額度）。
  * codes 可以是單一代號字串，也可以是代號陣列。
+ * budgetDeadline（選填，epoch ms）：每日排程呼叫時會傳入（見 runScheduleStep5_），
+ * 每一檔開始前先檢查還有沒有預算，用完就提早收手、把剩下的代號標記成「本次先跳過」正常
+ * 回傳——不要整個依賴 runScheduledSteps_ 的「跨步驟之間」檢查，因為這個迴圈一次要對好幾檔
+ * 股票各自呼叫外部 AI API，單獨就有機會在還沒輪到下一次跨步驟檢查之前，先撞上 Apps Script
+ * 6 分鐘的硬性執行上限（撞到的話是被平台直接砍斷，不是拋例外，前面已經寫進表的診斷不會
+ * 遺失，但這次 tick 沒機會走到最後儲存「完成」狀態，job 卡片會一直顯示執行中）。手動從
+ * 「AI 診斷」按鈕觸發的單次/少量診斷（processAiDiagnosisJobTick_）不傳這個參數，維持原本
+ * 行為，不受影響。
  */
-function runAiDiagnosis(codes) {
+function runAiDiagnosis(codes, budgetDeadline) {
   if (!Array.isArray(codes)) codes = [codes];
   var timestampLabel = '台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm');
   var results = [];
@@ -694,7 +702,12 @@ function runAiDiagnosis(codes) {
   var reportRowByCode = codes.length > 0 ? getLatestReportRowsForCodes_(codes) : {};
   var upsertAiDiagnosis_ = codes.length > 0 ? createAiDiagnosisBatchUpserter_() : null;
 
+  var skippedCodes = [];
   codes.forEach(function (rawCode) {
+    if (budgetDeadline && Date.now() >= budgetDeadline) {
+      skippedCodes.push(zfill4(String(rawCode).trim()));
+      return;
+    }
     var code = zfill4(String(rawCode).trim());
     var startTime = Date.now();
     try {
@@ -744,6 +757,14 @@ function runAiDiagnosis(codes) {
       results.push({ ok: false, code: code, error: String(e.message || e) });
     }
   });
+
+  if (skippedCodes.length > 0) {
+    logRun_('AI診斷', '部分成功',
+      '時間預算用完，以下 ' + skippedCodes.length + ' 檔本次先跳過（下次排程會重新掃描候選名單，不保證跳過的一定是同一批）：' + skippedCodes.join('、'), 0);
+    skippedCodes.forEach(function (code) {
+      results.push({ ok: false, code: code, skipped: true, error: '時間預算用完，本次先跳過' });
+    });
+  }
 
   return results;
 }
@@ -912,8 +933,12 @@ function runPortfolioHoldDiagnosis(code) {
  *
  * 這兩件事分開包 try/catch，其中一個失敗（例如候選名單解析不出代號、Top3 掃描時 API
  * 逾時）不影響另一個照常執行完成。
+ *
+ * budgetDeadline（選填，epoch ms）：每日排程呼叫時會傳入（見 runScheduleStep5_），往下傳給
+ * runAiDiagnosis 的逐檔迴圈，也用來決定要不要索性跳過 Top3 橫向比較——理由見 runAiDiagnosis
+ * 的說明。
  */
-function runDailyAiDiagnosisForTopPicks() {
+function runDailyAiDiagnosisForTopPicks(budgetDeadline) {
   var settings = getAiSettings();
   if (!settings.dailyEnabled) return { skipped: true, reason: '每日自動 AI 診斷未開啟' };
   var hasKey = settings.provider === 'gemini' ? settings.hasGeminiKey : settings.hasClaudeKey;
@@ -934,17 +959,21 @@ function runDailyAiDiagnosisForTopPicks() {
     if (codes.length === 0) {
       shortlistResult.error = '無法從 AI 候選名單中取出股票代號';
     } else {
-      shortlistResult = { ok: true, shortlistText: shortlist.text, shortlistCost: shortlist.cost, results: runAiDiagnosis(codes) };
+      shortlistResult = { ok: true, shortlistText: shortlist.text, shortlistCost: shortlist.cost, results: runAiDiagnosis(codes, budgetDeadline) };
     }
   } catch (e) {
     shortlistResult.error = String(e.message || e);
   }
 
   var topPicksResult = { ok: false, error: null };
-  try {
-    topPicksResult = { ok: true, result: runAiTopPicks(sharedCandidates) };
-  } catch (e) {
-    topPicksResult.error = String(e.message || e);
+  if (budgetDeadline && Date.now() >= budgetDeadline) {
+    topPicksResult.error = '時間預算用完，本次先跳過，下次排程再試';
+  } else {
+    try {
+      topPicksResult = { ok: true, result: runAiTopPicks(sharedCandidates) };
+    } catch (e) {
+      topPicksResult.error = String(e.message || e);
+    }
   }
 
   return { skipped: false, shortlist: shortlistResult, topPicks: topPicksResult };

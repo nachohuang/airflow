@@ -531,9 +531,11 @@ function runScheduleStep4_(ctx) {
   return { status: 'success', detail: detail };
 }
 
-/** 每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較）。 */
+/** 每日自動 AI 診斷（候選名單深度診斷 + Top3 橫向比較）。傳入 ctx.budgetDeadline 讓內部
+ *  逐檔迴圈知道還剩多少時間預算，快用完時提早收手、正常回傳，不要讓 Apps Script 6 分鐘
+ *  硬上限在迴圈跑到一半時直接砍斷執行（見 SCHEDULE_STEP_TIME_BUDGET_MS_ 的說明）。 */
 function runScheduleStep5_(ctx) {
-  var aiResult = runDailyAiDiagnosisForTopPicks();
+  var aiResult = runDailyAiDiagnosisForTopPicks(ctx.budgetDeadline);
   if (aiResult.skipped) return { status: 'skipped', detail: aiResult.reason };
   var detail = '候選名單深度診斷：' + (aiResult.shortlist.ok ? '成功' : '失敗（' + aiResult.shortlist.error + '）') +
     '　Top3 橫向比較：' + (aiResult.topPicks.ok ? '成功' : '失敗（' + aiResult.topPicks.error + '）');
@@ -548,11 +550,16 @@ function runScheduleStep5_(ctx) {
  * 「最近一次排程執行」永遠是 null——不是沒被觸發，是每次真的觸發了，卻都在寫入執行紀錄
  * 之前就被平台砍斷，saveLastScheduledRunSteps_ 永遠沒有機會被呼叫到。
  * 所以留 1.5 分鐘緩衝、只給 4.5 分鐘時間預算，跟其他背景 job（補抓區間、AI 診斷…）的
- * 4.5 分鐘預算是同一個保守值。這個預算是在「跨步驟之間」檢查（每個步驟開始前才看還有沒有
- * 預算），不是拆到每個步驟內部——單一步驟本身（尤其補抓資料如果缺口比較大、或 AI 診斷
- * 要跑好幾檔股票）理論上還是有機會單獨超過預算，但正常情況下（一天只補一天的量）每步
- * 都遠遠不到 4.5 分鐘，這個殘餘風險先不處理，真的缺口很大時本來就有專門的「重新抓取/合併
- * 此區間」背景 job 可以用。
+ * 4.5 分鐘預算是同一個保守值。這個預算主要在「跨步驟之間」檢查（每個步驟開始前才看還有沒有
+ * 預算）——單一步驟本身（尤其補抓資料如果缺口比較大、或 AI 診斷要跑好幾檔股票）理論上還是
+ * 有機會單獨超過預算：補抓資料這步有 MAX_CATCHUP_DAYS 限制每次 tick 最多處理 5 天，正常
+ * 情況下（一天只補一天的量）遠遠不到 4.5 分鐘，真的缺口很大時本來就有專門的「重新抓取/合併
+ * 此區間」背景 job 可以用，這裡先不處理。每日自動 AI 診斷這步（runScheduleStep5_）則是
+ * 2026-08-20 實際線上發生過的案例：候選名單好幾檔股票各自呼叫外部 AI API，單一步驟內部就
+ * 跑超過剩餘預算、撞上 6 分鐘硬上限，資料本身沒事（每檔診斷完成就立刻寫進表），但 job 卡片
+ * 的「完成」狀態沒機會被儲存、卡在顯示執行中——已經改成把 budgetDeadline 往下傳進
+ * runDailyAiDiagnosisForTopPicks → runAiDiagnosis 的逐檔迴圈，開始診斷下一檔之前先檢查，
+ * 快用完就提早收手、正常回傳，不再依賴外層的跨步驟檢查。
  */
 var SCHEDULE_STEP_TIME_BUDGET_MS_ = 4.5 * 60 * 1000;
 
@@ -584,7 +591,13 @@ function runScheduledSteps_(lane, startIndex, previousSteps, overallStartedAt) {
   var today = new Date();
   var ctx = {
     settings: getScheduleSettings(),
-    todayOnly: new Date(today.getFullYear(), today.getMonth(), today.getDate())
+    todayOnly: new Date(today.getFullYear(), today.getMonth(), today.getDate()),
+    // 給步驟內部（目前只有 runScheduleStep5_ 的每日自動 AI 診斷用到）逐檔迴圈自己檢查還剩
+    // 多少時間，快用完時提早收手、正常回傳——不要整個依賴「跨步驟之間」這一層預算檢查，
+    // 因為單一步驟內部一次跑好幾檔股票各自呼叫外部 AI API 時，理論上還是有機會在還沒輪到
+    // 下一次跨步驟檢查之前，就先撞上 Apps Script 6 分鐘的硬性執行上限（見
+    // SCHEDULE_STEP_TIME_BUDGET_MS_ 的說明——這正是它原本點名、先保留不處理的殘餘風險）。
+    budgetDeadline: budgetDeadline
   };
 
   var i = startIndex;
