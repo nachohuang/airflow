@@ -103,6 +103,42 @@ function makeCallSpy() {
   console.log('Test runScheduledSteps_ (all steps succeed) passed.');
 }
 
+// --- runScheduleStep1_ + runScheduleStep2_：2026-08-21 實際發生過的事故——資料已經是最新
+// （overview.max 已經是今天）時，runScheduleStep1_ 會把 cursor clamp 到 ctx.todayOnly，
+// 這裡曾經直接把 cursor 指到 ctx.todayOnly 本身（同一個物件參考，不是複製一份新的），害
+// runScheduleStep2_ 逐天遞增 cursor（cursor.setDate(...)）時連帶把 ctx.todayOnly 一起往後
+// 推，讓終止條件 `cursor <= ctx.todayOnly` 變成「跟自己比較」、永遠是 true，迴圈完全失去
+// 把關能力，只靠 MAX_CATCHUP_DAYS 硬性擋下來——手動重跑時只要資料已經是最新（這是最常見
+// 的情況），每次都會一路衝過真正的今天，跑到還沒發生的未來日期，全部「T86 資料過少」。
+// 這裡直接驗證修好之後：資料已經是最新時，cursor 被 clamp 出來的是獨立的新物件，補抓資料
+// 只會嘗試「今天」這一天就正常停止。 ---
+{
+  resetFakeProps();
+  var today = new Date();
+  var todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  var ctx = { settings: { skipWeekends: true, skipDates: [] }, todayOnly: todayOnly };
+  context.getHistoryOverview = function () { return { max: daysAgoStr_(0) }; }; // 已經是最新
+
+  var step1Result = context.runScheduleStep1_(ctx);
+  assert.strictEqual(step1Result.status, 'success');
+  assert.notStrictEqual(ctx.cursor, ctx.todayOnly,
+    'cursor 被 clamp 到今天時，一定要是新複製的 Date 物件，不能跟 ctx.todayOnly 是同一個參考（否則後面逐天遞增會連帶把 todayOnly 一起往後推）');
+  assert.strictEqual(ctx.cursor.getTime(), ctx.todayOnly.getTime(), '複製出來的值還是要等於今天');
+
+  var backfillDates = [];
+  context.backfillOneDay_ = function (cur) {
+    backfillDates.push(cur.getFullYear() + '-' + (cur.getMonth() + 1) + '-' + cur.getDate());
+    return { kind: 'succeeded', date: daysAgoStr_(0), rowCount: 1 };
+  };
+  var step2Result = context.runScheduleStep2_(ctx);
+  assert.strictEqual(backfillDates.length, 1,
+    '資料已經是最新時，只該嘗試補抓「今天」這一天就正常停止，不該一路跑到 MAX_CATCHUP_DAYS 才被硬性擋下來；實際嘗試了：' + backfillDates.join(', '));
+  assert.strictEqual(step2Result.status, 'success');
+  assert.ok(step2Result.detail.indexOf('成功 1 天') !== -1, 'got: ' + step2Result.detail);
+  assert.ok(step2Result.detail.indexOf('截斷') === -1, '資料已經是最新不該觸發「缺口過大已截斷」');
+  console.log('Test runScheduleStep1_/2_ (clamped cursor must not alias ctx.todayOnly, backfill stays bounded to today) passed.');
+}
+
 // --- runScheduledSteps_: ctx.budgetDeadline 要傳到 runScheduleStep5_ -> runDailyAiDiagnosisForTopPicks
 // ——這是 2026-08-20 線上事故的修復：每日自動 AI 診斷對好幾檔候選股票各自呼叫外部 AI API，
 // 單一步驟內部有機會在還沒輪到「跨步驟之間」下一次預算檢查之前，就先撞上 Apps Script 6 分鐘

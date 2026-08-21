@@ -473,7 +473,15 @@ function runScheduleStep1_(ctx) {
     next.setDate(next.getDate() + 1);
     cursor = new Date(next.getFullYear(), next.getMonth(), next.getDate());
   }
-  if (!cursor || cursor > ctx.todayOnly) cursor = ctx.todayOnly;
+  // 這裡一定要另外複製一個新的 Date 物件，不能直接把 cursor 指向 ctx.todayOnly 本身——
+  // 兩者若是同一個物件參考，runScheduleStep2_ 逐天迴圈裡 cursor.setDate(...) 每次遞增都會
+  // 連帶把 ctx.todayOnly 一起往後推，讓 while (cursor <= ctx.todayOnly) 這個終止條件永遠
+  // 比較「同一個物件跟它自己」、永遠是 true，完全失去把關的作用，變成只靠 MAX_CATCHUP_DAYS
+  // 硬性擋下來——資料已經追上進度（這裡的 clamp 分支會被觸發）時，補抓資料反而會一路衝過
+  // 真正的今天，跑到還沒發生的未來日期，自然全部「T86 資料過少」（真的還沒有資料）。這是
+  // 2026-08-21 實際發生過的事故：手動重跑時只要資料已經是最新，每次都會多跑好幾天無意義的
+  // 未來日期，直到 MAX_CATCHUP_DAYS 才停下來、回報「缺口過大已截斷」。
+  if (!cursor || cursor > ctx.todayOnly) cursor = new Date(ctx.todayOnly.getTime());
   ctx.cursor = cursor;
   return { status: 'success', detail: overview && overview.max ? '目前最新資料：' + overview.max : '查無既有資料，改抓今天' };
 }
