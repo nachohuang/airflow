@@ -598,4 +598,40 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   console.log('Test 20 (runAiDiagnosis without budgetDeadline is unaffected by the skip check) passed.');
 }
 
+// --- 21. runDailyAiDiagnosisForTopPicks：Top3 橫向比較（單一次 LLM 呼叫，耗時固定、可預期）
+//    要先跑，候選名單深度診斷（逐檔迴圈，耗時不固定，候選名單愈多檔愈久）要後跑——
+//    2026-08-21 實際發生過反過來的順序：候選名單檔數較多時，深度診斷把整段時間預算用完，
+//    輪到 Top3 時預算已經過期直接被跳過，RunLog 只看得到「AI每日候選名單」成功、完全找不到
+//    「AI Top3 推薦」的紀錄，Top3 卡片因此連續好幾天靜靜停在很久以前的快取結果、使用者不
+//    容易發現「今天其實沒有跑」。這裡直接驗證呼叫順序本身：不管內部各自做什麼，Top3 一定要
+//    在候選名單深度診斷之前被呼叫，這樣預算只會被深度診斷這個耗時不固定的部分犧牲，不會
+//    反過來讓耗時固定、使用者天天都會看的 Top3 被犧牲。 ---
+{
+  fakeProps[context.CONFIG.PROP_KEYS.AI_DAILY_ENABLED] = 'true';
+  fakeProps[context.CONFIG.PROP_KEYS.AI_DAILY_TOP_N] = '3';
+  fakeProps[context.CONFIG.PROP_KEYS.ANTHROPIC_API_KEY] = 'fake-key';
+
+  var callOrder = [];
+  var originalGetLatestReportCandidates = context.getLatestReportCandidates_;
+  var originalRunAiTopPicks = context.runAiTopPicks;
+  var originalRunAiShortlist = context.runAiShortlist_;
+  var originalRunAiDiagnosis = context.runAiDiagnosis;
+  context.getLatestReportCandidates_ = function () { return { latestDate: '2026-08-21', candidates: [] }; };
+  context.runAiTopPicks = function () { callOrder.push('topPicks'); return { ok: true }; };
+  context.runAiShortlist_ = function () { callOrder.push('shortlist'); return { text: '1. 2330 台積電 - 理由', cost: 0 }; };
+  context.runAiDiagnosis = function () { callOrder.push('diagnosis'); return []; };
+
+  var result = context.runDailyAiDiagnosisForTopPicks(Date.now() + 999999);
+  assert.deepStrictEqual([...callOrder], ['topPicks', 'shortlist', 'diagnosis'],
+    'Top3 橫向比較要在候選名單深度診斷之前執行，得到的實際呼叫順序：' + callOrder.join(','));
+  assert.strictEqual(result.topPicks.ok, true);
+  assert.strictEqual(result.shortlist.ok, true);
+
+  context.getLatestReportCandidates_ = originalGetLatestReportCandidates;
+  context.runAiTopPicks = originalRunAiTopPicks;
+  context.runAiShortlist_ = originalRunAiShortlist;
+  context.runAiDiagnosis = originalRunAiDiagnosis;
+  console.log('Test 21 (runDailyAiDiagnosisForTopPicks runs Top3 before the shortlist+diagnosis loop) passed.');
+}
+
 console.log('All AiDiagnosis.gs tests passed.');

@@ -920,23 +920,34 @@ function runPortfolioHoldDiagnosis(code) {
 /**
  * 每日排程呼叫：如果有開啟「每日自動 AI 診斷」，做兩件各自獨立、互不影響的事：
  *
- * 1. 深度診斷候選名單——分兩層：先用 AI 橫向比較（見 AI_SHORTLIST_SYSTEM_PROMPT）從當天
+ * 1. Top3 橫向比較（runAiTopPicks）——手動按「AI 掃描全部候選，推薦前三檔」按鈕跑的
+ *    同一個函式，讓「每日自動 AI 診斷」開著就好，不用每天手動點一次才有當天的 Top3 推薦、
+ *    避免使用者以為排程有跑，隔天打開卻只看到前一天（甚至更早）留下的快取結果。單一次
+ *    LLM 呼叫，耗時固定、可預期，優先執行。
+ * 2. 深度診斷候選名單——分兩層：先用 AI 橫向比較（見 AI_SHORTLIST_SYSTEM_PROMPT）從當天
  *    全部候選裡篩出一份較寬的候選名單（不查財報，純量化因子比較，維持低成本），名單大小
  *    就是 settings.topN；接著把這份名單「全部」送進「AI 深度診斷」（runAiDiagnosis，會
  *    另外抓 Goodinfo/證交所財報資料做完整查核）。刻意不做「橫向比較選 3 檔、深度診斷再
  *    驗證同一批 3 檔」這種兩階段都各自拍板的設計——橫向比較分數再高的候選，基本面查核
  *    仍有可能不合格，所以「值不值得投入」完全交給深度診斷的最終建議決定，不會出現「初篩
- *    推薦的標的」跟「深度診斷結論」互相矛盾、還要使用者自己來回對照兩份報告的情況。
- * 2. Top3 橫向比較（runAiTopPicks）——手動按「AI 掃描全部候選，推薦前三檔」按鈕跑的
- *    同一個函式，讓「每日自動 AI 診斷」開著就好，不用每天手動點一次才有當天的 Top3 推薦、
- *    避免使用者以為排程有跑，隔天打開卻只看到前一天（甚至更早）留下的快取結果。
+ *    推薦的標的」跟「深度診斷結論」互相矛盾、還要使用者自己來回對照兩份報告的情況。這是
+ *    這兩件事裡唯一逐檔跑好幾次 LLM 呼叫的部分，耗時不固定（候選名單檔數愈多愈久），
+ *    所以放在後面：Top3 一定先跑完、有結果，剩下的預算才拿去做深度診斷，深度診斷自己
+ *    再逐檔檢查 budgetDeadline 提早收手（見 runAiDiagnosis 的說明）。
+ *
+ * 2026-08-21 實際發生過反過來的順序（深度診斷先跑）：候選名單檔數較多時，深度診斷把整段
+ * 4.5 分鐘預算都用完，輪到 Top3 時預算已經過期，直接被跳過、完全不會執行——RunLog 只看得到
+ * 「AI每日候選名單」成功，卻找不到「AI Top3 推薦」的紀錄，Top3 卡片因此連續好幾天沒更新，
+ * 靜靜停在很久以前的快取結果，使用者不容易發現「今天其實沒有跑」。Top3 只有一次 LLM 呼叫、
+ * 耗時遠比深度診斷的逐檔迴圈短且可預期，兩件事互不依賴同一份輸出，對調順序不影響任何一邊
+ * 的正確性，卻能保證 Top3 每天都會被跑到。
  *
  * 這兩件事分開包 try/catch，其中一個失敗（例如候選名單解析不出代號、Top3 掃描時 API
  * 逾時）不影響另一個照常執行完成。
  *
  * budgetDeadline（選填，epoch ms）：每日排程呼叫時會傳入（見 runScheduleStep5_），往下傳給
- * runAiDiagnosis 的逐檔迴圈，也用來決定要不要索性跳過 Top3 橫向比較——理由見 runAiDiagnosis
- * 的說明。
+ * runAiDiagnosis 的逐檔迴圈，也用來決定要不要索性跳過 Top3 橫向比較（理論上只有前面 1~4 步
+ * 就已經把預算耗盡的極端情況才會觸發，正常情況下 Top3 這裡預算幾乎都還是滿的）。
  */
 function runDailyAiDiagnosisForTopPicks(budgetDeadline) {
   var settings = getAiSettings();
@@ -952,6 +963,17 @@ function runDailyAiDiagnosisForTopPicks(budgetDeadline) {
   var sharedCandidates = null;
   try { sharedCandidates = getLatestReportCandidates_(); } catch (e) { /* 留給下面各自 fallback 處理 */ }
 
+  var topPicksResult = { ok: false, error: null };
+  if (budgetDeadline && Date.now() >= budgetDeadline) {
+    topPicksResult.error = '時間預算用完，本次先跳過，下次排程再試';
+  } else {
+    try {
+      topPicksResult = { ok: true, result: runAiTopPicks(sharedCandidates) };
+    } catch (e) {
+      topPicksResult.error = String(e.message || e);
+    }
+  }
+
   var shortlistResult = { ok: false, error: null };
   try {
     var shortlist = runAiShortlist_(settings.topN, sharedCandidates);
@@ -963,17 +985,6 @@ function runDailyAiDiagnosisForTopPicks(budgetDeadline) {
     }
   } catch (e) {
     shortlistResult.error = String(e.message || e);
-  }
-
-  var topPicksResult = { ok: false, error: null };
-  if (budgetDeadline && Date.now() >= budgetDeadline) {
-    topPicksResult.error = '時間預算用完，本次先跳過，下次排程再試';
-  } else {
-    try {
-      topPicksResult = { ok: true, result: runAiTopPicks(sharedCandidates) };
-    } catch (e) {
-      topPicksResult.error = String(e.message || e);
-    }
   }
 
   return { skipped: false, shortlist: shortlistResult, topPicks: topPicksResult };
