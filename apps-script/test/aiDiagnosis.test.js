@@ -222,6 +222,25 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   console.log('Test 7 (extractShortlistCodes_) passed.');
 }
 
+// --- 7b. extractShortlistCodes_：2026-08-21 實際發生過整份候選名單解析失敗、深度診斷完全
+//    沒東西可以跑的事故——prompt 已經明確要求「純數字加半形句點」開頭、不要用 Markdown，
+//    但 LLM 偶爾還是不完全照做（把編號包成 **1.**、改用全形頓號「、」或括號「1)」）。這裡
+//    驗證放寬後的解析邏輯能吃下這幾種常見的小格式落差，不會因為這樣就整批解析失敗 ---
+{
+  const boldNumbering = [
+    '**1.** 2603 長榮 - 法人參與密度極高',
+    '**2.** 2890 永豐金 - 金融股中相對抗跌'
+  ].join('\n');
+  assert.deepStrictEqual([...context.extractShortlistCodes_(boldNumbering)], ['2603', '2890'], 'Markdown 粗體包住編號也要能解析出來');
+
+  const altSeparators = [
+    '1、2603 長榮 - 法人參與密度極高',
+    '2) 2890 永豐金 - 金融股中相對抗跌'
+  ].join('\n');
+  assert.deepStrictEqual([...context.extractShortlistCodes_(altSeparators)], ['2603', '2890'], '全形頓號／括號當分隔符號也要能解析出來');
+  console.log('Test 7b (extractShortlistCodes_ tolerates common markdown/separator drift) passed.');
+}
+
 // --- 8. getAiDiagnosisHistoryForCodes_：批次版本的核心純函式（不含讀表本身）——「戰報與
 //    個股」／「持股庫存」原本一次要顯示 N 檔股票就各自呼叫一次單筆版本、各自把整份表格
 //    掃描一次，是這兩個頁面讀取超慢的主因，改成只讀一次表、依代號分組回傳。這裡驗證分組
@@ -632,6 +651,34 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   context.runAiShortlist_ = originalRunAiShortlist;
   context.runAiDiagnosis = originalRunAiDiagnosis;
   console.log('Test 21 (runDailyAiDiagnosisForTopPicks runs Top3 before the shortlist+diagnosis loop) passed.');
+}
+
+// --- 22. runDailyAiDiagnosisForTopPicks：候選名單解析失敗（extractShortlistCodes_ 一檔都
+//    解析不出來，例如 2026-08-21 實際發生過的格式落差）時，錯誤訊息要帶一段 AI 原始回應的
+//    片段——不然下次再發生，只看得到「無法從 AI 候選名單中取出股票代號」這句籠統的話，完全
+//    看不出來 AI 那次實際輸出了什麼、哪裡跟預期格式對不起來，沒辦法針對性修 ---
+{
+  fakeProps[context.CONFIG.PROP_KEYS.AI_DAILY_ENABLED] = 'true';
+  fakeProps[context.CONFIG.PROP_KEYS.AI_DAILY_TOP_N] = '3';
+  fakeProps[context.CONFIG.PROP_KEYS.ANTHROPIC_API_KEY] = 'fake-key';
+
+  var originalGetLatestReportCandidates2 = context.getLatestReportCandidates_;
+  var originalRunAiTopPicks2 = context.runAiTopPicks;
+  var originalRunAiShortlist2 = context.runAiShortlist_;
+  context.getLatestReportCandidates_ = function () { return { latestDate: '2026-08-21', candidates: [] }; };
+  context.runAiTopPicks = function () { return { ok: true }; };
+  context.runAiShortlist_ = function () { return { text: '這次 AI 完全沒有照格式輸出任何編號清單，只回了一段散文', cost: 0 }; };
+
+  var result = context.runDailyAiDiagnosisForTopPicks(Date.now() + 999999);
+  assert.strictEqual(result.shortlist.ok, false);
+  assert.ok(result.shortlist.error.indexOf('無法從 AI 候選名單中取出股票代號') !== -1);
+  assert.ok(result.shortlist.error.indexOf('這次 AI 完全沒有照格式輸出') !== -1,
+    '錯誤訊息要帶原始回應片段，才看得出來是哪裡跟預期格式不一樣，got: ' + result.shortlist.error);
+
+  context.getLatestReportCandidates_ = originalGetLatestReportCandidates2;
+  context.runAiTopPicks = originalRunAiTopPicks2;
+  context.runAiShortlist_ = originalRunAiShortlist2;
+  console.log('Test 22 (shortlist parse failure error message includes a preview of the raw AI response) passed.');
 }
 
 console.log('All AiDiagnosis.gs tests passed.');

@@ -979,7 +979,11 @@ function runDailyAiDiagnosisForTopPicks(budgetDeadline) {
     var shortlist = runAiShortlist_(settings.topN, sharedCandidates);
     var codes = extractShortlistCodes_(shortlist.text, settings.topN);
     if (codes.length === 0) {
-      shortlistResult.error = '無法從 AI 候選名單中取出股票代號';
+      // 帶一段原始回應文字的片段進錯誤訊息，下次再發生格式解析失敗時，不用另外去 AiDiagnosis
+      // 分頁或 RunLog 挖原始內容，這裡的摘要就直接看得出 AI 這次到底輸出了什麼、哪裡跟預期
+      // 格式（見 extractShortlistCodes_ 的說明）對不起來。
+      shortlistResult.error = '無法從 AI 候選名單中取出股票代號，原始回應開頭：「' +
+        String(shortlist.text || '').slice(0, 150).replace(/\n/g, ' ') + '」';
     } else {
       shortlistResult = { ok: true, shortlistText: shortlist.text, shortlistCost: shortlist.cost, results: runAiDiagnosis(codes, budgetDeadline) };
     }
@@ -1034,7 +1038,8 @@ var AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE = `# Role & Expertise
    只能根據提供的量化欄位做判斷。
 4. 語氣口吻：使用繁體中文，字字精煉。
 
-# Output Format（請嚴格使用以下結構，正好 __COUNT__ 行，不要多也不要少，不要加其他文字）
+# Output Format（請嚴格使用以下結構，正好 __COUNT__ 行，不要多也不要少，不要加其他文字，
+不要用 Markdown 粗體/斜體/程式碼區塊包住編號或代號，每行開頭一定是純數字加半形句點）
 1. 代號 名稱 - 入選理由（一句話）
 2. 代號 名稱 - 入選理由（一句話）
 （依此類推，共 __COUNT__ 行）`;
@@ -1107,12 +1112,22 @@ function runAiShortlist_(count, preFetchedCandidates) {
  * 做深度診斷。AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE 規定的輸出格式固定是「N. 代號 名稱 - 理由」，
  * 代號一定緊接在編號句點後面、以空白分隔，用逐行比對行首格式取出即可。
  */
+/**
+ * 從 AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE 規定的編號清單格式（「N. 代號 名稱 - 理由」）取出
+ * 股票代號。prompt 已經明確要求「純數字加半形句點」開頭、不要用 Markdown 格式，但 LLM 偶爾
+ * 還是會不聽話（例如把編號包成 **1.**、改用全形句點「、」或括號「1)」）——這裡先把每行常見
+ * 的 Markdown 強調符號（*_`）拿掉，並放寬編號後面的分隔符號（. 、 )）都算合法，降低因為
+ * 這種小格式落差就整批解析失敗、害這次候選名單完全沒東西可以送進深度診斷的機率。真的完全
+ * 解析不出任何一行時，交給呼叫端把原始文字的片段一起記進錯誤訊息，才看得出來是哪裡跟預期
+ * 格式不一樣。
+ */
 function extractShortlistCodes_(text, maxCount) {
   if (!text) return [];
-  var re = /^\d+\.\s*(\d{3,6})/;
+  var re = /^\d+[.、)]\s*(\d{3,6})/;
   var codes = [];
   String(text).split('\n').forEach(function (line) {
-    var m = re.exec(line.trim());
+    var cleaned = line.trim().replace(/[*_`]/g, '');
+    var m = re.exec(cleaned);
     if (m) codes.push(zfill4(m[1]));
   });
   return maxCount ? codes.slice(0, maxCount) : codes;
