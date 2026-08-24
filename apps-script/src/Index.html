@@ -54,10 +54,32 @@
 
         <div class="sub-tabs">
           <button type="button" class="sub-tab-btn active" data-target="pftab-holding">持有中</button>
+          <button type="button" class="sub-tab-btn" data-target="pftab-watchlist">👀 觀察個股</button>
           <button type="button" class="sub-tab-btn" data-target="pftab-history">💰 歷史結案紀錄</button>
         </div>
         <div id="pftab-holding" class="sub-tab-panel active">
           <div id="portfolioList" class="card-list"></div>
+        </div>
+        <div id="pftab-watchlist" class="sub-tab-panel">
+          <form id="watchlistForm" class="form-card">
+            <h3>加入觀察個股</h3>
+            <div class="meta-bar" style="margin-bottom:0;">想追蹤但還沒買進的股票，例如曾經上過戰報候選、後來排名掉出去，之後還想回來看看整體評估情形。已經是持有中的股票不能重複加入，請直接到「持有中」管理。</div>
+            <label style="position:relative;">股票代號
+              <input id="wlCode" required maxlength="6" placeholder="例如 2330" autocomplete="off">
+              <div id="wlCodeResults" class="search-results"></div>
+            </label>
+            <label style="position:relative;">名稱（選填，也可以直接輸入名稱搜尋代號）
+              <input id="wlName" placeholder="例如 台積電" autocomplete="off">
+              <div id="wlNameResults" class="search-results"></div>
+            </label>
+            <label>備註（選填）
+              <input id="wlNote" placeholder="例如：等回檔到季線再看看">
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary" id="wlSubmitBtn">👀 加入觀察</button>
+            </div>
+          </form>
+          <div id="watchlistList" class="card-list"></div>
         </div>
         <div id="pftab-history" class="sub-tab-panel">
           <div id="portfolioHistoryList" class="card-list"></div>

@@ -64,6 +64,7 @@ var CONFIG = {
 
   SHEET_NAMES: {
     PORTFOLIO: 'Portfolio',
+    WATCHLIST: 'Watchlist',
     REPORTS: 'Reports',
     RUN_LOG: 'RunLog',
     SKIP_DATES: 'SkipDates',
@@ -315,6 +316,11 @@ var CONFIG = {
   // 舊版（改版前）是一列一檔股票、沒有交易ID/股數/狀態欄位，第一次讀取時會自動轉換格式，
   // 見 Portfolio.gs migratePortfolioSheetIfNeeded_。
   PORTFOLIO_COLUMNS: ['交易ID', '證券代號', '證券名稱', '買進日期', '買進價格', '股數', '備註', '狀態', '賣出日期', '賣出價格'],
+
+  // 觀察個股清單（見 Watchlist.gs）：跟持股庫存互斥，同一檔股票同一時間只會出現在其中一份
+  // 清單。一列＝一檔股票（不像 Portfolio 一列一筆買進紀錄，這裡沒有分批/成本的概念，
+  // 純粹只是「想繼續追蹤」的代號清單）。
+  WATCHLIST_COLUMNS: ['證券代號', '證券名稱', '加入日期', '備註'],
 
   // 給 Reports 分頁 / 手機 UI 用的精簡欄位
   REPORT_COLUMNS: [
@@ -634,6 +640,7 @@ function getStorageDiagnostics() {
 function initializeProject() {
   var ss = getSpreadsheet_();
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.PORTFOLIO, CONFIG.PORTFOLIO_COLUMNS);
+  ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.WATCHLIST, CONFIG.WATCHLIST_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.REPORTS, CONFIG.REPORT_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.RUN_LOG, CONFIG.RUN_LOG_COLUMNS);
   ensureSheetWithHeaders_(ss, CONFIG.SHEET_NAMES.SKIP_DATES, CONFIG.SKIP_DATES_COLUMNS);

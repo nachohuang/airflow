@@ -851,6 +851,87 @@
     }).catch(function (err) { listEl.innerHTML = errorBox(err); });
   }
 
+  // ---------- 觀察個股清單（想追蹤但還沒買進的股票，跟持股庫存互相檢查重複，見 Watchlist.gs） ----------
+  var wlForm = document.getElementById('watchlistForm');
+
+  function loadWatchlist() {
+    var listEl = document.getElementById('watchlistList');
+    listEl.innerHTML = '<div class="loading">載入中...</div>';
+    return callServer('getWatchlist').then(function (items) {
+      if (!items.length) { listEl.innerHTML = '<div class="empty-hint">尚未加入任何觀察個股</div>'; return; }
+      listEl.innerHTML = items.map(renderWatchlistCard_).join('');
+      wireWatchlistCardEvents_(listEl);
+    }).catch(function (err) { listEl.innerHTML = errorBox(err); });
+  }
+
+  function renderWatchlistCard_(it) {
+    var priceHtml = it.latestClose !== null ?
+      '<div class="stock-card-strategy">現價 ' + fmtNum(it.latestClose) + '</div>' : '';
+    var signalHtml = (it.signal && it.signal.strategy) ?
+      '<div class="stock-card-strategy" style="color:' + (STRATEGY_HINT[it.signal.strategy] || 'var(--text)') + '">' +
+      escapeHtml(it.signal.strategy) + (it.signal.action ? ' · ' + escapeHtml(it.signal.action) : '') +
+      '<span class="stock-card-action">（' + escapeHtml(it.signal.date) + ' 戰報）</span></div>' :
+      '<div class="stock-card-note">目前不在最新戰報候選名單裡</div>';
+    return '<div class="stock-card">' +
+      '<div class="stock-card-head stock-card-open" data-code="' + escapeHtml(it.code) + '" style="cursor:pointer;">' +
+      '<span><span class="stock-card-code">' + escapeHtml(it.code) + '</span>' +
+      '<span class="stock-card-name">' + escapeHtml(it.name) + '</span></span>' +
+      '</div>' +
+      '<div class="stock-card-note">加入日期 ' + escapeHtml(it.addedDate || '-') + '</div>' +
+      priceHtml + signalHtml +
+      (it.note ? '<div class="stock-card-note">備註：' + escapeHtml(it.note) + '</div>' : '') +
+      '<div class="form-actions">' +
+      '<button type="button" class="btn-link danger wl-remove" data-code="' + escapeHtml(it.code) + '">移除觀察</button>' +
+      '</div>' +
+      '</div>';
+  }
+
+  function wireWatchlistCardEvents_(listEl) {
+    listEl.querySelectorAll('.stock-card-open').forEach(function (headEl) {
+      headEl.addEventListener('click', function () { openStockDetailModal_(headEl.getAttribute('data-code'), false); });
+    });
+    listEl.querySelectorAll('.wl-remove').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!confirm('確定要把這檔股票從觀察清單移除嗎？')) return;
+        callServer('removeFromWatchlist', btn.getAttribute('data-code')).then(function () { loadWatchlist(); });
+      });
+    });
+  }
+
+  wlForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var submitBtn = document.getElementById('wlSubmitBtn');
+    if (submitBtn.disabled) return;
+    var code = document.getElementById('wlCode').value.trim();
+    var name = document.getElementById('wlName').value.trim();
+    var note = document.getElementById('wlNote').value.trim();
+    var savingLabel = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '加入中...';
+    callServer('addToWatchlist', code, name, note).then(function () {
+      wlForm.reset();
+      submitBtn.disabled = false;
+      submitBtn.textContent = savingLabel;
+      loadWatchlist();
+    }).catch(function (err) {
+      alert(err.message || err);
+      submitBtn.disabled = false;
+      submitBtn.textContent = savingLabel;
+    });
+  });
+
+  var wlCodeInput = document.getElementById('wlCode');
+  var wlNameInput = document.getElementById('wlName');
+  wireStockAutocomplete_(wlCodeInput, document.getElementById('wlCodeResults'), function (code, name) {
+    wlCodeInput.value = code;
+    if (name) wlNameInput.value = name;
+  });
+  wireStockAutocomplete_(wlNameInput, document.getElementById('wlNameResults'), function (code, name) {
+    wlCodeInput.value = code;
+    wlNameInput.value = name;
+  });
+
   // ---------- 股票代號/名稱自動完成（共用：戰報搜尋列、持股表單代號/名稱雙向連動） ----------
   /** 幫 inputEl 掛上 250ms debounce 的代號/名稱搜尋（依 searchStockCodes 對最近 History
    *  資料做代號或名稱關鍵字比對），選到一筆結果時呼叫 onPick(code, name)。 */
@@ -1181,6 +1262,7 @@
         var targetId = btn.getAttribute('data-target');
         document.getElementById(targetId).classList.add('active');
         if (targetId === 'pftab-history') loadPortfolioHistory_();
+        if (targetId === 'pftab-watchlist') loadWatchlist();
         ensureAdminSubtabLoaded_(targetId);
       });
     });

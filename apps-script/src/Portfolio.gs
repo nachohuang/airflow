@@ -194,12 +194,19 @@ function getPortfolio() {
 /**
  * 新增一筆買進紀錄，或編輯既有的一筆（依 item.lotId 判斷，不帶就是新增）。
  * item: {lotId?, code, name, cost, buyDate, shares, note}
+ *
+ * isNewHolding（沒帶 lotId，代表是全新的一筆買進紀錄，不是編輯既有的 lot）時，這檔股票
+ * 既然已經真的買進，就自動把它從「觀察個股」清單移除（見 Watchlist.gs
+ * removeFromWatchlistSilently_ 的說明）——這是跟觀察清單互相檢查重複的另一半：加入觀察
+ * 清單時會擋掉已經持有的股票，這裡反過來確保「買進之後」觀察清單也會自動同步，不用使用者
+ * 自己記得去刪。
  */
 function savePortfolioItem(item) {
   if (!item || !item.code) throw new Error('股票代號不可為空');
   var code = zfill4(String(item.code).trim());
   var sheet = getPortfolioSheet_();
   var rows = readSheetObjects_(sheet);
+  var isNewHolding = !item.lotId;
 
   if (item.lotId) {
     var found = false;
@@ -231,6 +238,7 @@ function savePortfolioItem(item) {
     });
   }
   writeSheetObjects_(sheet, CONFIG.PORTFOLIO_COLUMNS, rows);
+  if (isNewHolding) removeFromWatchlistSilently_(code);
   return getPortfolio();
 }
 
