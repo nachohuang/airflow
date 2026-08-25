@@ -9,12 +9,45 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  // 手機瀏覽器切到背景一段時間，google.script.run 底層連線常常會被系統直接中斷——有時候會
+  // 透過 withFailureHandler 回報「NetworkError: 連線失敗，原因 HTTP 0」，但實測也真的發生過
+  // withSuccessHandler／withFailureHandler 兩個都沒有被呼叫到，整個 callServer() 回傳的
+  // Promise 永遠不 resolve 也不 reject——畫面上的「載入中...」／「加入中...」按鈕永遠恢復
+  // 不了、也看不到任何錯誤訊息，只能整個關掉 app 重開才會恢復正常。這裡加一個保守的用戶端
+  // 逾時當最後防線：全部 callServer() 呼叫共用同一個逾時時間，真的超過這個時間都沒有任何
+  // 回應，就當作逾時失敗，讓呼叫端的 .catch() 一定會被呼叫到，按鈕/畫面才能恢復正常、
+  // 使用者才看得到明確的錯誤訊息可以自己決定要不要重試——比永遠卡住不動好。這支 App 目前
+  // 真的會拖很久的操作（AI 診斷／回測／因子迴歸模型）都已經改成背景 job＋輪詢，不會直接走
+  // 這裡，30 秒對其餘一般的讀取/寫入操作是很寬鬆的上限。
+  //
+  // 注意：逾時只代表「用戶端放棄等待」，不代表伺服器那端一定沒有真的執行完成（尤其是寫入類
+  // 操作，例如新增一筆持股/觀察清單）——逾時之後如果重新整理發現資料其實已經寫進去了，不用
+  // 懷疑自己眼花，這是正常情況，不代表逾時訊息是假警報；也正因為這樣，看到逾時訊息不要直覺
+  // 反射再按一次送出，先重新整理確認目前狀態，避免真的送出兩次造成重複紀錄。
+  var CALL_SERVER_TIMEOUT_MS_ = 30000;
+
   function callServer(fnName) {
     var args = Array.prototype.slice.call(arguments, 1);
     return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        reject(new Error('連線逾時（可能是切到背景太久被系統中斷），請重新整理後再確認一次結果'));
+      }, CALL_SERVER_TIMEOUT_MS_);
       var runner = google.script.run
-        .withSuccessHandler(resolve)
-        .withFailureHandler(function (err) { reject(err); });
+        .withSuccessHandler(function (result) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(result);
+        })
+        .withFailureHandler(function (err) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        });
       runner[fnName].apply(runner, args);
     });
   }
@@ -88,6 +121,27 @@
     if (activeTab === 'dashboard') { showRefreshActionSheet_(); return; }
     if (activeTab === 'portfolio') withSpin(loadPortfolio());
     else if (activeTab === 'admin') withSpin(loadAdmin());
+  });
+
+  // 手機瀏覽器切到背景一段時間再切回來，畫面常常還停留在切走當下的「載入中...」或
+  // callServer() 逾時／連線中斷的錯誤訊息（見上面 callServer 逾時保護的說明），需要使用者
+  // 自己發現、自己按重新整理才會恢復——改成偵測「背景超過一段時間之後又回到前景」，自動
+  // 重新整理目前所在的分頁，不用使用者自己動手。只在背景超過 HIDDEN_REFRESH_THRESHOLD_MS_
+  // 才觸發：手機切到背景放著本來就常常會被系統中斷連線，短暫切出去看一下通知、馬上回來的
+  // 正常情況不用每次都重新打一輪請求。只重新整理目前這個分頁（用跟 ensureTabLoaded 一樣的
+  // 各分頁 loader，force=true 強制重讀），不會動到使用者可能正在填寫、還沒送出的表單內容
+  // （各分頁的 load 函式只重寫清單/卡片區塊，不會去動表單欄位）。
+  var HIDDEN_REFRESH_THRESHOLD_MS_ = 8000;
+  var hiddenSince_ = null;
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { hiddenSince_ = Date.now(); return; }
+    if (hiddenSince_ === null) return;
+    var hiddenDuration = Date.now() - hiddenSince_;
+    hiddenSince_ = null;
+    if (hiddenDuration < HIDDEN_REFRESH_THRESHOLD_MS_) return;
+    var activeBtn = document.querySelector('.nav-btn.active');
+    if (!activeBtn) return;
+    ensureTabLoaded(activeBtn.getAttribute('data-tab'), true);
   });
 
   /** 通用 bottom sheet 開關（action sheet 跟個股詳情 modal 共用同一套顯示/隱藏邏輯）。 */
