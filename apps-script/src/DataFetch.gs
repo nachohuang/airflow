@@ -704,11 +704,34 @@ function deleteJobLaneTriggers_(handlerName) {
  *  進行，不受這次呼叫端（瀏覽器連線或時間觸發器本身）影響。stepIndex 是 0-based 的步驟
  *  編號（0=檢查最新資料日期 ... 4=每日自動AI診斷）。overallStartedAt 是這整段（可能跨
  *  多個 tick）的起始時間，用來算畫面上顯示的總耗時（不影響時間預算，見 runScheduledSteps_
- *  的說明）——每次呼叫都視為這條車道一次新的開始，重設成現在時間。 */
+ *  的說明）——每次呼叫都視為這條車道一次新的開始，重設成現在時間。
+ *
+ * ScriptApp.newTrigger(...).create() 本身有機會直接拋例外（最常見的原因是撞到 Apps Script
+ * 每個使用者、每支專案的觸發器數量上限——這支 App 本身就有將近十種各自獨立的背景 job，
+ * 一次性觸發器理論上用完就該被下一次 tick 開頭的 deleteJobLaneTriggers_ 之類的呼叫清掉，
+ * 但只要其中任何一種卡在中途沒機會執行到清除那一步，殘留的觸發器就會慢慢逼近上限）。
+ * 這裡一定要包一層 try/catch：如果不接住，狀態已經在上一行存成 'running'，但建立續跑用的
+ * 觸發器這一步本身就失敗，永遠不會有下一次 tick 把狀態更新掉，工作卡片會一直停留在
+ * 「執行中」，要等 autoHealStaleJobState_ 累積到 JOB_STALE_MINUTES_（見 JobQueue.gs）才會
+ * 被動判定成逾時失敗——不只慢，逾時訊息只會講「時間觸發器很可能沒有被正常觸發」，把「觸發器
+ * 建立當下就直接失敗」跟「有建立但沒被觸發」這兩種完全不同的原因混在一起，沒辦法對症下藥。
+ * 抓到就立刻把狀態改成 error、存下真正的例外訊息（例如觸發器數量上限的官方錯誤字串），
+ * 再把例外往外丟：scheduledDailyFetch() 外層的 try/catch 會另外把這次失敗記進「最近一次
+ * 排程執行」；startResumeScheduledRunJob 則是直接由前端的 callServer 呼叫，例外會讓
+ * 使用者立刻看到明確的錯誤訊息，不會誤以為工作已經正常排定。 */
 function startJobLane_(propKey, handlerName, stepIndex) {
   deleteJobLaneTriggers_(handlerName);
   saveJobLaneState_(propKey, { status: 'running', stepIndex: stepIndex, overallStartedAt: Date.now(), updatedAt: Date.now() });
-  ScriptApp.newTrigger(handlerName).timeBased().after(3000).create();
+  try {
+    ScriptApp.newTrigger(handlerName).timeBased().after(3000).create();
+  } catch (e) {
+    saveJobLaneState_(propKey, {
+      status: 'error', stepIndex: stepIndex, overallStartedAt: Date.now(), updatedAt: Date.now(),
+      errorMessage: '建立續跑用的一次性觸發器失敗：' + String(e.message || e) +
+        '（常見原因是 Apps Script 觸發器數量已經到上限，請到 Apps Script 編輯器左側「觸發條件」頁面，或本頁「排程與監控」的時間觸發器一覽，清掉不再需要的舊觸發器）'
+    });
+    throw e;
+  }
 }
 
 /** lane：'daily' 或 'resume'，決定讀寫哪一份「最近一次排程執行」紀錄（見

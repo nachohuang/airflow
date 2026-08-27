@@ -25,6 +25,10 @@ const PropertiesService = {
 };
 const fakeTriggers = [];
 let newTriggerCalls = []; // 每個元素是這次 ScriptApp.newTrigger(handlerName) 呼叫的 handler 名稱
+// 讓個別測試案例可以模擬 .create() 本身直接拋例外（最常見的真實原因：觸發器數量已經到
+// Apps Script 每個使用者/每支專案的上限）——用來驗證 startJobLane_ 有沒有正確接住這個
+// 例外、把工作狀態改成 error，而不是留在 'running' 卡住。
+let triggerCreateShouldThrow = null; // null＝正常；設成字串就讓 .create() 拋出這段訊息
 const ScriptApp = {
   getProjectTriggers: function () { return fakeTriggers; },
   newTrigger: function (handlerName) {
@@ -32,7 +36,10 @@ const ScriptApp = {
     return {
       timeBased: function () { return this; },
       after: function () { return this; },
-      create: function () { return { getUniqueId: function () { return 'fake-trigger-id'; } }; }
+      create: function () {
+        if (triggerCreateShouldThrow) throw new Error(triggerCreateShouldThrow);
+        return { getUniqueId: function () { return 'fake-trigger-id'; } };
+      }
     };
   },
   deleteTrigger: function () {}
@@ -373,6 +380,32 @@ function makeCallSpy() {
   assert.strictEqual(last.overallStatus, 'failed');
   assert.ok(last.summary.indexOf('讀取試算表失敗') !== -1, '要看得到實際的錯誤訊息，不能只講「失敗」');
   console.log('Test scheduledDailyFetch (uncaught exception outside steps still gets recorded) passed.');
+}
+
+// --- startJobLane_: 建立續跑用的一次性觸發器（ScriptApp.newTrigger(...).create()）本身直接
+// 拋例外（最常見的真實原因：Apps Script 觸發器數量已經到上限）時，工作狀態要立刻變成
+// error，不能留在上一行才剛存好的 'running'——這是實際發生過的使用者回報：「每日排程
+// （自動觸發）」卡片連續好幾天都顯示「執行中」卡住超過 700 分鐘才被 autoHealStaleJobState_
+// 判定逾時，訊息卻只講「時間觸發器很可能沒有被正常觸發」，掩蓋掉真正的原因（觸發器建立
+// 當下就直接失敗，不是有建立但沒被觸發）。這裡驗證：觸發器建立失敗時，dailySchedule 車道
+// 的狀態要立刻是 error、錯誤訊息要包含真正的例外文字，而且例外要繼續往外丟，讓
+// scheduledDailyFetch() 外層的「最近一次排程執行」也正確記到這次失敗。 ---
+{
+  resetFakeProps();
+  context.shouldSkipToday_ = function () { return { skip: false, reason: '' }; };
+  triggerCreateShouldThrow = '這個帳戶的觸發器數量已經達到上限';
+  context.scheduledDailyFetch();
+  triggerCreateShouldThrow = null;
+
+  const dailyJobState = context.getJobLaneState_(context.CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE);
+  assert.strictEqual(dailyJobState.status, 'error', '觸發器建立失敗時，工作狀態要立刻是 error，不能停在 running 假裝正常排定');
+  assert.ok(dailyJobState.errorMessage.indexOf('這個帳戶的觸發器數量已經達到上限') !== -1,
+    '錯誤訊息要包含真正的例外文字，不能只講「時間觸發器很可能沒有被正常觸發」這種籠統、可能誤導原因的話，got: ' + dailyJobState.errorMessage);
+
+  const lastRun = context.getLastScheduledRunSteps('daily');
+  assert.ok(lastRun, '例外要繼續往外丟，讓 scheduledDailyFetch() 外層也正確記到這次失敗，不能被 startJobLane_ 自己吞掉');
+  assert.strictEqual(lastRun.overallStatus, 'failed');
+  console.log('Test startJobLane_ (trigger creation failure marks job state error immediately, not stuck running) passed.');
 }
 
 // --- 「最近一次排程執行」的 daily／resume 兩份紀錄要完全獨立，互不覆蓋——這是使用者實際
