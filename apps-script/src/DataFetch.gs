@@ -654,6 +654,12 @@ function runScheduledSteps_(lane, startIndex, previousSteps, overallStartedAt) {
 function scheduledDailyFetch() {
   var startTime = Date.now();
   try {
+    // 真正的每日 CLOCK 觸發器（這支函式本身）已知會可靠觸發，藉這個機會順便確保安全網
+    // 觸發器也存在（見 Scheduler.gs ensureScheduleWatchdogTrigger_ 的說明）——這樣即使
+    // 使用者是很久以前就設定好排程、之後從來沒有再動過「設定」表單，安全網還是會在某一次
+    // 真正的每日觸發時自動補裝上去，不用使用者自己記得重新存一次排程設定。冪等、輕量
+    // （只是掃一次目前的觸發器清單），每天呼叫一次不算浪費。
+    ensureScheduleWatchdogTrigger_();
     var today = new Date();
     var skip = shouldSkipToday_(today);
     if (skip.skip) {

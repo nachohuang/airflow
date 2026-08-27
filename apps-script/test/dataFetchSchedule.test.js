@@ -45,11 +45,18 @@ const ScriptApp = {
   deleteTrigger: function () {}
 };
 
+// scheduledDailyFetch() 會呼叫 Scheduler.gs 定義的 ensureScheduleWatchdogTrigger_（見那邊的
+// 說明：安全網觸發器，跟這裡測的排程步驟引擎本身無關）——這個測試檔案不載入整份 Scheduler.gs
+// （會帶進更多不相干的依賴，例如 SkipDates 分頁讀取），直接放一個計數用的假實作，同時可以
+// 驗證「每次真正的每日觸發都會嘗試確保安全網存在」這個行為本身有沒有正確接上。
+let ensureScheduleWatchdogTriggerCalls_ = 0;
+
 const context = {
   console: console,
   PropertiesService: PropertiesService,
   ScriptApp: ScriptApp,
   Date: Date,
+  ensureScheduleWatchdogTrigger_: function () { ensureScheduleWatchdogTriggerCalls_++; },
   CONFIG: {
     PROP_KEYS: {
       LAST_SCHEDULED_RUN_DAILY: 'LAST_SCHEDULED_RUN_DAILY',
@@ -321,6 +328,7 @@ function makeCallSpy() {
 {
   resetFakeProps();
   const calls = makeCallSpy();
+  ensureScheduleWatchdogTriggerCalls_ = 0;
   context.shouldSkipToday_ = function () { return { skip: false, reason: '' }; };
   context.scheduledDailyFetch();
   const jobState = context.getJobLaneState_(context.CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE);
@@ -328,6 +336,8 @@ function makeCallSpy() {
   assert.strictEqual(jobState.status, 'running');
   assert.strictEqual(jobState.stepIndex, 0);
   assert.strictEqual(calls.step1, 0, 'scheduledDailyFetch 本身不該同步執行任何步驟——那是 tick 的工作');
+  assert.strictEqual(ensureScheduleWatchdogTriggerCalls_, 1,
+    '真正的每日觸發器每次觸發都該順便確保排程安全網觸發器存在，這樣即使使用者很久以前設定排程後再也沒動過表單，安全網還是會自動補裝上去');
   console.log('Test scheduledDailyFetch (normal case -> starts background job instead of running synchronously) passed.');
 }
 

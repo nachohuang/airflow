@@ -81,6 +81,8 @@ function setSchedule(hour, minute, skipWeekends) {
   props.setProperty(CONFIG.PROP_KEYS.TRIGGER_MINUTE, String(minute));
   props.setProperty(CONFIG.PROP_KEYS.SKIP_WEEKENDS, skipWeekends ? 'true' : 'false');
 
+  ensureScheduleWatchdogTrigger_();
+
   logRun_('排程設定', '成功',
     '設定每日約 ' + hour + ':' + String(minute).padStart(2, '0') + ' 執行' + (skipWeekends ? '（六日不跑）' : '（含六日）'), 0);
   return getScheduleSettings();
@@ -88,8 +90,68 @@ function setSchedule(hour, minute, skipWeekends) {
 
 function disableSchedule() {
   deleteExistingTrigger_();
+  deleteScheduleWatchdogTrigger_();
   logRun_('排程設定', '成功', '已停用每日自動排程', 0);
   return getScheduleSettings();
+}
+
+// ============================================================
+// 排程安全網：Apps Script 近乎即時的一次性觸發器（見 DataFetch.gs startJobLane_ 的說明，
+// scheduledDailyFetch 真正觸發後，實際 5 個步驟是排一個 after(3000) 的一次性觸發器在另一次
+// 獨立執行裡才開始跑）已知偶爾會直接不被平台觸發，不是拋例外、也不是撞到觸發器數量上限
+// （這兩種 startJobLane_ 已經能接住並立刻標記成 error），單純就是平台本身對這種近乎即時的
+// 一次性觸發器沒有 100% 的觸發保證。這種情況下工作會卡在「執行中」，只能等
+// autoHealStaleJobState_ 被動偵測到太久沒更新（前端輪詢/開啟頁面時才會觸發），使用者
+// 自己發現、自己按「重新啟動」——但每日排程是半夜自動觸發，沒有人在看畫面，等於每次卡住
+// 都要放到隔天才會被發現，變成「每天都這樣」。
+//
+// 解法是另外裝一支「週期性」觸發器（不是近乎即時的一次性觸發器，是 Apps Script 官方回報
+// 相對可靠的固定間隔觸發器）當安全網，定期檢查 daily／resume 這兩條排程車道有沒有卡住，
+// 卡住就直接呼叫 restartJob 自動續跑，不用等使用者自己發現。只顧這兩條排程車道，不管
+// 其餘七種背景 job（因子迴歸模型／回測／AI 診斷…）——那些都是使用者手動觸發，觸發當下
+// 人就在畫面前，卡住了自己會發現、自己按重新啟動，跟半夜自動觸發、沒有人在看畫面的每日
+// 排程是完全不同的情境，不需要也不該幫使用者自動重跑他們手動啟動、可能還沒決定要不要
+// 重跑的工作。
+// ============================================================
+
+var SCHEDULE_WATCHDOG_HANDLER_ = 'watchdogResumeStuckScheduleJobs_';
+var SCHEDULE_WATCHDOG_STUCK_MINUTES_ = 12; // 比 JOB_STALE_MINUTES_（JobQueue.gs，30 分鐘）
+// 短，讓安全網通常會搶在被動偵測之前就先自動續跑，使用者很少會真的看到卡住的畫面。
+
+/** 只在還沒有這支安全網觸發器時才建立（避免重複呼叫 setSchedule 疊出好幾個）。 */
+function ensureScheduleWatchdogTrigger_() {
+  var exists = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === SCHEDULE_WATCHDOG_HANDLER_; });
+  if (exists) return;
+  ScriptApp.newTrigger(SCHEDULE_WATCHDOG_HANDLER_).timeBased().everyMinutes(15).create();
+}
+
+function deleteScheduleWatchdogTrigger_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === SCHEDULE_WATCHDOG_HANDLER_) ScriptApp.deleteTrigger(t);
+  });
+}
+
+/** 安全網觸發器本身呼叫的函式：檢查 daily／resume 兩條車道，卡住的話直接呼叫 restartJob
+ *  自動續跑（跟使用者手動按「重新啟動」是同一支函式，同一套邏輯，只是不用等人來按）。
+ *  reused 的 restartJob 本身遇到「其實還在執行中，只是比較慢」也不會中斷既有執行，見它
+ *  自己的說明——這裡沿用同樣的安全假設，不用另外處理。單一車道自動續跑失敗（例如真的
+ *  沒有可重新啟動的既有進度）不該影響另一條車道，各自獨立 try/catch。 */
+function watchdogResumeStuckScheduleJobs_() {
+  [
+    { key: 'dailySchedule', propKey: CONFIG.PROP_KEYS.DAILY_SCHEDULE_JOB_STATE },
+    { key: 'scheduleResume', propKey: CONFIG.PROP_KEYS.SCHEDULE_RESUME_JOB_STATE }
+  ].forEach(function (lane) {
+    try {
+      var state = getJobLaneState_(lane.propKey);
+      if (!state || state.status !== 'running' || !state.updatedAt) return;
+      var idleMinutes = (Date.now() - state.updatedAt) / 60000;
+      if (idleMinutes < SCHEDULE_WATCHDOG_STUCK_MINUTES_) return;
+      logRun_('排程安全網', '成功', lane.key + ' 卡住已經 ' + Math.round(idleMinutes) + ' 分鐘沒有更新，自動重新啟動續跑', 0);
+      restartJob(lane.key);
+    } catch (e) {
+      logRun_('排程安全網', '失敗', lane.key + ' 自動重新啟動失敗：' + String(e.message || e), 0);
+    }
+  });
 }
 
 /** scheduledDailyFetch() 開跑前的守門邏輯：週末 / 使用者設定的臨時停跑日一律跳過。 */
