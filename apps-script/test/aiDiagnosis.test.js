@@ -152,9 +152,9 @@ function approxEqual(a, b, eps) { eps = eps || 1e-9; return Math.abs(a - b) < ep
   assert.strictEqual(context.extractVerdict_(text), '分批布局');
   assert.strictEqual(context.extractVerdict_('沒有關鍵字的文字'), '未明確');
 
-  const holdingText = '> 💡 **最終建議：** 【觸發止損平倉】\n> **核心理由：** 虧損擴大且籌碼轉弱';
-  assert.strictEqual(context.extractVerdict_(holdingText), '觸發止損平倉', '持股續抱的決策分類也要認得');
-  assert.strictEqual(context.extractVerdict_('> 💡 **最終建議：** 【強力續抱】'), '強力續抱');
+  const holdingText = '> 💡 **最終建議：** 【體質惡化，出場】\n> **核心理由：** 護城河鬆動且法人轉為賣超';
+  assert.strictEqual(context.extractVerdict_(holdingText), '體質惡化，出場', '持股續抱（以體質變化為準）的決策分類也要認得');
+  assert.strictEqual(context.extractVerdict_('> 💡 **最終建議：** 【體質穩健，續抱】'), '體質穩健，續抱');
   console.log('Test 4 (extractVerdict_) passed.');
 }
 

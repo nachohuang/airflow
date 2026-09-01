@@ -115,11 +115,11 @@ loadIntoContext('JobQueue.gs');
 
   const holdDone = context.jobQueueDetail_('aiTask', {
     status: 'done', taskType: 'hold', payload: { code: '5434' },
-    result: { ok: true, code: '5434', verdict: '強力續抱' }
+    result: { ok: true, code: '5434', verdict: '體質穩健，續抱' }
   });
   assert.ok(holdDone.indexOf('持股續抱診斷') !== -1);
   assert.ok(holdDone.indexOf('5434') !== -1);
-  assert.ok(holdDone.indexOf('強力續抱') !== -1);
+  assert.ok(holdDone.indexOf('體質穩健，續抱') !== -1);
 
   const holdFailed = context.jobQueueDetail_('aiTask', {
     status: 'done', taskType: 'hold', payload: { code: '5434' },

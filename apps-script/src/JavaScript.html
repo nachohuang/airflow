@@ -491,8 +491,8 @@
 
   /** 決策結論置頂橫幅：一打開就先看到最終建議，不用滑到最底部才找得到。verdict 是空字串或
    *  「未明確」時不畫（例如 Top3 橫向比較沒有單一決策）。 */
-  var AI_VERDICT_UP_ = ['強力買入', '分批布局', '強力續抱', '分批獲利入袋'];
-  var AI_VERDICT_DOWN_ = ['立刻退出', '觸發止損平倉', '彈升減碼'];
+  var AI_VERDICT_UP_ = ['強力買入', '分批布局', '體質轉強，加碼', '體質穩健，續抱'];
+  var AI_VERDICT_DOWN_ = ['立刻退出', '體質轉弱，減碼', '體質惡化，出場'];
   function renderAiVerdictBanner_(verdict, reason) {
     if (!verdict || verdict === '未明確') return '';
     var cls = AI_VERDICT_UP_.indexOf(verdict) !== -1 ? 'up' : (AI_VERDICT_DOWN_.indexOf(verdict) !== -1 ? 'down' : '');
