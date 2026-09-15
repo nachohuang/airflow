@@ -1,0 +1,80 @@
+rules_version = '2';
+
+// Phase 1 草案。單人工具，但「單人使用」不等於「不用驗證」——見遷移藍圖 §02／§07，
+// 現行 Apps Script 版本沒有真正的登入機制（整個網頁「以我的身份執行」），這是遷移
+// 過程明確要補上的項目，不是照搬現況。
+//
+// 存取模型：唯一授權使用者（owner email 寫死在下面，帳號固定、不需要多租戶）。
+// 所有 collection 預設拒絕，逐一開白名單，避免漏開規則導致某個新 collection
+// 意外變成任何登入者都能讀寫。
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner() {
+      // TODO：Firebase Auth 上線後，換成實際登入帳號的 email。這裡先用擁有者的
+      // Google 帳號 email 當唯一授權對象（見 firebase-migration/README.md 的
+      // Phase 0 設定步驟：Firebase Auth 只開這一個帳號的 Google 登入）。
+      return request.auth != null
+        && request.auth.token.email == 'nachohuang@gmail.com';
+    }
+
+    // 預設全部拒絕，逼每個 collection 都要明確開規則，不會漏開。
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ---------- 使用者可以直接讀寫的 collection ----------
+    // 持股、觀察清單、臨時停跑日：使用者透過前端表單直接維護的資料，
+    // owner 可以直接讀寫，欄位層級的驗證（例如股票代號格式、日期格式）
+    // 留給 Cloud Functions 的 Callable Function 做，Security Rules 只把關
+    // 「是不是本人」，不做欄位格式驗證（規則語法能力有限，格式驗證交給
+    // 後端邏輯，跟現行 zfill4／normalizeDateStr 這類防禦性正規化同一個責任邊界）。
+    match /watchlist/{code} {
+      allow read, write: if isOwner();
+    }
+    match /portfolio_lots/{transactionId} {
+      allow read, write: if isOwner();
+    }
+    match /skip_dates/{date} {
+      allow read, write: if isOwner();
+    }
+
+    // ---------- 只讀（由後端寫入，前端不能直接改） ----------
+    // 戰報／AI 診斷／產業對照表都是背景工作算出來的衍生資料，直接允許使用者
+    // 端寫入沒有意義（下次重算就會被覆蓋），只開唯讀，寫入只能透過 Cloud
+    // Functions 用 Admin SDK（不受這份規則限制）。
+    match /reports/{date} {
+      allow read: if isOwner();
+      match /signals/{code} {
+        allow read: if isOwner();
+      }
+    }
+    match /ai_diagnosis/{docId} {
+      allow read: if isOwner();
+    }
+    match /industry_map/{code} {
+      allow read: if isOwner();
+    }
+    match /backtest_results/{runId} {
+      allow read: if isOwner();
+    }
+    match /factor_scan_results/{runId} {
+      allow read: if isOwner();
+    }
+    match /factor_model_history/{runId} {
+      allow read: if isOwner();
+    }
+
+    // ---------- 工作狀態：前端只能讀（監聽進度），重新啟動/刪除要走
+    // Cloud Function（避免使用者端直接竄改 job 狀態導致背景工作邏輯誤判） ----------
+    match /jobs/{jobKey} {
+      allow read: if isOwner();
+    }
+
+    // ---------- 設定：允許 owner 讀寫（後台管理頁面直接改），API 金鑰不在這裡 ----------
+    match /config/{configId} {
+      allow read, write: if isOwner();
+    }
+  }
+}

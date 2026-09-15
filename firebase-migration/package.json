@@ -1,0 +1,11 @@
+{
+  "name": "twse-firebase-migration",
+  "private": true,
+  "description": "Watchlist -> Firestore 遷移 spike（Phase 2）。transform.js/checks.js 是純邏輯，不需要任何雲端憑證就能跑測試；import-firestore.js/validate.js 需要 GOOGLE_APPLICATION_CREDENTIALS 指到服務帳戶金鑰才能實際連 Firestore。",
+  "scripts": {
+    "test": "node migration/test/transform.test.js && node migration/test/checks.test.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}
