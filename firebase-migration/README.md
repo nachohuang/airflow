@@ -4,8 +4,13 @@
 工具＋資料品質驗證），先拿 Watchlist（觀察個股清單）當練手對象——資料量最小、
 邏輯最單純，跑完整套流程就能實際估出其餘 11 張表大概要花多久，再回頭校準時程。
 
+**這次 spike 用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進
+`.firebaserc`，`firebase deploy` 類指令不用再手動指定 `--project`）。
+
 ## 這裡有什麼
 
+- `.firebaserc` / `firebase.json` — 指到上面那個專案 ID，讓 `firebase-tools`
+  CLI 知道要部署去哪裡
 - `firestore/schema.md` — 全部 12 張表的 Firestore collection/document 結構設計
   （不只 Watchlist，整個遷移藍圖的資料模型都定案在這裡，後續階段照這份繼續）
 - `firestore/firestore.rules` — Security Rules 草案，單一授權使用者的存取模型
@@ -19,21 +24,28 @@
 
 這邊沒有 Google/Firebase 帳號的登入憑證，以下步驟要你自己操作：
 
-1. 到 [Firebase Console](https://console.firebase.google.com/) 建立一個新專案
-   （或沿用現有跟 BigQuery 同一個 GCP 專案，見遷移藍圖 Phase 0 的建議，同一個
-   計費帳戶比較好管理）。
+1. ~~到 Firebase Console 建立專案~~ ✅ 已完成（`flash-arbor-365706`）。
 2. 啟用 **Firestore Database**（Native mode，地區建議選 `asia-east1`，跟
    BigQuery 資料同一個亞洲區域，減少之後的跨區延遲/費用）。
 3. 啟用 **Firebase Authentication**，開「Google 登入」，只需要能讓你自己的
    Google 帳號登入即可（單人工具，不用開放註冊）。
-4. 產生一把**服務帳戶金鑰**（Project Settings → Service Accounts → Generate
-   new private key），下載成一個 `.json` 檔案——這把金鑰能完全存取你的
-   Firestore，**不要放進 git、不要外流**，本機隨便一個安全的路徑存著就好。
-5. 把 `firestore/firestore.rules` 部署上去（Firebase Console 的 Firestore →
-   規則分頁，直接貼上這份檔案的內容儲存；或裝 `firebase-tools` CLI 用
-   `firebase deploy --only firestore:rules`）。
+4. 產生一把**服務帳戶金鑰**（專案設定 → 服務帳戶 → 產生新的私密金鑰），下載
+   成一個 `.json` 檔案——這把金鑰能完全存取你的 Firestore，**不要放進 git、
+   不要外流**，本機隨便一個安全的路徑存著就好。下載後打開檔案確認裡面
+   `"project_id"` 這欄寫的是 `flash-arbor-365706`，避免不小心下載到別的
+   專案的金鑰。
+5. 部署 `firestore/firestore.rules`——現在有兩種方式都可以：
+   - **Console 手動貼上**（不用裝東西）：Firebase Console 的 Firestore →
+     規則分頁，直接貼上這份檔案的內容儲存。
+   - **CLI**（`.firebaserc`/`firebase.json` 已經設好，不用另外指定專案）：
+     ```bash
+     cd firebase-migration
+     npx firebase-tools deploy --only firestore:rules
+     ```
+     第一次跑會跳出瀏覽器要你用同一個 Google 帳號登入授權，授權完會自動繼續。
 
 ## 跑一次完整的 Watchlist 遷移 spike
+
 
 ```bash
 cd firebase-migration
