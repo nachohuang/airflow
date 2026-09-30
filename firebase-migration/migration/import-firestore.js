@@ -2,13 +2,16 @@
 /**
  * import-firestore.js
  * Phase 2 spike：讀 export-sheets.gs 匯出的 Watchlist JSON，寫進 Firestore
- * watchlist/{code}。需要先完成 Phase 0（建立 Firebase 專案、下載服務帳戶金鑰）
- * 才能實際執行——這支腳本本身沒有內建憑證，讀環境變數
- * GOOGLE_APPLICATION_CREDENTIALS 指到服務帳戶 JSON 金鑰檔案路徑。
+ * watchlist/{code}。需要先完成 Phase 0（建立 Firebase 專案、備妥憑證——本機
+ * 用服務帳戶金鑰檔案，或 Cloud Shell 用 `gcloud auth application-default
+ * login`，見 firebase-init.js 的說明，兩種都可以）才能實際執行。
  *
- * 用法：
+ * 用法（本機，服務帳戶金鑰）：
  *   GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
  *     node import-firestore.js [--dry-run] <export.json 路徑>
+ *
+ * 用法（Cloud Shell，已經 gcloud auth application-default login 過）：
+ *   node import-firestore.js [--dry-run] <export.json 路徑>
  *
  * --dry-run：只印出會寫入的內容，不實際呼叫 Firestore，先確認轉換結果對不對
  * 再真的跑——遷移真實資料前務必先跑過一次 dry-run。
@@ -55,9 +58,7 @@ function main() {
     return;
   }
 
-  var admin = require('firebase-admin');
-  admin.initializeApp({ credential: admin.credential.applicationDefault() });
-  var db = admin.firestore();
+  var db = require('./firebase-init').getFirestore();
 
   var batch = db.batch();
   docs.forEach(function (doc) {

@@ -5,9 +5,12 @@
  * 檢查邏輯本身（checks.js）不需要雲端憑證就能單元測試，這支只是負責「怎麼把
  * 兩份資料抓進記憶體再丟給檢查邏輯」的薄殼。
  *
- * 用法：
+ * 用法（本機，服務帳戶金鑰）：
  *   GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
  *     node validate.js <export.json 路徑>
+ *
+ * 用法（Cloud Shell，已經 gcloud auth application-default login 過）：
+ *   node validate.js <export.json 路徑>
  */
 var fs = require('fs');
 var path = require('path');
@@ -22,9 +25,7 @@ function main() {
   }
   var raw = JSON.parse(fs.readFileSync(path.resolve(filePath), 'utf8'));
 
-  var admin = require('firebase-admin');
-  admin.initializeApp({ credential: admin.credential.applicationDefault() });
-  var db = admin.firestore();
+  var db = require('./firebase-init').getFirestore();
 
   db.collection('watchlist').get().then(function (snapshot) {
     var firestoreDocs = snapshot.docs.map(function (d) {
