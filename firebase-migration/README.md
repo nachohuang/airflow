@@ -1,31 +1,48 @@
-# Firebase 遷移工具（Phase 1 / Phase 2 spike）
+# Firebase 遷移工具（Phase 1 / Phase 2）
 
 對應〈選股引擎遷移藍圖〉的 Phase 1（Firestore schema 設計）跟 Phase 2（資料遷移
-工具＋資料品質驗證），先拿 Watchlist（觀察個股清單）當練手對象——資料量最小、
-邏輯最單純，跑完整套流程就能實際估出其餘 11 張表大概要花多久，再回頭校準時程。
+工具＋資料品質驗證）。第一張表（Watchlist）是拿來練手的 spike——資料量最小、
+邏輯最單純，跑完整套流程證明可行之後，照同一套模式（`migration/<table>/` 底下
+一組 `transform.js`/`checks.js`/`export-sheets.gs`/`import-firestore.js`/
+`validate.js`）繼續遷移其他表。
 
-**✅ Watchlist 這張表的 spike 已經跑完整套流程並驗證通過**（2026-09-30，透過
-Cloud Shell）：Apps Script 匯出 → 傳進 Cloud Shell → dry-run → 正式寫入
-Firestore → `validate.js` 核對 → `✅ 通過`。整條遷移路徑證明可行，下面留著
-完整步驟給之後遷移其他張表（Portfolio 等）參考、複製。
+**✅ 已完整跑過整套流程並驗證通過的表**（Apps Script 匯出 → 傳進 Cloud Shell →
+dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）：
 
-**這次 spike 用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進
-`.firebaserc`，`firebase deploy` 類指令不用再手動指定 `--project`）。
+- Watchlist（2026-09-30，spike，證明整條路徑可行）
+
+**工具已就緒、尚未實際對真實資料跑過一次的表**：
+
+- Portfolio（`migration/portfolio/`，含金額校驗——依代號重算加權平均成本，
+  比對來源與 Firestore 兩邊算出來的數字是否一致，見下方「跟 Watchlist 不同
+  的地方」）
+
+**這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
+`firebase deploy` 類指令不用再手動指定 `--project`）。
 
 ## 這裡有什麼
 
 - `.firebaserc` / `firebase.json` — 指到上面那個專案 ID，讓 `firebase-tools`
   CLI 知道要部署去哪裡
 - `firestore/schema.md` — 全部 12 張表的 Firestore collection/document 結構設計
-  （不只 Watchlist，整個遷移藍圖的資料模型都定案在這裡，後續階段照這份繼續）
+  （整個遷移藍圖的資料模型都定案在這裡，後續階段照這份繼續）
 - `firestore/firestore.rules` — Security Rules 草案，單一授權使用者的存取模型
-- `migration/` — Watchlist 的匯出／匯入／驗證工具（這次 spike 唯一會**實際執行**
-  的部分）
-  - `transform.js` / `checks.js` — 純邏輯，不需要雲端憑證，有完整單元測試
+- `migration/lib/` — 跨表共用的純邏輯，不需要任何雲端憑證
+  - `normalize.js` — `zfill4`（股票代號補零成 4 碼）／`normalizeDateStr`
+    （日期統一成 `YYYY-MM-DD`），每張表的 `transform.js` 都會用到，只有一份，
+    不要每張表各自複製
   - `firebase-init.js` — 共用的 Firestore 連線邏輯，本機服務帳戶金鑰／Cloud
     Shell 的 `gcloud` 使用者憑證兩種都支援
+- `migration/watchlist/`、`migration/portfolio/` — 每張表各自一組遷移工具，
+  結構完全一樣：
+  - `transform.js` / `checks.js` — 純邏輯，不需要雲端憑證，`test/` 底下有完整
+    單元測試
   - `export-sheets.gs` — 貼進既有 Apps Script 專案手動執行一次
-  - `import-firestore.js` / `validate.js` — 需要憑證才能實際執行
+  - `import-firestore.js` / `validate.js` — 需要憑證才能實際執行，用共用的
+    `../lib/firebase-init.js` 連線
+
+遷移下一張表時，複製 `migration/portfolio/` 整個目錄結構最快——沿用同樣的檔名、
+同樣的 CLI 用法，只需要照新表的欄位改 `transform.js`/`checks.js` 的內容。
 
 ## 你需要先做的事（Phase 0，只有你能做）
 
@@ -38,7 +55,12 @@ Firestore → `validate.js` 核對 → `✅ 通過`。整條遷移路徑證明�
    產生新的私密金鑰，下載 `.json` 檔案，**不要放進 git、不要外流**。
 5. ~~部署 `firestore/firestore.rules`~~ ✅ 已完成。
 
-## 跑一次完整的 Watchlist 遷移 spike（Cloud Shell 版本，已驗證可行）
+## 跑一次完整的表遷移流程（Cloud Shell 版本，Watchlist 已驗證可行，Portfolio 照同一套）
+
+下面用 `<table>` 代表表名（`watchlist` 或 `portfolio`），`<Table>` 代表對應的
+匯出函式名稱字首（`Watchlist` 或 `Portfolio`）——例如 Watchlist 就是
+`migration/watchlist/...`、`exportWatchlistToJson`；Portfolio 就是
+`migration/portfolio/...`、`exportPortfolioToJson`。
 
 ```bash
 # 0. 開 Cloud Shell（console.cloud.google.com 右上角 >_ 圖示），確認專案正確
@@ -51,13 +73,13 @@ cd airflow/firebase-migration
 npm install
 npm test   # 應該印出全部 passed，不需要任何雲端憑證
 
-# 2. 匯出：到 Apps Script 編輯器，把 migration/export-sheets.gs 的內容貼進既有
-#    專案（可以直接貼在 Watchlist.gs 檔案最後面，或另外新建一個腳本檔案），
-#    存檔後在函式下拉選單選 exportWatchlistToJson、點「執行」。第一次會跳
-#    授權視窗（要存取 Drive），允許即可。執行完在「執行紀錄」看到 Drive
-#    連結，下載那個 watchlist-export-*.json 檔案。
+# 2. 匯出：到 Apps Script 編輯器，把 migration/<table>/export-sheets.gs 的內容
+#    貼進既有專案（可以直接貼在對應的 <Table>.gs 檔案最後面，或另外新建一個
+#    腳本檔案），存檔後在函式下拉選單選 export<Table>ToJson、點「執行」。第一次
+#    會跳授權視窗（要存取 Drive），允許即可。執行完在「執行紀錄」看到 Drive
+#    連結，下載那個 <table>-export-*.json 檔案。
 #
-#    ⚠️ 函式名稱不能用底線結尾（不是 exportWatchlistToJson_）——Apps Script
+#    ⚠️ 函式名稱不能用底線結尾（不是 export<Table>ToJson_）——Apps Script
 #    編輯器的執行下拉選單會把底線結尾的函式當內部函式直接隱藏，找不到不代表
 #    存檔失敗，是這個命名慣例本身被 UI 特殊處理，見 export-sheets.gs 的說明。
 #
@@ -67,39 +89,54 @@ npm test   # 應該印出全部 passed，不需要任何雲端憑證
 #    （會傳到 $HOME 目錄）
 
 # 4. 先 dry-run，看轉換結果對不對，還沒有真的寫入 Firestore
-node migration/import-firestore.js --dry-run ~/watchlist-export-*.json
+node migration/<table>/import-firestore.js --dry-run ~/<table>-export-*.json
 
 # 5. 確認 dry-run 輸出沒問題，才真的寫入
-node migration/import-firestore.js ~/watchlist-export-*.json
+node migration/<table>/import-firestore.js ~/<table>-export-*.json
 
 # 6. 驗證：核對 Firestore 裡的資料跟來源是否完全一致
-node migration/validate.js ~/watchlist-export-*.json
+node migration/<table>/validate.js ~/<table>-export-*.json
 ```
 
 （本機也能跑，把步驟 0 換成設定 `GOOGLE_APPLICATION_CREDENTIALS` 指到服務
-帳戶金鑰檔案，其餘步驟一樣——`firebase-init.js` 兩種憑證來源都支援。）
+帳戶金鑰檔案，其餘步驟一樣——`lib/firebase-init.js` 兩種憑證來源都支援。）
 
-看到 `validate.js` 印出 `✅ 通過` 就代表這次 spike 成功，可以回頭校準
-〈選股引擎遷移藍圖〉裡 Phase 2 對其餘 11 張表的時程估計。
+看到 `validate.js` 印出 `✅ 通過` 就代表這張表遷移成功。
 
-## 這次 spike 踩過的坑（下次遷移其他表可以少走的路）
+## 跟 Watchlist 不同的地方（Portfolio 專屬）
 
-- **Watchlist 分頁一開始是空的**：匯出腳本本身沒問題，只是沒資料可匯——先到
-  App 的「觀察個股」加 1-2 筆測試資料，才能真正驗證「內容逐筆比對」這段
-  邏輯，不然永遠只會測到「0 筆對 0 筆」這個邊界情況。
+- **`status` 欄位翻譯**：原文字「持有中」/「已賣出」在 Firestore 版翻成英文
+  列舉 `"holding"` / `"sold"`，避免中文字面值散落在後端到處要用字串比對；
+  空白/未知值一律當 `holding`，跟現行 `Portfolio.gs` 的
+  `r['狀態'] || '持有中'` 預設邏輯一致。
+- **`sellDate`／`sellPrice` 允許是 `null`**：持有中的部位本來就還沒賣，
+  `checks.js` 的型別檢查特別放寬這兩個欄位，`null` 不算型別錯誤；已賣出卻
+  缺這兩個值只降級成警告（來源資料本身可能本來就不乾淨，不是遷移邏輯的錯）。
+- **多一項「金額校驗」**：`checks.js` 額外依代號把持有中的 lot 分組，用跟
+  `apps-script/src/Portfolio.gs` 的 `aggregateLots_` 同一套邏輯，各自對來源
+  跟 Firestore 重新算一次加權平均成本跟總股數，兩邊要一致——這一項不是逐列
+  比對，是用來抓「單列都對、但彙總邏輯用到的數字型別/精度悄悄跑掉」這種比較
+  隱蔽的問題（對照〈選股引擎遷移藍圖〉§05 的金額校驗要求）。
+
+## 已知的坑（下次遷移其他表可以少走的路）
+
+- **來源分頁可能一開始是空的**：匯出腳本本身沒問題，只是沒資料可匯——先到
+  App 對應的功能頁加 1-2 筆測試資料，才能真正驗證「內容逐筆比對」這段邏輯，
+  不然永遠只會測到「0 筆對 0 筆」這個邊界情況。
 - **函式名稱結尾底線會被 Apps Script 執行選單隱藏**：這支 App 的程式碼慣例
   用結尾底線代表「內部函式」，但 Apps Script 編輯器真的會拿這個慣例決定要
-  不要顯示在「執行」下拉選單裡，跟檔案存不存得成功無關。`export-sheets.gs`
-  現在已經改用不結尾底線的函式名稱。
+  不要顯示在「執行」下拉選單裡，跟檔案存不存得成功無關。每張表的
+  `export-sheets.gs` 都已經用不結尾底線的函式名稱，複製去下一張表時記得
+  保持這個慣例。
 - **Cloud Shell 的 `$HOME` 可能已經有舊的 clone**：如果之前 clone 過這個
   repo，`git clone` 會因為目錄已存在而失敗——改用 `git pull` 更新既有的
   clone，不用整個刪掉重來。
 
-## 這次 spike 特意沒做的事
+## 目前特意沒做的事
 
-- **沒有寫 Cloud Functions**——這次只驗證「資料搬得動、搬完是乾淨的」，不是
+- **沒有寫 Cloud Functions**——目前只驗證「資料搬得動、搬完是乾淨的」，不是
   搬整套後端邏輯，那是 Phase 3 的範圍。
-- **沒有改動 Apps Script 現有的 Watchlist 功能**——`export-sheets.gs` 只是讀
-  資料，`apps-script/` 目錄完全沒有被動到，現有的觀察個股功能繼續正常運作。
-- **沒有把 API 金鑰放進任何檔案**——這次 spike 用不到 Anthropic/Gemini 金鑰，
-  等 Phase 3 真的要搬 AI 診斷邏輯時再處理 Secret Manager。
+- **沒有改動 Apps Script 現有功能**——`export-sheets.gs` 只是讀資料，
+  `apps-script/` 目錄完全沒有被動到，現有功能繼續正常運作。
+- **沒有把 API 金鑰放進任何檔案**——目前用不到 Anthropic/Gemini 金鑰，等
+  Phase 3 真的要搬 AI 診斷邏輯時再處理 Secret Manager。

@@ -25,7 +25,7 @@ function main() {
   }
   var raw = JSON.parse(fs.readFileSync(path.resolve(filePath), 'utf8'));
 
-  var db = require('./firebase-init').getFirestore();
+  var db = require('../lib/firebase-init').getFirestore();
 
   db.collection('watchlist').get().then(function (snapshot) {
     var firestoreDocs = snapshot.docs.map(function (d) {

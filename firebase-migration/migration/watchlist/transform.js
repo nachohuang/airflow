@@ -4,32 +4,9 @@
  * 跟 import-firestore.js（實際打 Firebase Admin SDK 的部分）分開，這支不需要任何
  * 雲端憑證就能單元測試，對照 apps-script/test 既有的測試風格與紀律。
  */
-
-function zfill4(raw) {
-  var s = String(raw == null ? '' : raw).trim();
-  if (!s) return '';
-  while (s.length < 4) s = '0' + s;
-  return s;
-}
-
-/** 跟 apps-script/src/Utils.gs 的 normalizeDateStr 同樣目的：把各種常見的日期輸入
- *  格式統一成 YYYY-MM-DD。export-sheets.gs 匯出的資料經過 JSON.stringify 之後，
- *  Sheets 裡原本是 Date 型別的儲存格會變成 ISO 字串（例如
- *  "2026-08-21T00:00:00.000Z"），不會是真正的 JS Date 物件——這裡兩種輸入都處理，
- *  不假設一定是哪一種。 */
-function normalizeDateStr(raw) {
-  if (raw == null || raw === '') return '';
-  if (raw instanceof Date) {
-    var y = raw.getFullYear();
-    var m = String(raw.getMonth() + 1).padStart(2, '0');
-    var d = String(raw.getDate()).padStart(2, '0');
-    return y + '-' + m + '-' + d;
-  }
-  var s = String(raw).trim();
-  var m2 = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-  if (m2) return m2[1] + '-' + m2[2].padStart(2, '0') + '-' + m2[3].padStart(2, '0');
-  return s;
-}
+var normalize = require('../lib/normalize');
+var zfill4 = normalize.zfill4;
+var normalizeDateStr = normalize.normalizeDateStr;
 
 /**
  * sheetRow：從 export-sheets.gs 匯出的 JSON 裡一筆物件，鍵名是中文欄位名稱

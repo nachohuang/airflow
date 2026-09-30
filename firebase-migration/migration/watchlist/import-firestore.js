@@ -4,7 +4,7 @@
  * Phase 2 spike：讀 export-sheets.gs 匯出的 Watchlist JSON，寫進 Firestore
  * watchlist/{code}。需要先完成 Phase 0（建立 Firebase 專案、備妥憑證——本機
  * 用服務帳戶金鑰檔案，或 Cloud Shell 用 `gcloud auth application-default
- * login`，見 firebase-init.js 的說明，兩種都可以）才能實際執行。
+ * login`，見 ../lib/firebase-init.js 的說明，兩種都可以）才能實際執行。
  *
  * 用法（本機，服務帳戶金鑰）：
  *   GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json \
@@ -58,7 +58,7 @@ function main() {
     return;
   }
 
-  var db = require('./firebase-init').getFirestore();
+  var db = require('../lib/firebase-init').getFirestore();
 
   var batch = db.batch();
   docs.forEach(function (doc) {
