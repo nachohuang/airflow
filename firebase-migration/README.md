@@ -17,9 +17,7 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
   覆寫語意讓它自然收斂成 1 篇文件，不是遷移出錯，見下方「跟其他表不同的
   地方」）
 
-**工具已就緒、尚未實際對真實資料跑過一次的表**：
-
-- SkipDates（`migration/skip_dates/`，欄位最少、邏輯最單純的一張）
+- SkipDates（2026-10-05，1 筆真實資料，`✅ 通過`）
 
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
