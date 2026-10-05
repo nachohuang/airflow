@@ -330,6 +330,58 @@ All parity checks passed — lib/analysis.js matches apps-script/src/Analysis.gs
 失敗——它不是「兩邊永遠要一致」的迴歸測試，只是留著當作複製時刻的歷史
 記錄；日常的迴歸測試看 `test/analysis.test.js` 就好。
 
+## I/O orchestration 層（2026-10-05）
+
+- `functions/lib/portfolio.js` — 從 Firestore `portfolio_lots`（Phase 2
+  已遷移完成）組出 `computeFactors_` 需要的 `portfolioMap`。跟
+  `apps-script/src/Portfolio.gs` 的 `aggregateLots_`/`getPortfolioMap_`
+  同一套加權平均成本／最早買進日邏輯，但針對 Firestore 文件的英文欄名
+  （`buyPrice`/`shares`/`buyDate`/`status`）重新寫一次，不是直接複製
+  （Sheets 版操作的是中文欄名的原始儲存格字串，型別處理方式不一樣）。
+- `functions/lib/bigquery.js` — 從 `apps-script/src/BigQuerySync.gs` 複製
+  的純函式：組查詢 History 的 SQL（`buildHistoryRangeSql_`）、BigQuery
+  ascii 欄名列轉回 `computeFactors_` 期待的中文欄名列
+  （`mapBqRowToHistoryRow_`）、依 `config/app` 的 `bigQuery.sourceMode`
+  決定要讀哪個 view（`sourceRefForRead_`）。不含實際呼叫 BigQuery API 的
+  部分。
+- `functions/lib/reportPipeline.js` — 戰報計算的 orchestration 核心，但
+  本身仍是純函式：吃「已經讀進記憶體的 History 列 + 持股 lot 文件」，组出
+  戰報（`buildReport_`）。跟 `apps-script/src/Analysis.gs` 的
+  `runAnalysis()` 職責相同，差別是刻意把「讀資料」留給呼叫端
+  （`index.js` 才需要真的連 BigQuery／Firestore），這支只管「資料到手之後
+  怎麼算」，所以可以在沒有雲端憑證的情況下完整單元測試。輸出的文件形狀
+  直接對照 `firestore/schema.md` §3（英文欄名），不是 Sheets 版中文欄名。
+- `functions/index.js` — 真正接上 I/O 的 Cloud Functions 進入點：讀
+  `config/app` 取得 `screeningStrategy`/`bigQuery` 設定、查 BigQuery 最近
+  `ANALYSIS_LOOKBACK_DAYS` 天的原始 History、讀 `portfolio_lots`、呼叫
+  `reportPipeline.buildReport_`、寫進 Firestore
+  `reports/{date}/signals/{code}`。匯出兩個 function：
+  `generateDailyReportScheduled`（每個交易日台北時間 23:00 觸發，取代
+  `scheduledDailyFetch` 裡「算戰報」這一步）跟 `generateDailyReport`
+  （HTTPS endpoint，手動觸發，取代「重新計算戰報」按鈕，回傳戰報摘要
+  方便部署後直接 curl 驗證）。
+
+**設計選擇：History 改成抓原始列在 Node 算，不搬
+`buildLatestDayFactorsSql_`（SQL window function 版的因子計算）過來。**
+那支 SQL 存在的原因是 Apps Script 的 V8 執行環境記憶體上限扛不住
+「150 天 x 全市場」的原始資料量（實測會「記憶體不足」），但 Cloud
+Functions 預設就有更高的記憶體/執行時間上限，不需要為了同一個限制再維護
+第二套獨立實作（SQL 版）的因子計算邏輯——兩套算法都要各自驗證正確性，
+徒增風險，不如只信任已經被 `parity.test.js` 驗證過的 `computeFactors_`。
+
+- `functions/test/portfolio.test.js`／`bigquery.test.js`／
+  `reportPipeline.test.js` — 分別驗證上面三個 `lib/` 檔案，`reportPipeline`
+  的測試特別包含「持股止損一定出現、流動性不足的非持股股票被篩掉、多股票
+  依 Armor_Score 排序」這幾個貼近真實情境的案例。
+
+⚠️ **`index.js` 本身沒辦法在這個開發環境驗證**——這裡沒有真正的 BigQuery／
+Firestore 雲端憑證，`npm install` 跟 `node --check`/`require()` 確認過
+語法跟模組路徑都正確，但「接線接得對不對」（SQL 真的查得到資料、Firestore
+真的寫得進去）要等部署到真正的 Firebase 專案才能驗證，跟 Phase 2 遷移
+工具的驗證模式一樣（先 dry-run/語法檢查，再上 Cloud Shell 用真實憑證跑一次）。
+`lib/` 底下的計算邏輯本身已經靠單元測試跟 parity 測試驗證過，`index.js`
+要驗證的只是「接線有沒有接對」，不是「算得對不對」。
+
 跑全部測試（`functions/` 目錄底下）：
 
 ```bash
@@ -340,20 +392,25 @@ npm test
 
 ## 還沒做的事（下一步）
 
-- **I/O orchestration 層**：讀 BigQuery 的 History、讀 Firestore 的
-  `portfolio_lots`（組出 `computeFactors_` 需要的 `portfolioMap`）、算完
-  寫進 Firestore `reports/{date}/signals/{code}`（對照
-  `firestore/schema.md` §3）。這會是一個新的 Cloud Function（HTTPS
-  trigger 或 Cloud Scheduler 排程觸發），呼叫 `lib/analysis.js` 的純函式。
+- **部署驗證 `index.js`**：跟 Phase 2 遷移工具一樣，需要實際部署到
+  `flash-arbor-365706` 這個 Firebase 專案（`firebase deploy --only
+  functions`），用 `generateDailyReport` 這個 HTTPS endpoint 手動觸發一次，
+  確認真的能查到 BigQuery 資料、寫進 Firestore、回傳的 `reportCount`／
+  `diagnostics` 跟預期的量級吻合（比照 Phase 2 驗證 Watchlist／Portfolio
+  那幾張表時「對照真實資料筆數」的做法）。
 - **因子模型資料**：`getAppliedFactorModels()`（讀 Apps Script 的
   FactorModelHistory 分頁）還沒有 Firestore 版對應——`factor_model_history`
   這張表照〈遷移藍圖〉本來就排在 Phase 3 跟後端邏輯一起搬，現在預設策略
   `rule_v17` 不需要它（`needsFactorModel: false`），可以先不處理；
   `factor_model_rank`/`hybrid` 這兩種策略要等那張表也遷移完才能在
-  Firebase 版正常運作。
+  Firebase 版正常運作（`index.js` 目前固定傳 `{}` 當 `appliedFactorModels`）。
 - **背景 job 狀態機**：`startAnalysisJob`/`processAnalysisJobTick_` 這類
   機制在 Cloud Functions 世界不需要照搬——Cloud Functions 本身沒有 Apps
   Script 的 6 分鐘執行上限跟一次性觸發器不可靠的問題，這段「背景 job 繞過
-  瀏覽器分頁中斷」的設計是 Apps Script 平台限制逼出來的，Firebase 版大概
-  用一個同步執行的 HTTPS Function 或 Cloud Scheduler 排程就能取代，不需要
-  整套狀態機搬過去。
+  瀏覽器分頁中斷」的設計是 Apps Script 平台限制逼出來的，`index.js` 已經
+  用一個同步執行的 HTTPS Function + Cloud Scheduler 排程取代，不需要整套
+  狀態機搬過去。
+- **xlsx 完整快照匯出**：`apps-script/src/Analysis.gs` 的
+  `exportReportToDrive_()`（存一份完整欄位的 xlsx 到 Drive）還沒有 Firebase
+  版對應，如果這個功能還需要保留，大概會改成寫進 Cloud Storage，目前還沒
+  決定要不要做。
