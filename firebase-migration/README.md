@@ -470,6 +470,10 @@ Function 參考：
   同一天既有的文件，把不在這次 `reportDocs` 清單裡的舊文件一併刪除，跟
   新文件的 `set()` 合併成同一輪批次寫入（操作數可能超過 Firestore 單批
   500 筆上限，用跟 AiDiagnosis／IndustryMap 一樣的分批寫入處理）。
+  **已重新部署驗證**：修好之後同一天重跑 `hybrid`，Firestore 文件數
+  （8）跟 `reportCount`（8）完全一致，8 筆的 `predictedReturn1m`／
+  `predictedDownsideResistance` 都不是 `null`，沒有任何舊策略留下來的
+  殘留文件。
 
 跑全部測試（`functions/` 目錄底下）：
 
@@ -481,24 +485,13 @@ npm test
 
 ## 還沒做的事（下一步）
 
-- **因子模型資料的遷移工具已經就緒、`functions/index.js` 也已經接上，
-  但還沒對真實的 FactorModelHistory 資料跑過一次**：`migration/
-  factor_model_history/`（`transform.js`/`checks.js`/`export-sheets.gs`/
-  `import-firestore.js`/`validate.js`，跟其他六組同一套流程，見上方「跟
-  其他表不同的地方」）負責把 Sheets 資料搬進 Firestore；
-  `functions/index.js` 的 `fetchAppliedFactorModels_()` 已經會讀
-  `factor_model_history` 裡 `applied === true` 的文件餵給
-  `reportPipeline.buildReport_`（有對應的單元測試驗證這條路徑，見
-  `functions/test/reportPipeline.test.js` Test 7）。下一步是照 Phase 2
-  的驗證模式（Cloud Shell 匯出 → dry-run → 正式寫入 → `validate.js`）
-  把這張表真的搬過去，再重新部署一次 `generateDailyReport`，確認
-  `hybrid`/`factor_model_rank` 真的能產生訊號、`predictedReturn1m`／
-  `predictedDownsideResistance` 兩個欄位不再是 `null`。
-  **`config/app` 的 `screeningStrategy` 目前在正式環境裡是 `rule_v17`**
-  （部署驗證時從原本遷移過來的 `hybrid` 手動切過去的——`hybrid` 在因子
-  模型資料遷移完成前，`generateDailyReportScheduled` 每天都會是
-  `reportCount: 0`，不是壞掉，只是正確地因為缺資料而不產生訊號。因子模型
-  資料遷移完成後，可以隨時切回 `hybrid`）。
+- ~~因子模型資料遷移 + `hybrid`/`factor_model_rank` 接線驗證~~ ✅
+  **2026-10-05 已完成**：`factor_model_history`（18 筆真實資料）已遷移、
+  `functions/index.js` 的 `fetchAppliedFactorModels_()` 已接上、
+  `screeningStrategy` 目前在正式環境裡是 `hybrid`，重新部署後驗證過
+  `reportCount: 8`、Firestore 文件數跟 `reportCount` 一致、
+  `predictedReturn1m`／`predictedDownsideResistance` 都有實際數值（見上方
+  「坑 3」的完整記錄）。
 - **背景 job 狀態機**：`startAnalysisJob`/`processAnalysisJobTick_` 這類
   機制在 Cloud Functions 世界不需要照搬——Cloud Functions 本身沒有 Apps
   Script 的 6 分鐘執行上限跟一次性觸發器不可靠的問題，這段「背景 job 繞過
