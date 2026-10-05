@@ -21,6 +21,11 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 - IndustryMap（2026-10-05，1087 筆真實資料，`✅ 通過`）
 
+**工具已就緒、尚未實際對真實資料跑過一次的**：
+
+- config/app + jobs/{jobKey}（`migration/config_and_jobs/`，來源不是 Sheets，
+  是 Script Properties，流程跟其他表不一樣，見下方專屬章節）
+
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
 
@@ -45,6 +50,10 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
   - `export-sheets.gs` — 貼進既有 Apps Script 專案手動執行一次
   - `import-firestore.js` / `validate.js` — 需要憑證才能實際執行，用共用的
     `../lib/firebase-init.js` 連線
+- `migration/config_and_jobs/` — 結構類似，但來源是 Script Properties 不是
+  Sheets（`export-script-properties.gs` 取代 `export-sheets.gs`），同時產出
+  `config/app`（單一文件）跟 `jobs/{jobKey}`（9 份文件）兩個 collection，
+  見下方「跑一次 config/app + jobs 遷移」專屬章節
 
 遷移下一張表時，複製其中一個目錄結構最快——沿用同樣的檔名、同樣的 CLI 用法，
 只需要照新表的欄位改 `transform.js`/`checks.js` 的內容。
@@ -113,6 +122,38 @@ node migration/<table>/validate.js ~/<table>-export-*.json
 
 看到 `validate.js` 印出 `✅ 通過` 就代表這張表遷移成功。
 
+## 跑一次 config/app + jobs 遷移（來源是 Script Properties，流程跟其他表不一樣）
+
+跟前五張表不同，這份資料本來就不是放在 Sheets，是 Apps Script 的
+Script Properties（鍵值設定）——所以沒有「貼 `export-sheets.gs` 進某個
+.gs 檔案」這一步，改成貼 `export-script-properties.gs`；而且一次會產出
+`config/app`（單一文件）跟 `jobs/{jobKey}`（9 份文件）兩個 Firestore
+collection，不是一張表對一個 collection。
+
+```bash
+# 0-1 跟其他表完全一樣（gcloud 登入、git pull、npm test）
+
+# 2. 匯出：到 Apps Script 編輯器，任何一個既有 .gs 檔案都可以（這支腳本只呼叫
+#    PropertiesService，不依賴任何特定檔案裡的函式），貼上
+#    migration/config_and_jobs/export-script-properties.gs 的內容，存檔後
+#    在函式下拉選單選 exportConfigAndJobsToJson、點「執行」。執行完在
+#    「執行紀錄」看到 Drive 連結，下載那個 config_and_jobs-export-*.json 檔案。
+#    用完記得刪掉、存檔，恢復原狀。
+
+# 3. 傳進 Cloud Shell（跟其他表一樣，⋮ 選單 →「上傳」）
+
+# 4. dry-run：會同時印出 config/app 跟全部 9 份 jobs/* 文件的內容
+node migration/config_and_jobs/import-firestore.js --dry-run ~/config_and_jobs-export-*.json
+
+# 5. 確認沒問題後正式寫入（一次 batch 同時寫 config/app + 9 份 jobs/*）
+node migration/config_and_jobs/import-firestore.js ~/config_and_jobs-export-*.json
+
+# 6. 驗證：會分別印出 config/app 跟 jobs/* 兩份報告
+node migration/config_and_jobs/validate.js ~/config_and_jobs-export-*.json
+```
+
+兩份報告都要看到 `✅ 通過` 才算這次遷移成功。
+
 ## 跟其他表不同的地方
 
 ### Portfolio
@@ -169,6 +210,32 @@ node migration/<table>/validate.js ~/<table>-export-*.json
   覆蓋式」的定期同步，是 Phase 3 跟後端邏輯一起搬的時候再決定，現在的
   `import-firestore.js` 只會新增/更新文件，不會刪除 Firestore 裡已經有、
   但這次來源沒有的舊代號。
+
+### config/app + jobs/{jobKey}
+
+- **來源是 Script Properties，不是 Sheets**：沒有「一列一列的資料」，是一組
+  key-value 設定——所以 `export-script-properties.gs` 取代了
+  `export-sheets.gs`，`transform.js` 也沒有「一筆 sheetRow 轉一筆 doc」，是
+  「一份 configProps/jobProps 物件轉一份 config/app 文件 + 最多 9 份
+  jobs/{jobKey} 文件」，匯出的 CLI 跟 dry-run 輸出格式也因此跟其他表不一樣。
+- **故意不讀取 API 金鑰**：`export-script-properties.gs` 的 key 清單明確
+  排除 `ANTHROPIC_API_KEY`／`GEMINI_API_KEY`——這兩個金鑰不該以任何形式出現
+  在匯出的 JSON 檔案裡（那個檔案會先存在 Drive、下載到本機或 Cloud Shell，
+  比留在 Script Properties 裡多了好幾個可能外流的環節）。之後 Phase 3 真的
+  要讓 Cloud Functions 讀到金鑰時，走的是 Secret Manager，不是這套遷移工具。
+- **`config/app` 的每個欄位都套用跟現行 apps-script 讀取邏輯一致的預設值**：
+  例如 `triggerHour`/`triggerMinute`/價格欄位允許 0（`isNaN` 判斷），但
+  `aiDailyTopN` 是 0 時會退回預設值 5（照抄 `AiDiagnosis.gs` 原本
+  `parseInt(...) || DEFAULT` 的既有怪癖，不是這支工具自己發明的不一致）。
+- **`jobs/{jobKey}` 的每份文件形狀都不一樣**：9 種背景 job 各自的狀態 JSON
+  結構不同（見 `apps-script/src/DataFetch.gs`／`Analysis.gs`／
+  `BigQuerySync.gs`／`AiDiagnosis.gs` 各自的 saveXJobState_），`transform.js`
+  不逐欄位重新定義，整份原樣存進 Firestore；`checks.js` 也因此只對
+  `status` 這個共通欄位做型別檢查，其餘靠整份深度比較來抓問題。
+- **固定遷移 9 份 jobs 文件，不包含 `watchdog`**：`firestore/schema.md` §9
+  列的第 10 個 jobKey（`watchdog`）是 Firestore 版排程安全網自己第一次
+  執行時才會產生的新文件，現在的 Script Properties 裡沒有對應資料，這次
+  遷移工具不會（也沒辦法）提前生出它。
 
 ## 已知的坑（下次遷移其他表可以少走的路）
 
