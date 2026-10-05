@@ -19,10 +19,7 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 - SkipDates（2026-10-05，1 筆真實資料，`✅ 通過`）
 
-**工具已就緒、尚未實際對真實資料跑過一次的表**：
-
-- IndustryMap（`migration/industry_map/`，全市場上市櫃股票，筆數可能上千，
-  見下方「跟其他表不同的地方」）
+- IndustryMap（2026-10-05，1087 筆真實資料，`✅ 通過`）
 
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
