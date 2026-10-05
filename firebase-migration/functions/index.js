@@ -67,7 +67,10 @@ async function fetchHistoryRows_(bigQueryConfig) {
   const cutoffStr = cutoff.toISOString().slice(0, 10);
   const sql = bigquery.buildHistoryRangeSql_(sourceRef, cutoffStr, null);
   const [rows] = await client.query({ query: sql });
-  return rows.map(bigquery.mapBqRowToHistoryRow_);
+  // mapBqRowToHistoryRow_ 回傳 null 代表 stock_id 清洗後不是合法代號，整列捨棄
+  // （見 lib/bigquery.js 的說明——這是真實遇過的 OOM 事故的直接修正，不是預防性
+  // 寫法）。
+  return rows.map(bigquery.mapBqRowToHistoryRow_).filter(function (r) { return r !== null; });
 }
 
 /** 把 reportPipeline.buildReport_ 算出來的 reportDocs 寫進 Firestore

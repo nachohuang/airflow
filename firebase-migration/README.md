@@ -382,23 +382,38 @@ Firestore 雲端憑證，`npm install` 跟 `node --check`/`require()` 確認過
 `lib/` 底下的計算邏輯本身已經靠單元測試跟 parity 測試驗證過，`index.js`
 要驗證的只是「接線有沒有接對」，不是「算得對不對」。
 
-**✅ 2026-10-05 已部署到 `flash-arbor-365706` 並驗證接線成功。** 部署過程
-踩到一個預期內的坑，記錄在這裡給之後部署其他 Cloud Function 參考：
+**2026-10-05 部署到 `flash-arbor-365706` 進行中，踩到兩個真實的坑，都已經
+修好並記錄在這裡給之後部署其他 Cloud Function 參考：**
 
 - **Cloud Functions 2nd gen 需要 Blaze（用量付費）方案**，Spark 免費方案
   部署會直接失敗，部署前要先在 Firebase Console 升級。
 - **第一次部署會自動要求啟用好幾個 API**（`cloudfunctions`／`cloudbuild`／
   `artifactregistry`／`eventarc`／`cloudscheduler`／`run`／`pubsub`／
   `storage`），`firebase deploy` 自己會檢查並啟用，不用事先手動一一啟用。
-- **預設記憶體 256 MiB 不夠用**：第一次手動觸發 `generateDailyReport` 時
-  直接被 OOM 砍掉（`Memory limit of 256 MiB exceeded with 267~291 MiB
-  used`）——全市場 1000+ 檔股票 x `ANALYSIS_LOOKBACK_DAYS`（150）天的原始
-  History，實測需要的記憶體比預設值略高。這跟 apps-script 版當年因為 Apps
-  Script V8 記憶體上限才把因子計算改寫成 BigQuery SQL 是同一個量級的資料，
-  但在 Cloud Functions 這純粹是部署設定沒給夠，不是架構問題——`index.js`
-  的兩個 function 現在都明確指定 `memory: '1GiB'`（實測用量的 3~4 倍）、
-  `timeoutSeconds: 180`，不需要像 apps-script 版那樣另外維護一套 SQL 實作
-  來繞過這個限制。
+- **坑 1：預設記憶體 256 MiB 不夠用**：第一次手動觸發
+  `generateDailyReport` 時直接被 OOM 砍掉（`Memory limit of 256 MiB
+  exceeded with 267~291 MiB used`）。`index.js` 的兩個 function 現在都
+  明確指定 `memory: '1GiB'`、`timeoutSeconds: 180`。
+- **坑 2：調大記憶體後換成 V8 heap OOM，真正原因是 BigQuery 來源資料的
+  `stock_id` 格式不一致**：調到 1GiB 還是在跑了快 3 分鐘後整個爆掉
+  （`JavaScript heap out of memory`）。查了一下才發現 `history_unified`
+  這個 view 查回來的「相異代號數」高達 **4.9 萬**，但台股上市櫃全部加起來
+  也就一千多到兩千檔——這正是 `apps-script/src/Utils.gs` 裡
+  `sanitizeStockId_`（既有函式，原本沒複製進 `functions/lib/utils.js`）
+  自己註解裡描述的那個已知問題：同一檔股票在不同來源檔案裡格式不一致
+  （多空白、`.0` 尾巴、全形半形…），害同一檔股票被當成好幾萬檔不同股票，
+  `computeFactors_` 把這 4.9 萬個「假股票」都分組算一輪因子，記憶體當然
+  撐不住。**修法**：把 `sanitizeStockId_` 補進 `lib/utils.js`，
+  `lib/bigquery.js` 的 `mapBqRowToHistoryRow_` 在資料從 BigQuery 進來的
+  第一關就清洗 `stock_id`，清洗後不是 4~6 碼合法代號的整列捨棄（回傳
+  `null`，`index.js` 的 `fetchHistoryRows_` 過濾掉）。這是既有、已經驗證
+  過的清洗邏輯搬過來用，不是臨時發明的 workaround。
+  **這個資料品質問題本身在 BigQuery 的來源資料裡還是存在**（4.9 萬個
+  相異代號的根因還沒解決，只是在這支 Cloud Function 的輸入邊界擋掉），
+  值得之後找時間用 `apps-script/src/BigQuerySync.gs` 既有的
+  `getHistoryStockIdQualityCheck()` 診斷工具（在舊系統的「資料總覽」頁面）
+  查清楚根因、清理 `history_raw`/`history_materialized` 裡的髒資料——但
+  不影響這支 Cloud Function 現在能不能正常運作。
 
 跑全部測試（`functions/` 目錄底下）：
 

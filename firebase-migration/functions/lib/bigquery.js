@@ -10,6 +10,7 @@
  * 複製時機：2026-10-05，對照 apps-script/src/BigQuerySync.gs 當時的內容。
  */
 var config = require('./config');
+var sanitizeStockId_ = require('./utils').sanitizeStockId_;
 
 /** BigQuery 資料表的欄位順序（ascii），對應 CONFIG.BQ_COLUMN_MAP 的順序。 */
 var BQ_COLUMN_MAP = [
@@ -67,13 +68,25 @@ function buildHistoryRangeSql_(sourceRef, startStr, endStr) {
   return sql;
 }
 
-/** 把 BigQuery 查詢回來的一列（ascii 欄名、全部字串）轉回 computeFactors_ 期待的
- *  中文欄名列物件，數值欄位轉成 number——跟 mapBqRowToHistoryRow_ 同一套規則，
- *  讓 lib/analysis.js 的 computeFactors_ 完全不用改，拿到的列物件跟 Apps Script
- *  版讀 Drive CSV／讀 BigQuery 拿到的一模一樣。 */
+/**
+ * 把 BigQuery 查詢回來的一列（ascii 欄名、全部字串）轉回 computeFactors_ 期待的
+ * 中文欄名列物件，數值欄位轉成 number，讓 lib/analysis.js 的 computeFactors_
+ * 完全不用改。
+ *
+ * 回傳 null 代表這列的 stock_id 清洗後不是合法代號（4~6 碼英數字），整列捨棄——
+ * 不能讓格式跑掉的代號變體混進 computeFactors_，不只污染計算結果，實測遇過真實
+ * 案例：某次查詢回來的「相異代號數」高達 4.9 萬（正常應該是一千多到兩千），
+ * Cloud Function 因此把這堆假股票全部分組、算 rolling 因子，記憶體直接爆掉
+ * OOM。sanitizeStockId_ 這支清洗函式是這支 App 原本就有、专门處理這個問題的
+ * 既有邏輯（見 lib/utils.js 的說明），這裡在資料從 BigQuery 進來的第一關就
+ * 套用，不是事後才補救。
+ */
 function mapBqRowToHistoryRow_(bqRow) {
+  var code = sanitizeStockId_(bqRow.stock_id);
+  if (!code) return null;
   var row = {};
   BQ_COLUMN_MAP.forEach(function (m) {
+    if (m.bq === 'stock_id') { row[m.cn] = code; return; }
     var v = bqRow[m.bq];
     if (config.HISTORY_NUMERIC_COLUMNS.indexOf(m.cn) !== -1) {
       var n = typeof v === 'number' ? v : parseFloat(v);

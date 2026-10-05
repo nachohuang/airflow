@@ -53,4 +53,26 @@ const bq = require('../lib/bigquery');
   console.log('Test mapBqRowToHistoryRow_ (missing fields default safely) passed.');
 }
 
+// --- mapBqRowToHistoryRow_：stock_id 清洗後不合法（實測真實遇過的 OOM 事故成因：
+//    4.9 萬個相異代號，正常應該只有一千多到兩千）要回傳 null，整列捨棄 ---
+{
+  assert.strictEqual(bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: '12' }), null, '少於 4 碼要捨棄');
+  assert.strictEqual(bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: '1234567' }), null, '超過 6 碼要捨棄');
+  assert.strictEqual(bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: '' }), null, '空字串要捨棄');
+  assert.strictEqual(bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: null }), null, 'null 要捨棄');
+  console.log('Test mapBqRowToHistoryRow_ (invalid stock_id -> null, row discarded) passed.');
+}
+
+// --- mapBqRowToHistoryRow_：stock_id 格式怪但清洗後是同一檔股票，要正確還原成
+//    乾淨的代號，不能把格式變體當成另一檔股票 ---
+{
+  const row1 = bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: '2330.0' });
+  assert.strictEqual(row1['證券代號'], '2330', 'Excel/Sheets 數字尾巴 .0 要清掉');
+  const row2 = bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: ' 2330 ' });
+  assert.strictEqual(row2['證券代號'], '2330', '前後空白要清掉');
+  const row3 = bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: '00635u' });
+  assert.strictEqual(row3['證券代號'], '00635U', 'ETF 代號要統一轉大寫，跟乾淨格式的同一檔股票合併');
+  console.log('Test mapBqRowToHistoryRow_ (dirty-but-valid stock_id variants normalize to the same code) passed.');
+}
+
 console.log('All bigquery.js tests passed.');
