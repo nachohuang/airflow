@@ -304,13 +304,28 @@ exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res)
  * 刪除單一一筆，不需要這支。
  */
 
-exports.getWatchlist = onCall(RUNTIME_OPTS_, async function () {
+/** 跟 firestore/firestore.rules 的 isOwner() 同一個擁有者 email，刻意重複寫一次：
+ *  Cloud Functions 用 Admin SDK 讀寫 Firestore，完全不受 Security Rules 限制，
+ *  isOwner() 只保護前端「直接」讀寫 watchlist／portfolio_lots 這兩個 collection，
+ *  擋不住繞過前端直接打這幾支 onCall function 的呼叫——所以每一支都要在進入點
+ *  自己檢查一次 request.auth，不能只靠 Security Rules 那一層。 */
+var OWNER_EMAIL_ = 'nachohuang@gmail.com';
+
+function assertOwnerAuth_(request) {
+  if (!request.auth || request.auth.token.email !== OWNER_EMAIL_) {
+    throw new HttpsError('permission-denied', '只有擁有者本人登入後才能呼叫這個功能。');
+  }
+}
+
+exports.getWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   return await buildWatchlistResult_();
 });
 
 /** data: {code, name?, note?}。code 必填；已經是持有中的股票會被擋掉（見
  *  lib/watchlist.js assertNotHolding_ 的說明）；同一檔股票重複加入視為更新。 */
 exports.addToWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   const data = request.data || {};
   if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
   const code = utilsLib.zfill4(String(data.code).trim());
@@ -332,6 +347,7 @@ exports.addToWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
 
 /** data: {code}。 */
 exports.removeFromWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   const data = request.data || {};
   if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
   const code = utilsLib.zfill4(String(data.code).trim());
@@ -339,7 +355,8 @@ exports.removeFromWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
   return await buildWatchlistResult_();
 });
 
-exports.getPortfolio = onCall(RUNTIME_OPTS_, async function () {
+exports.getPortfolio = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   return await buildPortfolioResult_();
 });
 
@@ -350,6 +367,7 @@ exports.getPortfolio = onCall(RUNTIME_OPTS_, async function () {
  * 不該擋住真正的買進紀錄，見 catch 區塊的說明）；帶 lotId 代表編輯既有的一筆。
  */
 exports.savePortfolioItem = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   const item = request.data || {};
   if (!item.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
   const code = utilsLib.zfill4(String(item.code).trim());
@@ -396,6 +414,7 @@ exports.savePortfolioItem = onCall(RUNTIME_OPTS_, async function (request) {
 
 /** data: {lotId}。依交易ID刪除單一一筆買進紀錄（不是依股票代號——同一檔可能有好幾筆）。 */
 exports.deletePortfolioLot = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   const lotId = request.data && request.data.lotId;
   if (!lotId) throw new HttpsError('invalid-argument', '缺少交易ID');
   await admin.firestore().collection('portfolio_lots').doc(lotId).delete();
@@ -406,6 +425,7 @@ exports.deletePortfolioLot = onCall(RUNTIME_OPTS_, async function (request) {
  *  標記為已賣出（用同一個賣出日期/價格），不支援部分賣出（對應 apps-script 版
  *  closePortfolioPosition 的說明）。 */
 exports.closePortfolioPosition = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   const data = request.data || {};
   const code = utilsLib.zfill4(String(data.code || '').trim());
   if (!code) throw new HttpsError('invalid-argument', '股票代號不可為空');
@@ -424,7 +444,8 @@ exports.closePortfolioPosition = onCall(RUNTIME_OPTS_, async function (request) 
   return await buildPortfolioResult_();
 });
 
-exports.getClosedPortfolioHistory = onCall(RUNTIME_OPTS_, async function () {
+exports.getClosedPortfolioHistory = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
   const lotDocs = await fetchPortfolioLots_();
   return portfolioOpsLib.buildClosedHistory_(lotDocs);
 });

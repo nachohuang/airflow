@@ -546,9 +546,183 @@ npm test
 ⚠️ 跟 `generateDailyReport` 一樣，這 8 個 `onCall` function 本身沒辦法在
 這個開發環境驗證（沒有真正的雲端憑證）——`lib/` 的純邏輯已經靠單元測試
 驗證過，實際部署後要驗證的只是「接線有沒有接對」跟「複合索引建好了沒」。
-部署後可以用 Firebase Console 的 Callable Function 測試面板，或裝了
-Firebase CLI 的環境用 `firebase functions:shell` 手動呼叫驗證（例如
-`getWatchlist()`、`addToWatchlist({code: '2330', name: '台積電'})`）。
+詳細的部署＋驗證步驟見下方「部署驗證：Watchlist／Portfolio」。
+
+**🔒 擁有者驗證（`assertOwnerAuth_`）**：寫完第一版之後發現這 8 支
+`onCall` function 都沒檢查 `request.auth`——`firestore.rules` 的
+`isOwner()` 只保護前端「直接」讀寫 `watchlist`／`portfolio_lots` 這兩個
+collection，Cloud Functions 用 Admin SDK 完全不受那份規則限制，等於
+部署後任何人知道 function URL 就能呼叫 `savePortfolioItem`／
+`closePortfolioPosition` 竄改資料，不需要登入。修法：每一支進入點第一行
+都呼叫 `assertOwnerAuth_(request)`，跟 `firestore.rules` 用同一個擁有者
+email 比對 `request.auth.token.email`，沒登入或帳號不對就丟
+`HttpsError('permission-denied', ...)`。這是部署驗證時一定要測到的一條
+路徑（見下方步驟 4）。
+
+## 部署驗證：Watchlist／Portfolio（2026-10-05）
+
+跟戰報計算不同，這 8 支是 `onCall`（Callable Function），不能像
+`generateDailyReport` 那樣直接 `curl` 一個普通 HTTPS URL 就測完——
+Callable Function 有自己的呼叫協定（body 要包成 `{"data": {...}}`，
+回應包在 `{"result": ...}` 或 `{"error": ...}` 裡），而且**一定要帶擁有者
+的 Firebase ID Token**（見上面「🔒 擁有者驗證」），不然全部會被
+`assertOwnerAuth_` 擋掉。以下在 Cloud Shell 跑，延續 Phase 2/3 其他遷移
+驗證時用的同一個專案（`flash-arbor-365706`，用你自己的專案 ID 替換）。
+
+```bash
+# 0. 更新程式碼、裝依賴、部署前先跑一次單元測試（純邏輯這層先確認沒壞）
+cd ~/airflow   # 換成你 clone 的路徑
+git pull origin claude/stock-data-apps-script-w1wsk1
+cd firebase-migration/functions
+npm install
+npm test   # 全部要過，包含新的 watchlist.test.js／portfolioOps.test.js／bigquery.test.js
+
+# 1. 部署 Cloud Functions + Firestore 複合索引（firestore.indexes.json 裡
+#    宣告的兩個索引會在這次 deploy 一起建立）
+cd ~/airflow/firebase-migration
+firebase deploy --only functions,firestore:indexes
+
+# 2. 索引建立是非同步的，deploy 指令跑完不代表已經 READY——
+#    getWatchlist/getPortfolio（內部查 fetchLatestSignalsByCode_）跟
+#    closePortfolioPosition 都要等索引就位才能正常運作，確認狀態：
+PROJECT_ID=$(gcloud config get-value project)
+gcloud firestore indexes composite list --project="$PROJECT_ID" --format="table(name,state)"
+# 兩個索引都要是 READY 才繼續下一步（CREATING 通常幾分鐘內會完成，重跑這行刷新狀態）
+```
+
+**準備擁有者的 ID Token**（Callable Function 的呼叫協定需要真正登入過的
+Firebase Auth 使用者，不是隨便一個 service account 的 token）：
+
+```bash
+# 3. 拿專案的 Web API Key——Console 路徑：專案設定（齒輪圖示）→ 一般 →
+#    「Web API 金鑰」欄位；或在 Cloud Shell 用這行試著自動抓：
+WEB_API_KEY=$(gcloud services api-keys list --project="$PROJECT_ID" \
+  --filter="displayName:'Browser key (auto created by Firebase)'" --format="value(name)" \
+  | xargs -I{} gcloud services api-keys get-key-string {} --format="value(keyString)")
+echo "$WEB_API_KEY"   # 抓不到就手動去 Console 複製，貼進來 export WEB_API_KEY=...
+
+# 4. 幫擁有者帳號（nachohuang@gmail.com）鑄一個 custom token，再跟 Identity
+#    Toolkit 換成真正的 ID Token——這一步要求這個帳號已經在 Firebase Auth
+#    留過登入紀錄（Phase 0 設定時應該已經用這個帳號登入過一次；如果
+#    getUserByEmail 找不到，代表還沒登入過，先用任何一個開了 Google 登入
+#    的 Firebase Auth 測試頁面登入一次這個帳號再重跑這步）。
+cd ~/airflow/firebase-migration/functions   # 要在有 firebase-admin 的目錄跑
+cat > /tmp/mint-token.js <<'EOF'
+const admin = require('firebase-admin');
+admin.initializeApp();
+(async () => {
+  const user = await admin.auth().getUserByEmail('nachohuang@gmail.com');
+  console.log(await admin.auth().createCustomToken(user.uid));
+})().catch(e => { console.error(e); process.exit(1); });
+EOF
+CUSTOM_TOKEN=$(node /tmp/mint-token.js)
+
+ID_TOKEN=$(curl -s -X POST \
+  "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${WEB_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"token\": \"${CUSTOM_TOKEN}\", \"returnSecureToken\": true}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['idToken'])")
+echo "${ID_TOKEN:0:24}...(已省略，拿到非空字串就對)"
+
+REGION="us-central1"   # RUNTIME_OPTS_ 沒指定 region，v2 預設是 us-central1
+FN_URL="https://${REGION}-${PROJECT_ID}.cloudfunctions.net"
+```
+
+**驗證擁有者檢查真的擋得住（負向測試，先測這個再測正常流程）**：
+
+```bash
+# 5. 不帶 Authorization header 呼叫，應該被 assertOwnerAuth_ 擋下來
+curl -s -X POST "${FN_URL}/getWatchlist" -H "Content-Type: application/json" -d '{"data": {}}' | python3 -m json.tool
+# 預期：{"error": {"status": "PERMISSION_DENIED", "message": "只有擁有者本人登入後才能呼叫這個功能。"}}
+```
+
+**正常流程（帶 ID Token）**：
+
+```bash
+# 6. getWatchlist——先看現況（Phase 2 應該已經有從 Sheets 遷移過來的資料）
+curl -s -X POST "${FN_URL}/getWatchlist" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {}}' | python3 -m json.tool
+
+# 7. addToWatchlist——加一檔測試用股票，確認 latestClose/name 有從 BigQuery 補上
+curl -s -X POST "${FN_URL}/addToWatchlist" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {"code": "2330", "name": "", "note": "部署驗證用"}}' | python3 -m json.tool
+# 預期回傳陣列裡的 2330 項目：name 補成「台積電」、latestClose 是數字不是 null
+
+# 8. 交叉比對 Firestore 裡的文件（不透過 callable function，直接讀）
+node -e "
+const admin = require('firebase-admin');
+admin.initializeApp();
+admin.firestore().collection('watchlist').doc('2330').get().then(s => console.log(s.data()));
+"
+
+# 9. 驗證「跟持股互斥」真的擋得住——先找一檔目前持有中的代號：
+node -e "
+const admin = require('firebase-admin');
+admin.initializeApp();
+admin.firestore().collection('portfolio_lots').where('status','==','holding').limit(1).get()
+  .then(s => s.forEach(d => console.log('holding code:', d.data().code)));
+"
+# 把印出來的 code 換進下面這個呼叫，預期 error.status 是 FAILED_PRECONDITION
+curl -s -X POST "${FN_URL}/addToWatchlist" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {"code": "填入上面印出來的 code"}}' | python3 -m json.tool
+
+# 10. removeFromWatchlist——清掉步驟 7 的測試資料
+curl -s -X POST "${FN_URL}/removeFromWatchlist" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {"code": "2330"}}' | python3 -m json.tool
+
+# 11. getPortfolio——確認現有持股卡片（加權平均成本/latestClose/signal）跟
+#     Firestore portfolio_lots 的實際內容對得起來
+curl -s -X POST "${FN_URL}/getPortfolio" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {}}' | python3 -m json.tool
+```
+
+**持股寫入類操作會動到真正的生產資料**，建議用一檔你自己也打算小量測試
+的股票代號跑完整個「新增→改單→平倉→查歷史→刪除」迴圈，而不是隨便塞假
+代號（`latestClose` 查不到真實資料、卡片會顯示 `null`，但不影響驗證邏輯
+本身對不對）：
+
+```bash
+# 12. savePortfolioItem（新增）——記得改成你要測試的代號/價格/股數
+curl -s -X POST "${FN_URL}/savePortfolioItem" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {"code": "0050", "cost": 150, "buyDate": "2026-10-05", "shares": 100, "note": "部署驗證用，測完會刪除"}}' \
+  | python3 -m json.tool
+# 從回應的 lots 陣列裡記下這筆的 id（lotId），下面步驟要用
+
+# 13. savePortfolioItem（編輯既有一筆）——帶 lotId 改備註，確認改到同一筆
+curl -s -X POST "${FN_URL}/savePortfolioItem" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {"lotId": "填入步驟12的lotId", "code": "0050", "cost": 150, "shares": 100, "note": "已編輯"}}' \
+  | python3 -m json.tool
+
+# 14. closePortfolioPosition（平倉）——把這筆標記已賣出
+curl -s -X POST "${FN_URL}/closePortfolioPosition" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {"code": "0050", "sellDate": "2026-10-05", "sellPrice": 155}}' \
+  | python3 -m json.tool
+# 預期回傳的持股卡片陣列裡已經看不到 0050（平倉後不再是 holding）
+
+# 15. getClosedPortfolioHistory——確認剛平倉的這筆出現，realizedPct/realizedAmount 算對
+curl -s -X POST "${FN_URL}/getClosedPortfolioHistory" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {}}' | python3 -m json.tool
+# (155-150)/150*100 = 3.33...，(155-150)*100 = 500，核對回應裡的數字
+
+# 16. deletePortfolioLot——清掉這筆測試紀錄（用步驟12的lotId）
+curl -s -X POST "${FN_URL}/deletePortfolioLot" \
+  -H "Authorization: Bearer ${ID_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"data": {"lotId": "填入步驟12的lotId"}}' | python3 -m json.tool
+```
+
+全部跑完，`getWatchlist`／`getPortfolio`／`getClosedPortfolioHistory` 應該
+都回到跑這輪驗證之前的狀態（測試用的 2330 觀察清單項目、0050 買賣紀錄都
+清乾淨了），其他步驟的錯誤路徑（步驟 5 的無登入、步驟 9 的跟持股互斥）都
+要回傳對應的 `error.status`，不是意外的 200/`result`。
 
 ## 還沒做的事（下一步）
 
