@@ -31,4 +31,16 @@ function normalizeDateStr(raw) {
   return s;
 }
 
-module.exports = { zfill4: zfill4, normalizeDateStr: normalizeDateStr };
+/** Sheets 儲存格常見型別問題（空字串/數字字串/真正的數字都可能出現）一律轉成
+ *  真正的 number，parse 不出來就回傳 null——不要用 0 當預設值，0 是一個合法的
+ *  股數/價格/分數，用 0 掩蓋「這欄本來就是空的或壞掉的」會讓後面的品質檢查看
+ *  不出來。跟 zfill4／normalizeDateStr 同樣道理抽成共用模組：Portfolio 的
+ *  買進價格/股數、AiDiagnosis 的 Armor_Score 都要用同一套「空值變 null、
+ *  壞值也變 null」規則，不要每張表自己重新定義一次。 */
+function parseNumber(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  var n = Number(raw);
+  return isNaN(n) ? null : n;
+}
+
+module.exports = { zfill4: zfill4, normalizeDateStr: normalizeDateStr, parseNumber: parseNumber };

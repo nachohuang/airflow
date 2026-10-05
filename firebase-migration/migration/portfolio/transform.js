@@ -6,15 +6,7 @@
 var normalize = require('../lib/normalize');
 var zfill4 = normalize.zfill4;
 var normalizeDateStr = normalize.normalizeDateStr;
-
-/** Sheets 儲存格常見型別問題（空字串/數字字串/真正的數字都可能出現）一律轉成
- *  真正的 number，parse 不出來就回傳 null——不要用 0 當預設值，0 是一個合法的
- *  股數/價格，用 0 掩蓋「這欄本來就是空的或壞掉的」會讓後面的品質檢查看不出來。 */
-function parseNumber(raw) {
-  if (raw === null || raw === undefined || raw === '') return null;
-  var n = Number(raw);
-  return isNaN(n) ? null : n;
-}
+var parseNumber = normalize.parseNumber;
 
 /** 狀態欄位原文字是中文「持有中」/「已賣出」，遷移時翻成英文列舉，避免中文字面值
  *  散落在 Firestore 版後端到處要用字串比對——跟現行 Portfolio.gs 的

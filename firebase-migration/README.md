@@ -11,11 +11,11 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 - Watchlist（2026-09-30，spike，證明整條路徑可行）
 
+- Portfolio（2026-10-05，10 筆真實資料，`✅ 通過`）
+
 **工具已就緒、尚未實際對真實資料跑過一次的表**：
 
-- Portfolio（`migration/portfolio/`，含金額校驗——依代號重算加權平均成本，
-  比對來源與 Firestore 兩邊算出來的數字是否一致，見下方「跟 Watchlist 不同
-  的地方」）
+- AiDiagnosis（`migration/ai_diagnosis/`，見下方「跟其他表不同的地方」）
 
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
@@ -33,16 +33,16 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
     不要每張表各自複製
   - `firebase-init.js` — 共用的 Firestore 連線邏輯，本機服務帳戶金鑰／Cloud
     Shell 的 `gcloud` 使用者憑證兩種都支援
-- `migration/watchlist/`、`migration/portfolio/` — 每張表各自一組遷移工具，
-  結構完全一樣：
+- `migration/watchlist/`、`migration/portfolio/`、`migration/ai_diagnosis/` —
+  每張表各自一組遷移工具，結構完全一樣：
   - `transform.js` / `checks.js` — 純邏輯，不需要雲端憑證，`test/` 底下有完整
     單元測試
   - `export-sheets.gs` — 貼進既有 Apps Script 專案手動執行一次
   - `import-firestore.js` / `validate.js` — 需要憑證才能實際執行，用共用的
     `../lib/firebase-init.js` 連線
 
-遷移下一張表時，複製 `migration/portfolio/` 整個目錄結構最快——沿用同樣的檔名、
-同樣的 CLI 用法，只需要照新表的欄位改 `transform.js`/`checks.js` 的內容。
+遷移下一張表時，複製其中一個目錄結構最快——沿用同樣的檔名、同樣的 CLI 用法，
+只需要照新表的欄位改 `transform.js`/`checks.js` 的內容。
 
 ## 你需要先做的事（Phase 0，只有你能做）
 
@@ -55,12 +55,14 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
    產生新的私密金鑰，下載 `.json` 檔案，**不要放進 git、不要外流**。
 5. ~~部署 `firestore/firestore.rules`~~ ✅ 已完成。
 
-## 跑一次完整的表遷移流程（Cloud Shell 版本，Watchlist 已驗證可行，Portfolio 照同一套）
+## 跑一次完整的表遷移流程（Cloud Shell 版本，Watchlist／Portfolio 已驗證可行）
 
-下面用 `<table>` 代表表名（`watchlist` 或 `portfolio`），`<Table>` 代表對應的
-匯出函式名稱字首（`Watchlist` 或 `Portfolio`）——例如 Watchlist 就是
-`migration/watchlist/...`、`exportWatchlistToJson`；Portfolio 就是
-`migration/portfolio/...`、`exportPortfolioToJson`。
+下面用 `<table>` 代表 `migration/` 底下的目錄名（`watchlist`／`portfolio`／
+`ai_diagnosis`），`<Table>` 代表對應的匯出函式名稱字首——例如 Watchlist 是
+`migration/watchlist/...`、`exportWatchlistToJson`；Portfolio 是
+`migration/portfolio/...`、`exportPortfolioToJson`；AiDiagnosis 是
+`migration/ai_diagnosis/...`、`exportAiDiagnosisToJson`（匯出函式名稱沿用
+Sheets 原本的駝峰式名稱 `AiDiagnosis`，不是目錄名的底線寫法）。
 
 ```bash
 # 0. 開 Cloud Shell（console.cloud.google.com 右上角 >_ 圖示），確認專案正確
@@ -103,7 +105,9 @@ node migration/<table>/validate.js ~/<table>-export-*.json
 
 看到 `validate.js` 印出 `✅ 通過` 就代表這張表遷移成功。
 
-## 跟 Watchlist 不同的地方（Portfolio 專屬）
+## 跟其他表不同的地方
+
+### Portfolio
 
 - **`status` 欄位翻譯**：原文字「持有中」/「已賣出」在 Firestore 版翻成英文
   列舉 `"holding"` / `"sold"`，避免中文字面值散落在後端到處要用字串比對；
@@ -117,6 +121,25 @@ node migration/<table>/validate.js ~/<table>-export-*.json
   跟 Firestore 重新算一次加權平均成本跟總股數，兩邊要一致——這一項不是逐列
   比對，是用來抓「單列都對、但彙總邏輯用到的數字型別/精度悄悄跑掉」這種比較
   隱蔽的問題（對照〈選股引擎遷移藍圖〉§05 的金額校驗要求）。
+
+### AiDiagnosis
+
+- **文件 ID 是三個欄位組成的複合鍵**：`{code}_{date}_{diagnosisType}`，跟現行
+  `aiDiagnosisRowKey_()` 的比對鍵邏輯一致。同一天同一檔股票可能跑了不只一種
+  診斷類型（深度診斷／持股續抱診斷），各自算一筆，不是重複資料。
+- **`診斷類型` 翻譯**：「深度診斷」/「持股續抱診斷」/「TOP3推薦」翻成
+  `deep`/`hold`/`top3`；空白/未知值一律當 `deep`，跟
+  `upsertAiDiagnosisRow_()` 的預設邏輯一致（改版前只有單一種診斷類型的舊
+  資料就是沒有這欄）。
+- **Top3 推薦的「證券代號」不是真正的股票代號**：固定存文字 `TOP3`（代表
+  「全市場橫向比較」這個結果，不屬於任何一檔股票）。`zfill4('TOP3')` 剛好
+  因為已經是 4 個字元會原樣回傳，`checks.js` 的代號格式檢查也特別把 `TOP3`
+  列為例外，不會被誤判成「忘記補零」。
+- **`armorScore` 允許是 `null`**：Top3 推薦這種診斷類型的 Armor_Score／操作
+  策略／最終建議在來源就是空字串，不是壞資料。
+- **筆數會隨時間持續累積**：不像 Watchlist／Portfolio 筆數穩定，AiDiagnosis
+  每天每檔股票跑診斷都會新增一筆，`import-firestore.js` 已經加了批次寫入
+  （每 400 筆一批），避免真實資料量大時超過 Firestore 單批 500 筆操作的上限。
 
 ## 已知的坑（下次遷移其他表可以少走的路）
 
