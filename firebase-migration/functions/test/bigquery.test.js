@@ -24,6 +24,22 @@ const bq = require('../lib/bigquery');
   console.log('Test buildHistoryRangeSql_ passed.');
 }
 
+// --- buildHistoryRangeSql_：opts.stocksOnly 要加上 LENGTH(stock_id) = 4，排除
+//    權證／ETF——這是實際遇過的真實事故的修正：全市場查詢沒加這條件，查回來的
+//    150 萬筆裡有 140 萬筆是 6 碼權證代號，全部撈進記憶體才在 computeFactors_
+//    內部的篩選生效之前就把 Cloud Function 的記憶體耗盡。跟
+//    apps-script/src/BigQuerySync.gs 的 buildLatestDayFactorsSql_ 是同一條
+//    既有規則，不是臨時發明的 workaround ---
+{
+  const sql = bq.buildHistoryRangeSql_('proj.ds.history_unified', '2026-05-08', null, { stocksOnly: true });
+  assert.ok(sql.indexOf('LENGTH(stock_id) = 4') !== -1, 'stocksOnly 應該加上 LENGTH(stock_id) = 4 條件');
+  assert.ok(sql.indexOf("date_str >= '2026-05-08'") !== -1, '日期條件要跟 stocksOnly 條件一起用 AND 組合');
+
+  const sqlWithoutFlag = bq.buildHistoryRangeSql_('proj.ds.history_unified', '2026-05-08', null);
+  assert.ok(sqlWithoutFlag.indexOf('LENGTH(stock_id)') === -1, '沒帶 stocksOnly 就不該有這個條件（查詢個股分析/回測不該被這條件限制）');
+  console.log('Test buildHistoryRangeSql_ (stocksOnly option excludes warrants/ETFs) passed.');
+}
+
 // --- mapBqRowToHistoryRow_：數值欄位轉 number，字串欄位保留字串，缺欄位用空字串 ---
 {
   const bqRow = {

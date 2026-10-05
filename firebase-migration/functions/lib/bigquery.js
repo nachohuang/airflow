@@ -57,12 +57,27 @@ function sourceRefForRead_(bigQueryConfig) {
   return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + view;
 }
 
-/** 從來源 view 撈出指定日期區間（皆可留空）的原始欄位。 */
-function buildHistoryRangeSql_(sourceRef, startStr, endStr) {
+/**
+ * 從來源 view 撈出指定日期區間（皆可留空）的原始欄位。
+ *
+ * opts.stocksOnly：true 時加上 `LENGTH(stock_id) = 4` 條件，只留一般股票，排除
+ * 權證／ETF（6 碼權證代號，例如「正新國票58購01」這種券商發行、到期就換發新代號
+ * 的衍生商品——台股市場流通中的權證代號有上萬張，遠超過一般股票的一千多到兩千檔，
+ * 這套法人動能/量能篩選邏輯本來就不是設計給權證用的）。跟
+ * apps-script/src/BigQuerySync.gs 的 `buildLatestDayFactorsSql_`／
+ * apps-script/src/Analysis.gs 的 `computeFactors_`（`rows.filter(r =>
+ * r['證券代號'].length === 4)`）是同一條既有規則——這裡刻意在 SQL 查詢階段就套用，
+ * 不是等資料全部撈回 Node 之後才濾掉：全市場 + 全部權證一次查，實測有 150 萬筆
+ * （其中 140 萬筆是權證），早一步在 SQL 擋掉可以省下這些資料的傳輸跟記憶體成本，
+ * 不是等 computeFactors_ 內部的篩選才生效（那時資料已經整批撈進記憶體、逐欄位
+ * 轉型過一輪了，為時已晚）。
+ */
+function buildHistoryRangeSql_(sourceRef, startStr, endStr, opts) {
   var cols = bqColumnNames_().join(', ');
   var conds = [];
   if (startStr) conds.push("date_str >= '" + startStr + "'");
   if (endStr) conds.push("date_str <= '" + endStr + "'");
+  if (opts && opts.stocksOnly) conds.push('LENGTH(stock_id) = 4');
   var sql = 'SELECT ' + cols + ' FROM `' + sourceRef + '`';
   if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
   return sql;

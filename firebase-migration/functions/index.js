@@ -65,7 +65,10 @@ async function fetchHistoryRows_(bigQueryConfig) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - config.ANALYSIS_LOOKBACK_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
-  const sql = bigquery.buildHistoryRangeSql_(sourceRef, cutoffStr, null);
+  // stocksOnly: true — 跟 apps-script 版 buildLatestDayFactorsSql_／computeFactors_
+  // 的既有規則一致，這份戰報只算一般股票（LENGTH(stock_id) = 4），不含權證/ETF
+  // （見 lib/bigquery.js buildHistoryRangeSql_ 的說明）。
+  const sql = bigquery.buildHistoryRangeSql_(sourceRef, cutoffStr, null, { stocksOnly: true });
   const [rows] = await client.query({ query: sql });
   // mapBqRowToHistoryRow_ 回傳 null 代表 stock_id 清洗後不是合法代號，整列捨棄
   // （見 lib/bigquery.js 的說明——這是真實遇過的 OOM 事故的直接修正，不是預防性

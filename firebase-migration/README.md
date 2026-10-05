@@ -394,26 +394,32 @@ Firestore 雲端憑證，`npm install` 跟 `node --check`/`require()` 確認過
   `generateDailyReport` 時直接被 OOM 砍掉（`Memory limit of 256 MiB
   exceeded with 267~291 MiB used`）。`index.js` 的兩個 function 現在都
   明確指定 `memory: '1GiB'`、`timeoutSeconds: 180`。
-- **坑 2：調大記憶體後換成 V8 heap OOM，真正原因是 BigQuery 來源資料的
-  `stock_id` 格式不一致**：調到 1GiB 還是在跑了快 3 分鐘後整個爆掉
-  （`JavaScript heap out of memory`）。查了一下才發現 `history_unified`
-  這個 view 查回來的「相異代號數」高達 **4.9 萬**，但台股上市櫃全部加起來
-  也就一千多到兩千檔——這正是 `apps-script/src/Utils.gs` 裡
-  `sanitizeStockId_`（既有函式，原本沒複製進 `functions/lib/utils.js`）
-  自己註解裡描述的那個已知問題：同一檔股票在不同來源檔案裡格式不一致
-  （多空白、`.0` 尾巴、全形半形…），害同一檔股票被當成好幾萬檔不同股票，
-  `computeFactors_` 把這 4.9 萬個「假股票」都分組算一輪因子，記憶體當然
-  撐不住。**修法**：把 `sanitizeStockId_` 補進 `lib/utils.js`，
-  `lib/bigquery.js` 的 `mapBqRowToHistoryRow_` 在資料從 BigQuery 進來的
-  第一關就清洗 `stock_id`，清洗後不是 4~6 碼合法代號的整列捨棄（回傳
-  `null`，`index.js` 的 `fetchHistoryRows_` 過濾掉）。這是既有、已經驗證
-  過的清洗邏輯搬過來用，不是臨時發明的 workaround。
-  **這個資料品質問題本身在 BigQuery 的來源資料裡還是存在**（4.9 萬個
-  相異代號的根因還沒解決，只是在這支 Cloud Function 的輸入邊界擋掉），
-  值得之後找時間用 `apps-script/src/BigQuerySync.gs` 既有的
-  `getHistoryStockIdQualityCheck()` 診斷工具（在舊系統的「資料總覽」頁面）
-  查清楚根因、清理 `history_raw`/`history_materialized` 裡的髒資料——但
-  不影響這支 Cloud Function 現在能不能正常運作。
+- **坑 2：調大記憶體後換成 V8 heap OOM，第一次診斷錯了，第二次用具體查詢
+  驗證才找到真正原因**：調到 1GiB 還是在跑了快 3 分鐘後整個爆掉
+  （`JavaScript heap out of memory`）。查了一下 `history_unified` 這個 view
+  查回來的「相異代號數」高達 **4.9 萬**，但台股上市櫃全部加起來也就一千多
+  到兩千檔——**第一次診斷猜是 `stock_id` 格式不一致**（同一檔股票被拆成
+  好幾種格式變體），依這個猜測把 `apps-script/src/Utils.gs` 的
+  `sanitizeStockId_` 補進 `lib/utils.js` 清洗代號。**這個診斷後來被查證
+  推翻**：實際用 `GROUP BY stock_name HAVING COUNT(DISTINCT stock_id) > 1`
+  查，結果是空的——沒有任何一檔股票對到超過一個代號，台積電也確實只對到
+  `2330` 這一個。再查那些「筆數很少」的代號实際內容，看到的是「正新國票
+  58購01」這種合法的 **6 碼權證代號**（券商發行、到期就換發新代號的衍生
+  商品，台股市場流通中的權證有上萬張，遠超過一般股票數量）——不是髒資料，
+  是這次查詢把全市場「含全部權證」都撈了進來。回頭查 Apps Script 既有
+  程式碼才確認：`buildLatestDayFactorsSql_`／`computeFactors_` 本來就有
+  `LENGTH(stock_id) = 4` 這條篩選，**刻意只計算一般股票、排除權證/ETF**
+  （法人動能/量能這套篩選邏輯本來就不是設計給權證用的），只是我們的 Cloud
+  Function 查詢沒有在 SQL 階段套用同一條規則，所以 150 萬筆（140 萬筆是
+  權證）全部被撈進記憶體、逐欄位轉型一輪，才在 `computeFactors_` 內部的
+  同一條篩選生效之前就把記憶體耗盡——篩選邏輯本身一直都在，只是套用的時間
+  點太晚。**正確的修法**：`lib/bigquery.js` 的 `buildHistoryRangeSql_` 加
+  了 `opts.stocksOnly` 選項，在 SQL 查詢階段就套用
+  `LENGTH(stock_id) = 4`，跟 Apps Script production 版用同一條既有規則，
+  從源頭就不把權證資料查回來，不是等資料到了 Node 才濾掉。
+  `sanitizeStockId_` 那次的修正並沒有錯（代號格式清洗本身是合理的防禦性
+  措施，繼續留著當第二層保護），但它並不是這次 OOM 真正的原因，記錄在這裡
+  提醒自己：**先查證據，再下修法**，不要靠猜測就動手改程式碼。
 
 跑全部測試（`functions/` 目錄底下）：
 
