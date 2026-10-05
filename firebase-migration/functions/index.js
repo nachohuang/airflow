@@ -94,20 +94,49 @@ async function fetchAppliedFactorModels_() {
   return applied;
 }
 
-/** 把 reportPipeline.buildReport_ 算出來的 reportDocs 寫進 Firestore
- *  `reports/{date}/signals/{code}`。latestDate 是 null（完全查無 History 資料）
- *  時什麼都不寫——跟 apps-script 版 runAnalysisAndSave() 的「沒有可用資料就不寫」
- *  邏輯一致，不會用空值覆蓋掉昨天本來好好的戰報。 */
+/**
+ * 把 reportPipeline.buildReport_ 算出來的 reportDocs 寫進 Firestore
+ * `reports/{date}/signals/{code}`。latestDate 是 null（完全查無 History 資料）
+ * 時什麼都不寫——跟 apps-script 版 runAnalysisAndSave() 的「沒有可用資料就不寫」
+ * 邏輯一致，不會用空值覆蓋掉昨天本來好好的戰報。
+ *
+ * 寫入前先讀一次同一天既有的文件，把「這次沒有出現在新報告裡」的舊文件刪掉——
+ * 不能只對新的 reportDocs 做 set()：實際遇過的真實案例，同一天先用 rule_v17
+ * 跑出 79 筆，切換成 hybrid 重跑只產生 8 筆，如果不清掉舊文件，Firestore 裡
+ * 會留著 71 筆上一次策略算出來的舊資料跟這次的 8 筆混在一起，看起來像「今天的
+ * 戰報」，但其實是兩個不同策略、不同時間點算出來的結果疊在一起，不是真正的
+ * 當天戰報。同一天的訊號數量上限是全市場股票數（1000 出頭），刪除+寫入合計
+ * 操作數可能超過 Firestore 單批 500 筆上限，所以分批跟 AiDiagnosis／
+ * IndustryMap 的 import-firestore.js 一樣处理。
+ */
 async function writeReportDocs_(result) {
   if (!result.latestDate) return;
   const db = admin.firestore();
-  const batch = db.batch();
-  result.reportDocs.forEach(function (doc) {
+  const signalsRef = db.collection('reports').doc(result.latestDate).collection('signals');
+
+  const existingSnap = await signalsRef.get();
+  const newCodes = new Set(result.reportDocs.map(function (doc) { return doc.code; }));
+  const staleRefs = existingSnap.docs
+    .filter(function (d) { return !newCodes.has(d.id); })
+    .map(function (d) { return d.ref; });
+
+  const setOps = result.reportDocs.map(function (doc) {
     var fields = Object.assign({}, doc);
     delete fields.id;
-    batch.set(db.collection('reports').doc(result.latestDate).collection('signals').doc(doc.code), fields);
+    return { ref: signalsRef.doc(doc.code), fields: fields };
   });
-  await batch.commit();
+
+  var ops = staleRefs.map(function (ref) { return { type: 'delete', ref: ref }; })
+    .concat(setOps.map(function (op) { return { type: 'set', ref: op.ref, fields: op.fields }; }));
+
+  const BATCH_SIZE = 400;
+  for (var i = 0; i < ops.length; i += BATCH_SIZE) {
+    var batch = db.batch();
+    ops.slice(i, i + BATCH_SIZE).forEach(function (op) {
+      if (op.type === 'delete') batch.delete(op.ref); else batch.set(op.ref, op.fields);
+    });
+    await batch.commit();
+  }
 }
 
 /** 真正做事的地方：排程跟手動觸發的 HTTPS endpoint 都呼叫這支，確保兩邊行為

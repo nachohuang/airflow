@@ -459,6 +459,17 @@ Function 參考：
   `sanitizeStockId_` 那次的修正並沒有錯（代號格式清洗本身是合理的防禦性
   措施，繼續留著當第二層保護），但它並不是這次 OOM 真正的原因，記錄在這裡
   提醒自己：**先查證據，再下修法**，不要靠猜測就動手改程式碼。
+- **坑 3：切換篩選策略重跑後，Firestore 裡新舊策略的結果混在一起**：先用
+  `rule_v17` 跑出 79 筆訊號，遷移完 `factor_model_history` 後切回 `hybrid`
+  重跑只產生 8 筆——結果 Firestore `reports/{date}/signals` 底下還是有
+  79 份文件，其中只有新的 8 筆有正確的 `predictedReturn1m`／
+  `predictedDownsideResistance`，其餘 71 筆是 `rule_v17` 那次留下來、沒被
+  清掉的舊資料，兩次不同策略、不同時間點的結果疊在一起，不是真正的「當天
+  戰報」。原因是 `writeReportDocs_` 只對這次算出來的 `reportDocs` 做
+  `set()`，從來沒有刪過「這次沒再出現」的舊文件。**修法**：寫入前先讀一次
+  同一天既有的文件，把不在這次 `reportDocs` 清單裡的舊文件一併刪除，跟
+  新文件的 `set()` 合併成同一輪批次寫入（操作數可能超過 Firestore 單批
+  500 筆上限，用跟 AiDiagnosis／IndustryMap 一樣的分批寫入處理）。
 
 跑全部測試（`functions/` 目錄底下）：
 
