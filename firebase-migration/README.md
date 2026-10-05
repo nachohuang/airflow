@@ -23,12 +23,10 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 - config/app + jobs/{jobKey}（2026-10-05，`✅ 通過`，見下方專屬章節）
 
-**工具已就緒、尚未實際對真實資料跑過一次的表**：
-
-- factor_model_history（`migration/factor_model_history/`，Phase 3 跟
-  `Analysis.gs` 戰報邏輯一起遷移，不是 Phase 2 的範圍——`hybrid`/
-  `factor_model_rank` 這兩種戰報篩選策略要靠這張表才能在 Firebase 版正常
-  運作，見下方「Phase 3」章節）
+- factor_model_history（2026-10-05，18 筆真實資料，`✅ 通過`——Phase 3 跟
+  `Analysis.gs` 戰報邏輯一起遷移，不是 Phase 2 的範圍，其中剛好兩筆
+  `applied: true`，對應目前生效的 `return1m`／`downsideResistance` 兩個
+  版本，見下方「Phase 3」章節）
 
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
