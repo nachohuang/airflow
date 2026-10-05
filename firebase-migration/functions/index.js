@@ -25,13 +25,17 @@
  * 驗證過，這支檔案要驗證的只是「接線有沒有接對」，不是「算得對不對」。
  */
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onRequest } = require('firebase-functions/v2/https');
+const { onRequest, onCall, HttpsError } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
 const { BigQuery } = require('@google-cloud/bigquery');
 
 const config = require('./lib/config');
 const bigquery = require('./lib/bigquery');
 const reportPipeline = require('./lib/reportPipeline');
+const portfolio = require('./lib/portfolio');
+const watchlistLib = require('./lib/watchlist');
+const portfolioOpsLib = require('./lib/portfolioOps');
+const utilsLib = require('./lib/utils');
 
 admin.initializeApp();
 
@@ -92,6 +96,102 @@ async function fetchAppliedFactorModels_() {
     applied[data.labelKey] = { timestamp: data.timestamp, r2: data.r2, weights: data.weights };
   });
   return applied;
+}
+
+/**
+ * Watchlist／Portfolio 卡片要顯示的「最新收盤價」跟名稱補救，統一用同一次
+ * BigQuery 查詢取得——跟 apps-script/src/Portfolio.gs 的 getStockNameByCode／
+ * getLatestCloseByCode_ 兩支各自查一次不同，這裡只查一次「這幾檔代號最近
+ * 10 天的原始列」，同時拿到最新收盤價跟最新一筆的證券名稱，比兩次各自查詢
+ * 省一次 BigQuery 費用（見這份檔案開頭／README 的設計決策說明）。
+ * codes 是空陣列，或 config/app 還沒填 BigQuery 專案 ID 時，直接回傳 {}——
+ * 跟 fetchHistoryRows_ 不同，這裡是卡片的「加分」資訊，查不到就顯示空白，
+ * 不該讓整個 Watchlist/Portfolio 讀取因為 BigQuery 設定不完整而整個失敗。
+ */
+async function fetchBqInfoForCodes_(bigQueryConfig, codes) {
+  if (!codes || codes.length === 0) return {};
+  if (!bigQueryConfig || !bigQueryConfig.projectId) return {};
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const sourceRef = bigquery.sourceRefForRead_(bigQueryConfig);
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 10);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const sql = bigquery.buildHistoryRowsForCodesSql_(sourceRef, codes, cutoffStr);
+  const [rows] = await client.query({ query: sql });
+  const mapped = rows.map(bigquery.mapBqRowToHistoryRow_).filter(function (r) { return r !== null; });
+  const infoByCode = {};
+  mapped.forEach(function (r) {
+    const code = r['證券代號'];
+    const d = r['日期'];
+    if (!infoByCode[code] || d > infoByCode[code].date) {
+      infoByCode[code] = { date: d, close: r['收盤價'], name: r['證券名稱'] };
+    }
+  });
+  return infoByCode;
+}
+
+/**
+ * `reports/{date}/signals` 底下，指定這幾檔代號各自最新一筆戰報燈號——跟
+ * apps-script 版掃整個 Reports 分頁找每檔代號最大日期的那一筆不同，Firestore
+ * 版戰報是依日期分 subcollection 存的（見 firestore/schema.md §3），這裡改用
+ * collectionGroup 查詢只查呼叫端需要的這幾檔，不用把所有歷史戰報全部掃一輪。
+ * 需要 `signals` 這個 collection group 上 (code ASC, date DESC) 的複合索引
+ * （見 firestore/firestore.indexes.json），沒有這個索引查詢會直接失敗並在
+ * 錯誤訊息裡附上建立索引的連結。
+ */
+async function fetchLatestSignalsByCode_(codes) {
+  if (!codes || codes.length === 0) return {};
+  const db = admin.firestore();
+  const pairs = await Promise.all(codes.map(async function (code) {
+    const snap = await db.collectionGroup('signals')
+      .where('code', '==', code)
+      .orderBy('date', 'desc')
+      .limit(1)
+      .get();
+    if (snap.empty) return null;
+    const d = snap.docs[0].data();
+    return [code, { date: d.date, strategy: d.strategy, action: d.action }];
+  }));
+  const map = {};
+  pairs.forEach(function (pair) { if (pair) map[pair[0]] = pair[1]; });
+  return map;
+}
+
+/** getWatchlist／getPortfolio 共用：給一批代號，併發查 BigQuery 最新收盤價/名稱
+ *  跟各自最新一筆戰報燈號。 */
+async function enrichByCode_(appConfig, codes) {
+  const [bqInfoByCode, signalByCode] = await Promise.all([
+    fetchBqInfoForCodes_(appConfig.bigQuery, codes),
+    fetchLatestSignalsByCode_(codes)
+  ]);
+  return { bqInfoByCode: bqInfoByCode, signalByCode: signalByCode };
+}
+
+/** Firestore `watchlist` collection 全部文件（對照 firestore/schema.md §1）。 */
+async function fetchWatchlistDocs_() {
+  const snap = await admin.firestore().collection('watchlist').get();
+  return snap.docs.map(function (d) { return d.data(); });
+}
+
+/** getWatchlist／addToWatchlist／removeFromWatchlist 都回傳同一份「加完料的
+ *  觀察清單」，跟 apps-script 版三支函式都在最後呼叫 getWatchlist() 回傳同一個
+ *  形狀一致（前端不用區分呼叫哪支，拿到的都是完整的最新清單）。 */
+async function buildWatchlistResult_() {
+  const [appConfig, watchlistDocs] = await Promise.all([fetchAppConfig_(), fetchWatchlistDocs_()]);
+  const codes = watchlistDocs.map(function (d) { return d.code; });
+  const enriched = await enrichByCode_(appConfig, codes);
+  return watchlistLib.buildWatchlistItems_(watchlistDocs, enriched.bqInfoByCode, enriched.signalByCode);
+}
+
+/** getPortfolio／savePortfolioItem／deletePortfolioLot／closePortfolioPosition
+ *  都回傳同一份「加完料的持股卡片」，跟 apps-script 版同一套設計。 */
+async function buildPortfolioResult_() {
+  const [appConfig, lotDocs] = await Promise.all([fetchAppConfig_(), fetchPortfolioLots_()]);
+  const holdingCodes = Array.from(new Set(
+    lotDocs.filter(function (l) { return l.status === 'holding'; }).map(function (l) { return l.code; })
+  ));
+  const enriched = await enrichByCode_(appConfig, holdingCodes);
+  return portfolioOpsLib.buildPortfolioCards_(lotDocs, enriched.bqInfoByCode, enriched.signalByCode);
 }
 
 /**
@@ -190,4 +290,141 @@ exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res)
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
+});
+
+/**
+ * 以下是 Watchlist／Portfolio 的讀寫邏輯（Phase 3，跟戰報計算一起遷移），從
+ * apps-script/src/Watchlist.gs／apps-script/src/Portfolio.gs 搬過來。用
+ * onCall（不是 onRequest／onSchedule）——這幾支是給之後的前端（Phase 5）直接
+ * 呼叫用的使用者操作，不是排程或純測試用的 HTTP endpoint，onCall 自帶
+ * Firebase Auth 驗證跟結構化錯誤回傳，不用自己重新發明一套。
+ *
+ * deletePortfolioItem_（依代號刪光全部持有中紀錄）刻意不搬——apps-script 版
+ * 自己也說明那是「舊版前端相容用」，新版前端一律用 deletePortfolioLot(lotId)
+ * 刪除單一一筆，不需要這支。
+ */
+
+exports.getWatchlist = onCall(RUNTIME_OPTS_, async function () {
+  return await buildWatchlistResult_();
+});
+
+/** data: {code, name?, note?}。code 必填；已經是持有中的股票會被擋掉（見
+ *  lib/watchlist.js assertNotHolding_ 的說明）；同一檔股票重複加入視為更新。 */
+exports.addToWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+  const data = request.data || {};
+  if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
+  const code = utilsLib.zfill4(String(data.code).trim());
+
+  const [lotDocs, docRef] = [await fetchPortfolioLots_(), admin.firestore().collection('watchlist').doc(code)];
+  const portfolioMap = portfolio.buildPortfolioMap_(lotDocs);
+  try {
+    watchlistLib.assertNotHolding_(code, portfolioMap);
+  } catch (e) {
+    throw new HttpsError('failed-precondition', e.message);
+  }
+
+  const existingSnap = await docRef.get();
+  const todayStr = utilsLib.todayStrTaipei_();
+  const fields = watchlistLib.mergeWatchlistDoc_(existingSnap.exists ? existingSnap.data() : null, code, data.name, data.note, todayStr);
+  await docRef.set(fields);
+  return await buildWatchlistResult_();
+});
+
+/** data: {code}。 */
+exports.removeFromWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+  const data = request.data || {};
+  if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
+  const code = utilsLib.zfill4(String(data.code).trim());
+  await admin.firestore().collection('watchlist').doc(code).delete();
+  return await buildWatchlistResult_();
+});
+
+exports.getPortfolio = onCall(RUNTIME_OPTS_, async function () {
+  return await buildPortfolioResult_();
+});
+
+/**
+ * data: {lotId?, code, name?, cost, buyDate?, shares?, note?}。沒帶 lotId 代表
+ * 新增一筆全新買進紀錄（isNewHolding），這檔股票既然已經真的買進，就自動把它
+ * 從觀察清單移除（對應 apps-script 版 removeFromWatchlistSilently_，同步失敗
+ * 不該擋住真正的買進紀錄，見 catch 區塊的說明）；帶 lotId 代表編輯既有的一筆。
+ */
+exports.savePortfolioItem = onCall(RUNTIME_OPTS_, async function (request) {
+  const item = request.data || {};
+  if (!item.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
+  const code = utilsLib.zfill4(String(item.code).trim());
+  const db = admin.firestore();
+  const isNewHolding = !item.lotId;
+
+  if (item.lotId) {
+    const ref = db.collection('portfolio_lots').doc(item.lotId);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError('not-found', '找不到這筆買進紀錄，可能已被刪除，請重新整理後再試一次');
+    const existing = snap.data();
+    await ref.set({
+      transactionId: item.lotId,
+      code: code,
+      name: item.name || existing.name || '',
+      buyDate: item.buyDate || existing.buyDate || '',
+      buyPrice: utilsLib.toNumber(item.cost),
+      shares: utilsLib.toNumber(item.shares) || existing.shares || config.PORTFOLIO_DEFAULT_LOT_SHARES,
+      note: item.note || '',
+      status: existing.status || 'holding',
+      sellDate: existing.sellDate || null,
+      sellPrice: existing.sellPrice || null
+    });
+  } else {
+    const ref = db.collection('portfolio_lots').doc();
+    await ref.set({
+      transactionId: ref.id,
+      code: code,
+      name: item.name || '',
+      buyDate: item.buyDate || '',
+      buyPrice: utilsLib.toNumber(item.cost),
+      shares: utilsLib.toNumber(item.shares) || config.PORTFOLIO_DEFAULT_LOT_SHARES,
+      note: item.note || '',
+      status: 'holding',
+      sellDate: null,
+      sellPrice: null
+    });
+    try {
+      await db.collection('watchlist').doc(code).delete();
+    } catch (e) { /* 觀察清單同步失敗不該擋住真正的買進紀錄，見 apps-script 版說明 */ }
+  }
+  return await buildPortfolioResult_();
+});
+
+/** data: {lotId}。依交易ID刪除單一一筆買進紀錄（不是依股票代號——同一檔可能有好幾筆）。 */
+exports.deletePortfolioLot = onCall(RUNTIME_OPTS_, async function (request) {
+  const lotId = request.data && request.data.lotId;
+  if (!lotId) throw new HttpsError('invalid-argument', '缺少交易ID');
+  await admin.firestore().collection('portfolio_lots').doc(lotId).delete();
+  return await buildPortfolioResult_();
+});
+
+/** data: {code, sellDate, sellPrice}。把某檔股票目前所有「持有中」的紀錄一次性
+ *  標記為已賣出（用同一個賣出日期/價格），不支援部分賣出（對應 apps-script 版
+ *  closePortfolioPosition 的說明）。 */
+exports.closePortfolioPosition = onCall(RUNTIME_OPTS_, async function (request) {
+  const data = request.data || {};
+  const code = utilsLib.zfill4(String(data.code || '').trim());
+  if (!code) throw new HttpsError('invalid-argument', '股票代號不可為空');
+  const sellPrice = utilsLib.toNumber(data.sellPrice);
+  if (!sellPrice) throw new HttpsError('invalid-argument', '請輸入賣出價格');
+  if (!data.sellDate) throw new HttpsError('invalid-argument', '請輸入賣出日期');
+
+  const db = admin.firestore();
+  const snap = await db.collection('portfolio_lots').where('code', '==', code).where('status', '==', 'holding').get();
+  if (snap.empty) throw new HttpsError('not-found', '找不到 ' + code + ' 目前持有中的買進紀錄');
+  const batch = db.batch();
+  snap.docs.forEach(function (doc) {
+    batch.update(doc.ref, { status: 'sold', sellDate: data.sellDate, sellPrice: sellPrice });
+  });
+  await batch.commit();
+  return await buildPortfolioResult_();
+});
+
+exports.getClosedPortfolioHistory = onCall(RUNTIME_OPTS_, async function () {
+  const lotDocs = await fetchPortfolioLots_();
+  return portfolioOpsLib.buildClosedHistory_(lotDocs);
 });

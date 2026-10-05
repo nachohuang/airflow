@@ -16,6 +16,10 @@ module.exports = {
     TRAILING_STOP_PERCENT: 0.025
   },
 
+  // Portfolio savePortfolioItem 新增買進紀錄時，股數欄位是空值的預設值（1 張），
+  // 從 apps-script/src/Portfolio.gs 的 PORTFOLIO_DEFAULT_LOT_SHARES_ 複製。
+  PORTFOLIO_DEFAULT_LOT_SHARES: 1000,
+
   // Analysis 每次只讀最近 N 天的歷史資料來算 rolling 指標
   // （MA60 需要 60 個交易日 + IBF20/Vol20 緩衝，120 天日曆天數綽綽有餘）。
   ANALYSIS_LOOKBACK_DAYS: 150,

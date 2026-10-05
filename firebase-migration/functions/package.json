@@ -6,7 +6,7 @@
     "node": "20"
   },
   "scripts": {
-    "test": "node test/analysis.test.js && node test/parity.test.js && node test/portfolio.test.js && node test/bigquery.test.js && node test/reportPipeline.test.js"
+    "test": "node test/analysis.test.js && node test/parity.test.js && node test/portfolio.test.js && node test/bigquery.test.js && node test/reportPipeline.test.js && node test/watchlist.test.js && node test/portfolioOps.test.js"
   },
   "dependencies": {
     "@google-cloud/bigquery": "^7.0.0",

@@ -283,6 +283,19 @@ function pearsonCorrelation(xs, ys) {
   return sxy / Math.sqrt(sxx * syy);
 }
 
+/** 「今天」在台北時區（UTC+8）的 yyyy-MM-dd 字串。Cloud Functions 執行環境的
+ *  系統時區不保證是台北（預設是 UTC），直接用 `new Date().toISOString()`
+ *  在台北午夜前後 8 小時會算成前一天/後一天，所以要先把目前時刻位移 8 小時
+ *  再取 UTC 欄位讀出來——跟 migration/lib/normalize.js 的 normalizeDateTimeStr
+ *  重建 Sheets 時間字串時用的是同一招。給 addToWatchlist 的「加入日期」用。 */
+function todayStrTaipei_() {
+  var d = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var day = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
 /** yyyy-MM-dd 字串比較用的日期正規化（避免時區問題，純字串操作）。 */
 function normalizeDateStr(v) {
   if (v === null || v === undefined) return null;
@@ -322,5 +335,6 @@ module.exports = {
   expandingMaxFromIndex: expandingMaxFromIndex,
   percentRank: percentRank,
   pearsonCorrelation: pearsonCorrelation,
-  normalizeDateStr: normalizeDateStr
+  normalizeDateStr: normalizeDateStr,
+  todayStrTaipei_: todayStrTaipei_
 };

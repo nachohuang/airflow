@@ -483,6 +483,73 @@ npm install
 npm test
 ```
 
+## Watchlist／Portfolio 讀寫邏輯（2026-10-05）
+
+跟戰報計算（`generateDailyReport`）不同，這批是給之後的前端（Phase 5）直接
+呼叫的使用者操作（加入觀察清單、記一筆買進、標示賣出……），所以用
+`onCall`（Firebase Callable Function），不是 `onRequest`/`onSchedule`——
+`onCall` 自帶 Firebase Auth 驗證跟結構化錯誤（`HttpsError`）回傳，不用自己
+重新發明一套。
+
+- `functions/lib/watchlist.js` — 從 `apps-script/src/Watchlist.gs` 拆出來的
+  純邏輯：`buildWatchlistItems_`（依加入日期新到舊排序，補上最新收盤價／
+  名稱／戰報燈號）、`assertNotHolding_`（跟持股庫存互斥檢查）、
+  `mergeWatchlistDoc_`（`addToWatchlist` 的 upsert 合併規則）。
+- `functions/lib/portfolioOps.js` — 從 `apps-script/src/Portfolio.gs` 拆出來
+  的純邏輯：`buildPortfolioCards_`（依代號把持有中的買進紀錄聚合成卡片，
+  共用 `lib/portfolio.js` 的 `aggregateLots_` 做加權平均成本的數學）、
+  `buildClosedHistory_`（依代號+賣出日期+賣出價格分組算已實現損益）。跟
+  `lib/portfolio.js` 的 `buildPortfolioMap_` 不是同一支——那支是給戰報計算
+  用的精簡版 `{code: {cost, buyDate}}`，這支是給「持股庫存」頁面用、要保留
+  每一筆個別買進紀錄跟卡片顯示用欄位的完整版。
+- `functions/lib/bigquery.js` 新增 `buildHistoryRowsForCodesSql_`——從
+  `apps-script/src/BigQuerySync.gs` 的 `buildHistoryRowsForStocksSql_` 複製，
+  只查「指定幾檔代號」的原始列，跟戰報用的全市場查詢（`buildHistoryRangeSql_`）
+  完全無關，資料量小，不會有 OOM 風險，所以不需要 `stocksOnly` 這種全市場
+  專用的過濾條件。
+- `functions/index.js` 新增：
+  - `fetchBqInfoForCodes_`——Watchlist／Portfolio 卡片要顯示的「最新收盤價」
+    跟名稱補救，統一用**同一次** BigQuery 查詢取得（查「這幾檔代號最近
+    10 天的原始列」，同時拿到最新收盤價跟最新一筆的證券名稱）。跟
+    apps-script 版 `getStockNameByCode`／`getLatestCloseByCode_` 兩支各自
+    查一次不同，這裡只查一次，省一次 BigQuery 費用——這是蓄意的效率改進，
+    不是照搬 apps-script 版的兩次查詢設計。
+  - `fetchLatestSignalsByCode_`——查 Firestore `reports/{date}/signals`
+    底下指定代號各自最新一筆戰報燈號。跟 apps-script 版掃整個 Reports
+    分頁找每檔代號最大日期的那一筆不同：Firestore 版戰報依日期分
+    subcollection 存，這裡改用 `collectionGroup('signals')` 查詢只查
+    需要的這幾檔，不用掃全部歷史戰報。**需要 `signals` 這個 collection
+    group 上 `(code ASC, date DESC)` 的複合索引**（見下方「需要的 Firestore
+    複合索引」）。
+  - 8 個 `onCall` function：`getWatchlist`／`addToWatchlist`／
+    `removeFromWatchlist`／`getPortfolio`／`savePortfolioItem`／
+    `deletePortfolioLot`／`closePortfolioPosition`／
+    `getClosedPortfolioHistory`，直接對應 `Watchlist.gs`／`Portfolio.gs`
+    的同名函式。**`deletePortfolioItem`（依代號刪光全部持有中紀錄）刻意
+    沒搬**——apps-script 版自己的註解就說明那是「舊版前端相容用」，新版
+    前端一律用 `deletePortfolioLot(lotId)` 刪除單一一筆，不需要這支。
+- `functions/test/watchlist.test.js`／`portfolioOps.test.js`——分別驗證
+  上面兩個 `lib/` 檔案的純邏輯，不需要雲端憑證；`test/bigquery.test.js`
+  也補了 `buildHistoryRowsForCodesSql_` 的測試案例（IN 子句、選填的
+  `startStr`、代號字串裡的單引號要被濾掉避免 SQL injection）。
+
+**需要的 Firestore 複合索引**（`firestore/firestore.indexes.json`，已經接進
+`firebase.json` 的 `firestore.indexes`，執行 `firebase deploy
+--only firestore:indexes` 或完整的 `firebase deploy` 就會一起建立）：
+
+- `signals`（collection group）：`(code ASC, date DESC)`——
+  `fetchLatestSignalsByCode_` 需要。
+- `portfolio_lots`：`(code ASC, status ASC)`——`closePortfolioPosition`
+  查「某代號目前持有中的所有紀錄」需要，也是 `firestore/schema.md` §2
+  一開始就寫好要建的索引。
+
+⚠️ 跟 `generateDailyReport` 一樣，這 8 個 `onCall` function 本身沒辦法在
+這個開發環境驗證（沒有真正的雲端憑證）——`lib/` 的純邏輯已經靠單元測試
+驗證過，實際部署後要驗證的只是「接線有沒有接對」跟「複合索引建好了沒」。
+部署後可以用 Firebase Console 的 Callable Function 測試面板，或裝了
+Firebase CLI 的環境用 `firebase functions:shell` 手動呼叫驗證（例如
+`getWatchlist()`、`addToWatchlist({code: '2330', name: '台積電'})`）。
+
 ## 還沒做的事（下一步）
 
 - ~~因子模型資料遷移 + `hybrid`/`factor_model_rank` 接線驗證~~ ✅

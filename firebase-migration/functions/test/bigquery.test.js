@@ -40,6 +40,25 @@ const bq = require('../lib/bigquery');
   console.log('Test buildHistoryRangeSql_ (stocksOnly option excludes warrants/ETFs) passed.');
 }
 
+// --- buildHistoryRowsForCodesSql_：只查指定代號（IN 子句），startStr 選填，
+//    代號字串裡的單引號要被濾掉（基本的 SQL injection 防護，跟
+//    apps-script/src/BigQuerySync.gs 的 buildHistoryRowsForStocksSql_ 同一套規則）---
+{
+  const sql = bq.buildHistoryRowsForCodesSql_('proj.ds.history_unified', ['2330', '1101'], '2026-09-25');
+  assert.ok(sql.indexOf("FROM `proj.ds.history_unified`") !== -1);
+  assert.ok(sql.indexOf("stock_id IN ('2330', '1101')") !== -1, '應該用 IN 子句只查這幾檔代號');
+  assert.ok(sql.indexOf("date_str >= '2026-09-25'") !== -1);
+  assert.ok(sql.indexOf('LENGTH(stock_id)') === -1, '只查指定代號不需要 stocksOnly 的全市場過濾條件');
+
+  const sqlNoStart = bq.buildHistoryRowsForCodesSql_('proj.ds.history_unified', ['2330']);
+  assert.ok(sqlNoStart.indexOf('date_str >=') === -1, '沒帶 startStr 就不該有日期條件');
+
+  const sqlInjection = bq.buildHistoryRowsForCodesSql_('proj.ds.history_unified', ["2330'; DROP TABLE x; --"]);
+  assert.ok(sqlInjection.indexOf("stock_id IN ('2330; DROP TABLE x; --')") !== -1,
+    '代號字串裡的單引號要被濾掉，不會提前結束字串字面值造成 SQL injection');
+  console.log('Test buildHistoryRowsForCodesSql_ (IN clause, optional startStr, quote stripping) passed.');
+}
+
 // --- mapBqRowToHistoryRow_：數值欄位轉 number，字串欄位保留字串，缺欄位用空字串 ---
 {
   const bqRow = {

@@ -84,6 +84,22 @@ function buildHistoryRangeSql_(sourceRef, startStr, endStr, opts) {
 }
 
 /**
+ * 只查「指定幾檔股票」的原始歷史列——從
+ * apps-script/src/BigQuerySync.gs 的 `buildHistoryRowsForStocksSql_` 複製，給
+ * Watchlist／Portfolio 卡片要顯示的「最新收盤價」用：資料量小（只查呼叫端實際
+ * 需要的幾檔代號，不是全市場），跟今日戰報的全市場查詢完全無關，不會有記憶體
+ * 問題，所以不需要跟 `buildHistoryRangeSql_` 共用同一支函式、也不需要
+ * `stocksOnly` 這種全市場專用的篩選。
+ */
+function buildHistoryRowsForCodesSql_(sourceRef, stockIds, startStr) {
+  var cols = bqColumnNames_().join(', ');
+  var idList = stockIds.map(function (id) { return "'" + String(id).replace(/'/g, '') + "'"; }).join(', ');
+  var sql = 'SELECT ' + cols + ' FROM `' + sourceRef + '` WHERE stock_id IN (' + idList + ')';
+  if (startStr) sql += " AND date_str >= '" + startStr + "'";
+  return sql;
+}
+
+/**
  * 把 BigQuery 查詢回來的一列（ascii 欄名、全部字串）轉回 computeFactors_ 期待的
  * 中文欄名列物件，數值欄位轉成 number，讓 lib/analysis.js 的 computeFactors_
  * 完全不用改。
@@ -118,5 +134,6 @@ module.exports = {
   bqColumnNames_: bqColumnNames_,
   sourceRefForRead_: sourceRefForRead_,
   buildHistoryRangeSql_: buildHistoryRangeSql_,
+  buildHistoryRowsForCodesSql_: buildHistoryRowsForCodesSql_,
   mapBqRowToHistoryRow_: mapBqRowToHistoryRow_
 };
