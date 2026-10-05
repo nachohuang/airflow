@@ -21,10 +21,7 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 - IndustryMap（2026-10-05，1087 筆真實資料，`✅ 通過`）
 
-**工具已就緒、尚未實際對真實資料跑過一次的**：
-
-- config/app + jobs/{jobKey}（`migration/config_and_jobs/`，來源不是 Sheets，
-  是 Script Properties，流程跟其他表不一樣，見下方專屬章節）
+- config/app + jobs/{jobKey}（2026-10-05，`✅ 通過`，見下方專屬章節）
 
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
