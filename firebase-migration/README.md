@@ -382,8 +382,14 @@ Firestore 雲端憑證，`npm install` 跟 `node --check`/`require()` 確認過
 `lib/` 底下的計算邏輯本身已經靠單元測試跟 parity 測試驗證過，`index.js`
 要驗證的只是「接線有沒有接對」，不是「算得對不對」。
 
-**2026-10-05 部署到 `flash-arbor-365706` 進行中，踩到兩個真實的坑，都已經
-修好並記錄在這裡給之後部署其他 Cloud Function 參考：**
+**✅ 2026-10-05 已部署到 `flash-arbor-365706` 並完整驗證成功。**
+`generateDailyReport` 手動觸發後：BigQuery 查到 1088 檔一般股票（排除權證
+後的正常量級）、Firestore `config/app`／`portfolio_lots` 讀取正確、算出
+79 筆訊號、全部正確寫進 `reports/2026-10-05/signals/{code}`，欄位內容
+（`armorScore`/`strategy`/`interpretation`/`monitorUrl`，`predictedReturn1m`
+等因子模型欄位正確是 `null`）跟 `firestore/schema.md` §3 的設計完全一致。
+部署過程踩到兩個真實的坑，都已經修好並記錄在這裡給之後部署其他 Cloud
+Function 參考：
 
 - **Cloud Functions 2nd gen 需要 Blaze（用量付費）方案**，Spark 免費方案
   部署會直接失敗，部署前要先在 Firebase Console 升級。
@@ -437,6 +443,11 @@ npm test
   `rule_v17` 不需要它（`needsFactorModel: false`），可以先不處理；
   `factor_model_rank`/`hybrid` 這兩種策略要等那張表也遷移完才能在
   Firebase 版正常運作（`index.js` 目前固定傳 `{}` 當 `appliedFactorModels`）。
+  **`config/app` 的 `screeningStrategy` 目前在正式環境裡是 `rule_v17`**
+  （部署驗證時從原本遷移過來的 `hybrid` 手動切過去的——`hybrid` 在因子
+  模型資料遷移完成前，`generateDailyReportScheduled` 每天都會是
+  `reportCount: 0`，不是壞掉，只是正確地因為缺資料而不產生訊號。因子模型
+  資料遷移完成後，可以隨時切回 `hybrid`）。
 - **背景 job 狀態機**：`startAnalysisJob`/`processAnalysisJobTick_` 這類
   機制在 Cloud Functions 世界不需要照搬——Cloud Functions 本身沒有 Apps
   Script 的 6 分鐘執行上限跟一次性觸發器不可靠的問題，這段「背景 job 繞過
