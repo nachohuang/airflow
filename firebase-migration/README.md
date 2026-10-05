@@ -382,6 +382,24 @@ Firestore 雲端憑證，`npm install` 跟 `node --check`/`require()` 確認過
 `lib/` 底下的計算邏輯本身已經靠單元測試跟 parity 測試驗證過，`index.js`
 要驗證的只是「接線有沒有接對」，不是「算得對不對」。
 
+**✅ 2026-10-05 已部署到 `flash-arbor-365706` 並驗證接線成功。** 部署過程
+踩到一個預期內的坑，記錄在這裡給之後部署其他 Cloud Function 參考：
+
+- **Cloud Functions 2nd gen 需要 Blaze（用量付費）方案**，Spark 免費方案
+  部署會直接失敗，部署前要先在 Firebase Console 升級。
+- **第一次部署會自動要求啟用好幾個 API**（`cloudfunctions`／`cloudbuild`／
+  `artifactregistry`／`eventarc`／`cloudscheduler`／`run`／`pubsub`／
+  `storage`），`firebase deploy` 自己會檢查並啟用，不用事先手動一一啟用。
+- **預設記憶體 256 MiB 不夠用**：第一次手動觸發 `generateDailyReport` 時
+  直接被 OOM 砍掉（`Memory limit of 256 MiB exceeded with 267~291 MiB
+  used`）——全市場 1000+ 檔股票 x `ANALYSIS_LOOKBACK_DAYS`（150）天的原始
+  History，實測需要的記憶體比預設值略高。這跟 apps-script 版當年因為 Apps
+  Script V8 記憶體上限才把因子計算改寫成 BigQuery SQL 是同一個量級的資料，
+  但在 Cloud Functions 這純粹是部署設定沒給夠，不是架構問題——`index.js`
+  的兩個 function 現在都明確指定 `memory: '1GiB'`（實測用量的 3~4 倍）、
+  `timeoutSeconds: 180`，不需要像 apps-script 版那樣另外維護一套 SQL 實作
+  來繞過這個限制。
+
 跑全部測試（`functions/` 目錄底下）：
 
 ```bash
@@ -392,12 +410,6 @@ npm test
 
 ## 還沒做的事（下一步）
 
-- **部署驗證 `index.js`**：跟 Phase 2 遷移工具一樣，需要實際部署到
-  `flash-arbor-365706` 這個 Firebase 專案（`firebase deploy --only
-  functions`），用 `generateDailyReport` 這個 HTTPS endpoint 手動觸發一次，
-  確認真的能查到 BigQuery 資料、寫進 Firestore、回傳的 `reportCount`／
-  `diagnostics` 跟預期的量級吻合（比照 Phase 2 驗證 Watchlist／Portfolio
-  那幾張表時「對照真實資料筆數」的做法）。
 - **因子模型資料**：`getAppliedFactorModels()`（讀 Apps Script 的
   FactorModelHistory 分頁）還沒有 Firestore 版對應——`factor_model_history`
   這張表照〈遷移藍圖〉本來就排在 Phase 3 跟後端邏輯一起搬，現在預設策略

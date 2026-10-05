@@ -100,16 +100,29 @@ async function runDailyAnalysis_() {
   return result;
 }
 
+/** 全市場 1000+ 檔股票 x ANALYSIS_LOOKBACK_DAYS(150)天的原始 History，實測需要
+ *  的記憶體比 Cloud Functions 2nd gen 預設的 256 MiB 略高（部署後實測跑到
+ *  256 MiB 就被 OOM 砍掉，見 firebase-migration/README.md 的部署驗證紀錄）——
+ *  跟 apps-script 版当年因為 Apps Script V8 記憶體上限才把因子計算改寫成
+ *  BigQuery SQL 是同一個量級的資料，但這裡純粹是部署設定沒給夠，不是架構問題，
+ *  調大記憶體配置就解決，不需要像 apps-script 版那樣另外維護一套 SQL 實作。
+ *  1GiB 大約是實測用量（267~291 MiB）的 3~4 倍，留足餘裕應付資料量隨股票數
+ *  微幅成長。 */
+var RUNTIME_OPTS_ = { memory: '1GiB', timeoutSeconds: 180 };
+
 /** 每個交易日台股收盤後觸發（15:00 UTC = 台北時間 23:00，History 當天資料應該
  *  已經更新完），取代 apps-script 版 scheduledDailyFetch 裡「算戰報」這一步
  *  （不含補抓 History/同步產業對照表等其他步驟，那些還沒遷移）。 */
-exports.generateDailyReportScheduled = onSchedule('0 15 * * 1-5', async function () {
-  await runDailyAnalysis_();
-});
+exports.generateDailyReportScheduled = onSchedule(
+  Object.assign({ schedule: '0 15 * * 1-5' }, RUNTIME_OPTS_),
+  async function () {
+    await runDailyAnalysis_();
+  }
+);
 
 /** 手動觸發用（取代 apps-script 版「重新計算戰報」按鈕），回傳這次算出來的戰報
  *  摘要，方便部署後用 curl 或瀏覽器直接驗證有沒有接線成功。 */
-exports.generateDailyReport = onRequest(async function (req, res) {
+exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res) {
   try {
     const result = await runDailyAnalysis_();
     res.json({
