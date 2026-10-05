@@ -112,4 +112,30 @@ function buildSyntheticHistoryForCode(code, name, days, startPrice, dailyDelta, 
   console.log('Test 6 (factor_model_rank without applied model -> strategyError) passed.');
 }
 
+// --- 7. factor_model_rank 策略，有套用中的模型（跟 Firestore factor_model_history
+//    遷移完成後 index.js 的 fetchAppliedFactorModels_ 組出來的形狀一致）-> 橫斷面
+//    排名最高的股票要出現在報告裡，且預測分數欄位要有值，不是 null ---
+{
+  const flatA = buildSyntheticHistoryForCode('1101', '盤整A', 40, 50, 0); // Trend_Score 應為 0
+  const flatB = buildSyntheticHistoryForCode('1102', '盤整B', 40, 30, 0); // Trend_Score 應為 0
+  const rising = buildSyntheticHistoryForCode('2330', '台積電', 40, 20, 0.3); // Trend_Score 應為 2，橫斷面排名最高
+  const historyRows = flatA.concat(flatB).concat(rising);
+  // weights 的 key 是 BigQuery 欄位名稱（'trend_score'），對應 lib/config.js
+  // BQ_FEATURE_TO_ANALYSIS_FIELD 的 'Trend_Score'，跟 index.js
+  // fetchAppliedFactorModels_() 從 Firestore factor_model_history 讀出來的
+  // weights 形狀一致。
+  const appliedFactorModels = { downsideResistance: { weights: { trend_score: 1 } } };
+  const result = buildReport_(historyRows, [], 'factor_model_rank', appliedFactorModels);
+
+  assert.ok(!result.strategyError, '有套用中的模型時不該有 strategyError');
+  const codes = result.reportDocs.map(function (d) { return d.code; });
+  assert.ok(codes.indexOf('2330') !== -1, '橫斷面排名最高（Trend_Score=2，唯一最大值）的股票應該觸發 factor_model_rank 訊號');
+  assert.ok(codes.indexOf('1101') === -1 && codes.indexOf('1102') === -1, '排名不夠高的兩檔盤整股不該出現');
+
+  const doc = result.reportDocs.find(function (d) { return d.code === '2330'; });
+  assert.strictEqual(doc.predictedDownsideResistance, 2, '權重 {trend_score:1} 時，預測分數應該等於 Trend_Score 本身');
+  assert.strictEqual(doc.predictedReturn1m, null, '只套用了 downsideResistance，predictedReturn1m 應該仍是 null');
+  console.log('Test 7 (factor_model_rank with an applied model -> top-ranked stock gets a signal with predicted scores) passed.');
+}
+
 console.log('All reportPipeline.js tests passed.');

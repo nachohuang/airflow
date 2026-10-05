@@ -4,8 +4,9 @@
  * lib/reportPipeline.js 等）接上真正的 I/O——讀 BigQuery 的 History（不動，
  * Phase 2 的結論是這張表留在 BigQuery，見 README「每天累積的股價及市場資料
  * 在哪裡遷移」）、讀 Firestore 的 `portfolio_lots`／`config/app`（Phase 2
- * 已經遷移完成的資料），算完寫進 Firestore `reports/{date}/signals/{code}`
- * （對照 firestore/schema.md §3）。
+ * 已經遷移完成的資料）跟 `factor_model_history`（Phase 3 跟後端邏輯一起
+ * 遷移，`hybrid`/`factor_model_rank` 策略需要），算完寫進 Firestore
+ * `reports/{date}/signals/{code}`（對照 firestore/schema.md §3）。
  *
  * 設計選擇：History 改成抓「最近 ANALYSIS_LOOKBACK_DAYS 天、全市場」的原始
  * 列，在這裡用已經跟 Apps Script 版 parity 驗證過的 lib/analysis.js
@@ -76,6 +77,23 @@ async function fetchHistoryRows_(bigQueryConfig) {
   return rows.map(bigquery.mapBqRowToHistoryRow_).filter(function (r) { return r !== null; });
 }
 
+/** Firestore `factor_model_history` collection 裡 `applied === true` 的文件
+ *  （Phase 3 跟後端邏輯一起遷移，見 firebase-migration/migration/
+ *  factor_model_history/），組成 reportPipeline.buildReport_ 需要的
+ *  appliedFactorModels 形狀：{return1m: {timestamp, r2, weights},
+ *  downsideResistance: {...}}，跟 apps-script/src/FactorRegression.gs 的
+ *  getAppliedFactorModels() 回傳形狀一致。沒有任何套用中的模型時回傳 {}——
+ *  rule_v17（預設策略）不需要這個，factor_model_rank／hybrid 需要。 */
+async function fetchAppliedFactorModels_() {
+  const snap = await admin.firestore().collection('factor_model_history').where('applied', '==', true).get();
+  const applied = {};
+  snap.docs.forEach(function (d) {
+    const data = d.data();
+    applied[data.labelKey] = { timestamp: data.timestamp, r2: data.r2, weights: data.weights };
+  });
+  return applied;
+}
+
 /** 把 reportPipeline.buildReport_ 算出來的 reportDocs 寫進 Firestore
  *  `reports/{date}/signals/{code}`。latestDate 是 null（完全查無 History 資料）
  *  時什麼都不寫——跟 apps-script 版 runAnalysisAndSave() 的「沒有可用資料就不寫」
@@ -97,11 +115,12 @@ async function writeReportDocs_(result) {
  *  同一個設計）。 */
 async function runDailyAnalysis_() {
   const appConfig = await fetchAppConfig_();
-  const [historyRows, lotDocs] = await Promise.all([
+  const [historyRows, lotDocs, appliedFactorModels] = await Promise.all([
     fetchHistoryRows_(appConfig.bigQuery),
-    fetchPortfolioLots_()
+    fetchPortfolioLots_(),
+    fetchAppliedFactorModels_()
   ]);
-  const result = reportPipeline.buildReport_(historyRows, lotDocs, appConfig.screeningStrategy, {});
+  const result = reportPipeline.buildReport_(historyRows, lotDocs, appConfig.screeningStrategy, appliedFactorModels);
   await writeReportDocs_(result);
   return result;
 }

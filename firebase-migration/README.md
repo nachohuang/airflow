@@ -23,6 +23,13 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 - config/app + jobs/{jobKey}（2026-10-05，`✅ 通過`，見下方專屬章節）
 
+**工具已就緒、尚未實際對真實資料跑過一次的表**：
+
+- factor_model_history（`migration/factor_model_history/`，Phase 3 跟
+  `Analysis.gs` 戰報邏輯一起遷移，不是 Phase 2 的範圍——`hybrid`/
+  `factor_model_rank` 這兩種戰報篩選策略要靠這張表才能在 Firebase 版正常
+  運作，見下方「Phase 3」章節）
+
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
 
@@ -40,8 +47,9 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
   - `firebase-init.js` — 共用的 Firestore 連線邏輯，本機服務帳戶金鑰／Cloud
     Shell 的 `gcloud` 使用者憑證兩種都支援
 - `migration/watchlist/`、`migration/portfolio/`、`migration/ai_diagnosis/`、
-  `migration/skip_dates/`、`migration/industry_map/` — 每張表各自一組遷移
-  工具，結構完全一樣：
+  `migration/skip_dates/`、`migration/industry_map/`、
+  `migration/factor_model_history/` — 每張表各自一組遷移工具，結構完全
+  一樣：
   - `transform.js` / `checks.js` — 純邏輯，不需要雲端憑證，`test/` 底下有完整
     單元測試
   - `export-sheets.gs` — 貼進既有 Apps Script 專案手動執行一次
@@ -69,14 +77,16 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 ## 跑一次完整的表遷移流程（Cloud Shell 版本，Watchlist／Portfolio 已驗證可行）
 
 下面用 `<table>` 代表 `migration/` 底下的目錄名（`watchlist`／`portfolio`／
-`ai_diagnosis`／`skip_dates`／`industry_map`），`<Table>` 代表對應的匯出函式
-名稱字首——例如 Watchlist 是 `migration/watchlist/...`、
-`exportWatchlistToJson`；Portfolio 是 `migration/portfolio/...`、
-`exportPortfolioToJson`；AiDiagnosis 是 `migration/ai_diagnosis/...`、
-`exportAiDiagnosisToJson`；SkipDates 是 `migration/skip_dates/...`、
-`exportSkipDatesToJson`；IndustryMap 是 `migration/industry_map/...`、
-`exportIndustryMapToJson`（匯出函式名稱沿用 Sheets 原本的駝峰式名稱，不是
-目錄名的底線寫法）。
+`ai_diagnosis`／`skip_dates`／`industry_map`／`factor_model_history`），
+`<Table>` 代表對應的匯出函式名稱字首——例如 Watchlist 是
+`migration/watchlist/...`、`exportWatchlistToJson`；Portfolio 是
+`migration/portfolio/...`、`exportPortfolioToJson`；AiDiagnosis 是
+`migration/ai_diagnosis/...`、`exportAiDiagnosisToJson`；SkipDates 是
+`migration/skip_dates/...`、`exportSkipDatesToJson`；IndustryMap 是
+`migration/industry_map/...`、`exportIndustryMapToJson`；
+FactorModelHistory 是 `migration/factor_model_history/...`、
+`exportFactorModelHistoryToJson`（匯出函式名稱沿用 Sheets 原本的駝峰式
+名稱，不是目錄名的底線寫法）。
 
 ```bash
 # 0. 開 Cloud Shell（console.cloud.google.com 右上角 >_ 圖示），確認專案正確
@@ -234,6 +244,29 @@ node migration/config_and_jobs/validate.js ~/config_and_jobs-export-*.json
   執行時才會產生的新文件，現在的 Script Properties 裡沒有對應資料，這次
   遷移工具不會（也沒辦法）提前生出它。
 
+### factor_model_history
+
+- **屬於 Phase 3，不是 Phase 2**：跟其他六組不一樣，這張表照〈遷移藍圖〉
+  本來就排在 Phase 3 跟 `Analysis.gs` 戰報邏輯一起搬——`hybrid`／
+  `factor_model_rank` 這兩種戰報篩選策略需要這張表的資料才能在 Firebase
+  版正常運作，`functions/index.js` 的 `fetchAppliedFactorModels_()` 直接讀
+  這個 collection（`applied === true` 的文件），見下方 Phase 3 章節。
+- **文件 ID 是「執行時間+標的Label」的複合鍵**：`{timestamp}_{labelKey}`，
+  跟 AiDiagnosis 的複合鍵手法一樣——同一次執行會對 `return1m`／
+  `downsideResistance` 兩個 label 各留一筆，不能只用執行時間當鍵。
+- **「執行時間」欄位本身是比對鍵，不能只正規化成日期、要連時間一起留著**：
+  這點跟其他表的日期欄位不一樣——`apps-script/src/FactorRegression.gs` 的
+  `applyFactorModel()` 用這個欄位的精確字串比對「是不是這個版本」，所以
+  `migration/lib/normalize.js` 新增了 `normalizeDateTimeStr`，跟
+  `normalizeDateStr` 不同的地方是保留時間、而且把 Sheets 自動轉型成 Date
+  儲存格時 `JSON.stringify` 產生的 UTC ISO 字串**轉回台北時間**再重建成
+  `YYYY-MM-DD HH:mm:ss`（直接照抄 UTC 數字會跟原始寫入值差 8 小時，兩邊
+  字串就比對不起來）。
+- **權重（`weights`）直接存成 Firestore 的 map，不是字串**：來源 Sheets 裡
+  是 `JSON.stringify` 過的字串（`權重(JSON)` 欄位），遷移時 `JSON.parse`
+  回物件存進 Firestore——解析失敗（理論上不該發生）降級成空物件，不讓一筆
+  壞資料擋掉整批遷移。
+
 ## 已知的坑（下次遷移其他表可以少走的路）
 
 - **來源分頁可能一開始是空的**：匯出腳本本身沒問題，只是沒資料可匯——先到
@@ -353,8 +386,10 @@ All parity checks passed — lib/analysis.js matches apps-script/src/Analysis.gs
   直接對照 `firestore/schema.md` §3（英文欄名），不是 Sheets 版中文欄名。
 - `functions/index.js` — 真正接上 I/O 的 Cloud Functions 進入點：讀
   `config/app` 取得 `screeningStrategy`/`bigQuery` 設定、查 BigQuery 最近
-  `ANALYSIS_LOOKBACK_DAYS` 天的原始 History、讀 `portfolio_lots`、呼叫
-  `reportPipeline.buildReport_`、寫進 Firestore
+  `ANALYSIS_LOOKBACK_DAYS` 天的原始 History、讀 `portfolio_lots`、讀
+  `factor_model_history` 裡 `applied === true` 的文件（`fetchAppliedFactorModels_()`，
+  組成跟 `getAppliedFactorModels()` 同樣的 `{return1m, downsideResistance}`
+  形狀）、呼叫 `reportPipeline.buildReport_`、寫進 Firestore
   `reports/{date}/signals/{code}`。匯出兩個 function：
   `generateDailyReportScheduled`（每個交易日台北時間 23:00 觸發，取代
   `scheduledDailyFetch` 裡「算戰報」這一步）跟 `generateDailyReport`
@@ -437,12 +472,19 @@ npm test
 
 ## 還沒做的事（下一步）
 
-- **因子模型資料**：`getAppliedFactorModels()`（讀 Apps Script 的
-  FactorModelHistory 分頁）還沒有 Firestore 版對應——`factor_model_history`
-  這張表照〈遷移藍圖〉本來就排在 Phase 3 跟後端邏輯一起搬，現在預設策略
-  `rule_v17` 不需要它（`needsFactorModel: false`），可以先不處理；
-  `factor_model_rank`/`hybrid` 這兩種策略要等那張表也遷移完才能在
-  Firebase 版正常運作（`index.js` 目前固定傳 `{}` 當 `appliedFactorModels`）。
+- **因子模型資料的遷移工具已經就緒、`functions/index.js` 也已經接上，
+  但還沒對真實的 FactorModelHistory 資料跑過一次**：`migration/
+  factor_model_history/`（`transform.js`/`checks.js`/`export-sheets.gs`/
+  `import-firestore.js`/`validate.js`，跟其他六組同一套流程，見上方「跟
+  其他表不同的地方」）負責把 Sheets 資料搬進 Firestore；
+  `functions/index.js` 的 `fetchAppliedFactorModels_()` 已經會讀
+  `factor_model_history` 裡 `applied === true` 的文件餵給
+  `reportPipeline.buildReport_`（有對應的單元測試驗證這條路徑，見
+  `functions/test/reportPipeline.test.js` Test 7）。下一步是照 Phase 2
+  的驗證模式（Cloud Shell 匯出 → dry-run → 正式寫入 → `validate.js`）
+  把這張表真的搬過去，再重新部署一次 `generateDailyReport`，確認
+  `hybrid`/`factor_model_rank` 真的能產生訊號、`predictedReturn1m`／
+  `predictedDownsideResistance` 兩個欄位不再是 `null`。
   **`config/app` 的 `screeningStrategy` 目前在正式環境裡是 `rule_v17`**
   （部署驗證時從原本遷移過來的 `hybrid` 手動切過去的——`hybrid` 在因子
   模型資料遷移完成前，`generateDailyReportScheduled` 每天都會是
