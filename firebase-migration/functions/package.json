@@ -1,0 +1,15 @@
+{
+  "name": "twse-firebase-functions",
+  "private": true,
+  "description": "Phase 3：後端業務邏輯從 Apps Script 遷移到 Cloud Functions。lib/ 底下是純運算邏輯（從 apps-script/src/ 複製過來、從今天起獨立維護的正本），不需要任何雲端憑證就能跑測試。",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "test": "node test/analysis.test.js && node test/parity.test.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0"
+  }
+}

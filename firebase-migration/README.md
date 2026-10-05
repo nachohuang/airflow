@@ -1,4 +1,4 @@
-# Firebase 遷移工具（Phase 1 / Phase 2）
+# Firebase 遷移工具（Phase 1 / Phase 2 / Phase 3 進行中）
 
 對應〈選股引擎遷移藍圖〉的 Phase 1（Firestore schema 設計）跟 Phase 2（資料遷移
 工具＋資料品質驗證）。第一張表（Watchlist）是拿來練手的 spike——資料量最小、
@@ -256,3 +256,104 @@ node migration/config_and_jobs/validate.js ~/config_and_jobs-export-*.json
   `apps-script/` 目錄完全沒有被動到，現有功能繼續正常運作。
 - **沒有把 API 金鑰放進任何檔案**——目前用不到 Anthropic/Gemini 金鑰，等
   Phase 3 真的要搬 AI 診斷邏輯時再處理 Secret Manager。
+
+---
+
+# Phase 3：後端邏輯遷移（Cloud Functions）
+
+對應〈選股引擎遷移藍圖〉的 Phase 3——把現在跑在 Apps Script 的後端業務邏輯，
+改寫成讀寫 Firestore（而不是 Sheets）的 Cloud Functions。第一個目標：戰報
+計算邏輯（`Analysis.gs`），因為這段是純函式、確定性運算，最適合用「跟
+Apps Script 版逐欄位比對數字」的方式驗證正確性，不像 AiDiagnosis 呼叫 AI
+API、本質上非確定性。
+
+## 架構決定：複製，不共用（2026-10-05）
+
+一開始考慮過讓 Cloud Function 執行時直接用 `vm` 載入
+`apps-script/src/*.gs` 現有檔案來跑（零轉譯風險，但代表以後邏輯調整還是要
+回 `apps-script/src/` 改，而且 Apps Script／Cloud Functions 是兩個獨立部署
+目標，改完兩邊都要重新部署）。討論後改成：**把純函式複製一份到
+`functions/lib/`，從今天起這份是正本，以後邏輯調整直接在這裡改，不回頭
+改 `apps-script/src/`**。`apps-script/src/` 那份維持原樣，讓舊系統在
+Phase 7（雙邊並行驗證）結束前繼續正常運作。
+
+這個決定的代價是：複製那一刻要花功夫證明「兩邊算出來的數字完全一致」
+（見下面 `test/parity.test.js`），之後兩份程式碼不再自動同步，各自獨立
+維護。換來的好處是從今天起只有一個地方要改，不會有「Firebase 改了邏輯、
+忘記也要去 Apps Script 部署一次」的認知負擔。
+
+## 這裡有什麼
+
+- `functions/lib/utils.js` — 從 `apps-script/src/Utils.gs` 複製的純運算
+  工具（`rollingMean`/`percentRank`/`normalizeDateStr` 等）。沒有複製
+  `sanitizeRowForRpc_`/`formatDateForRpc_`——那是修正 `google.script.run`
+  跨 RPC 傳輸 Date 物件序列化失敗的邏輯，Cloud Functions 用 JSON 回應，
+  沒有這個問題。
+- `functions/lib/config.js` — 戰報計算需要的設定常數（`STRATEGY`、
+  `ANALYSIS_LOOKBACK_DAYS`、`HISTORY_NUMERIC_COLUMNS`、`REPORT_COLUMNS`、
+  `FULL_REPORT_COLUMNS`、`BQ_FEATURE_TO_ANALYSIS_FIELD`），從
+  `apps-script/src/Config.gs` 只挑這幾項複製過來，不是整份 CONFIG。
+- `functions/lib/factorModel.js` — 從 `apps-script/src/FactorRegression.gs`
+  複製的 `computeWeightedFactorScore_`/`computePredictedFactorScores_`
+  兩支純函式（只複製這兩支，實際呼叫 BigQuery 訓練模型的 I/O 邏輯不在
+  這次遷移範圍）。
+- `functions/lib/analysis.js` — 從 `apps-script/src/Analysis.gs` 複製的
+  戰報核心計算：`computeFactors_`（rolling 因子 + Armor_Score）、
+  `diagnoseRow_`/`classifyEntrySignal_`（三種可切換的篩選策略）、
+  `computeScreeningStats_`/`screeningFunnelStages_`（篩選漏斗統計）、
+  `buildFullReportRow_`、`computeLookbackStartStr_`。**不包含**
+  `runAnalysis()`/`runAnalysisAndSave()` 這類 I/O orchestration（讀
+  History/Portfolio、寫 Reports、背景 job 狀態機、Drive xlsx 匯出）——
+  那段要改寫成讀 BigQuery（History 不動）、讀寫 Firestore，還沒開始做。
+- `functions/test/analysis.test.js` — 12 個測試，直接 require
+  `lib/analysis.js` 驗證這份新正本的行為（跟
+  `apps-script/test/analysis.test.js` 幾乎同一套案例，但不碰
+  `apps-script/src/`）。
+- `functions/test/parity.test.js` — **只在複製當下有意義的一次性比對**：
+  用跟 `apps-script/test/analysis.test.js` 一樣的 `vm` 技巧，把
+  `apps-script/src/` 現有檔案讀進 Node 當作「原始正本」，拿同一批輸入
+  （40 天穩定上漲、零成交量/剛上市等刁鑽情境、三種篩選策略、抗跌力模型
+  排名）分別餵給原始函式跟 `lib/analysis.js`，逐欄位斷言完全一致。跑一次
+  `npm test` 就會看到：
+
+```
+Parity 1 (computeFactors_, 40d uptrend) passed.
+Parity 2 (computeFactors_, multi-stock edge cases) passed.
+Parity 3 (diagnoseRow_ / classifyEntrySignal_) passed.
+Parity 4 (computePredictedResistanceRanks_) passed.
+Parity 5 (computeScreeningStats_ / screeningFunnelStages_ / computeLookbackStartStr_) passed.
+All parity checks passed — lib/analysis.js matches apps-script/src/Analysis.gs at copy time (2026-10-05).
+```
+
+這證明這次複製沒有抄錯。之後 `apps-script/src/Analysis.gs` 或
+`functions/lib/analysis.js` 任何一邊單獨改了邏輯，這支測試就會（也應該）
+失敗——它不是「兩邊永遠要一致」的迴歸測試，只是留著當作複製時刻的歷史
+記錄；日常的迴歸測試看 `test/analysis.test.js` 就好。
+
+跑全部測試（`functions/` 目錄底下）：
+
+```bash
+cd firebase-migration/functions
+npm install
+npm test
+```
+
+## 還沒做的事（下一步）
+
+- **I/O orchestration 層**：讀 BigQuery 的 History、讀 Firestore 的
+  `portfolio_lots`（組出 `computeFactors_` 需要的 `portfolioMap`）、算完
+  寫進 Firestore `reports/{date}/signals/{code}`（對照
+  `firestore/schema.md` §3）。這會是一個新的 Cloud Function（HTTPS
+  trigger 或 Cloud Scheduler 排程觸發），呼叫 `lib/analysis.js` 的純函式。
+- **因子模型資料**：`getAppliedFactorModels()`（讀 Apps Script 的
+  FactorModelHistory 分頁）還沒有 Firestore 版對應——`factor_model_history`
+  這張表照〈遷移藍圖〉本來就排在 Phase 3 跟後端邏輯一起搬，現在預設策略
+  `rule_v17` 不需要它（`needsFactorModel: false`），可以先不處理；
+  `factor_model_rank`/`hybrid` 這兩種策略要等那張表也遷移完才能在
+  Firebase 版正常運作。
+- **背景 job 狀態機**：`startAnalysisJob`/`processAnalysisJobTick_` 這類
+  機制在 Cloud Functions 世界不需要照搬——Cloud Functions 本身沒有 Apps
+  Script 的 6 分鐘執行上限跟一次性觸發器不可靠的問題，這段「背景 job 繞過
+  瀏覽器分頁中斷」的設計是 Apps Script 平台限制逼出來的，Firebase 版大概
+  用一個同步執行的 HTTPS Function 或 Cloud Scheduler 排程就能取代，不需要
+  整套狀態機搬過去。
