@@ -19,6 +19,11 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 - SkipDates（2026-10-05，1 筆真實資料，`✅ 通過`）
 
+**工具已就緒、尚未實際對真實資料跑過一次的表**：
+
+- IndustryMap（`migration/industry_map/`，全市場上市櫃股票，筆數可能上千，
+  見下方「跟其他表不同的地方」）
+
 **這次用的 Firebase 專案 ID：`flash-arbor-365706`**（已寫進 `.firebaserc`，
 `firebase deploy` 類指令不用再手動指定 `--project`）。
 
@@ -36,7 +41,8 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
   - `firebase-init.js` — 共用的 Firestore 連線邏輯，本機服務帳戶金鑰／Cloud
     Shell 的 `gcloud` 使用者憑證兩種都支援
 - `migration/watchlist/`、`migration/portfolio/`、`migration/ai_diagnosis/`、
-  `migration/skip_dates/` — 每張表各自一組遷移工具，結構完全一樣：
+  `migration/skip_dates/`、`migration/industry_map/` — 每張表各自一組遷移
+  工具，結構完全一樣：
   - `transform.js` / `checks.js` — 純邏輯，不需要雲端憑證，`test/` 底下有完整
     單元測試
   - `export-sheets.gs` — 貼進既有 Apps Script 專案手動執行一次
@@ -60,12 +66,14 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 ## 跑一次完整的表遷移流程（Cloud Shell 版本，Watchlist／Portfolio 已驗證可行）
 
 下面用 `<table>` 代表 `migration/` 底下的目錄名（`watchlist`／`portfolio`／
-`ai_diagnosis`／`skip_dates`），`<Table>` 代表對應的匯出函式名稱字首——例如
-Watchlist 是 `migration/watchlist/...`、`exportWatchlistToJson`；Portfolio 是
-`migration/portfolio/...`、`exportPortfolioToJson`；AiDiagnosis 是
-`migration/ai_diagnosis/...`、`exportAiDiagnosisToJson`；SkipDates 是
-`migration/skip_dates/...`、`exportSkipDatesToJson`（匯出函式名稱沿用
-Sheets 原本的駝峰式名稱，不是目錄名的底線寫法）。
+`ai_diagnosis`／`skip_dates`／`industry_map`），`<Table>` 代表對應的匯出函式
+名稱字首——例如 Watchlist 是 `migration/watchlist/...`、
+`exportWatchlistToJson`；Portfolio 是 `migration/portfolio/...`、
+`exportPortfolioToJson`；AiDiagnosis 是 `migration/ai_diagnosis/...`、
+`exportAiDiagnosisToJson`；SkipDates 是 `migration/skip_dates/...`、
+`exportSkipDatesToJson`；IndustryMap 是 `migration/industry_map/...`、
+`exportIndustryMapToJson`（匯出函式名稱沿用 Sheets 原本的駝峰式名稱，不是
+目錄名的底線寫法）。
 
 ```bash
 # 0. 開 Cloud Shell（console.cloud.google.com 右上角 >_ 圖示），確認專案正確
@@ -149,6 +157,21 @@ node migration/<table>/validate.js ~/<table>-export-*.json
 - **目前最單純的一張表**：只有 `date`（文件 ID）／`reason` 兩個欄位，沒有
   任何需要翻譯列舉值或補零的欄位，`transform.js`／`checks.js` 的邏輯直接
   照搬 Watchlist 那套模式即可。
+
+### IndustryMap
+
+- **靜態參考資料，結構跟 Watchlist 幾乎一樣**：代號→產業別／市場別，沒有
+  列舉翻譯或數字欄位，差別只在筆數——這張是全市場上市櫃股票，可能上千筆
+  （不像 Watchlist／Portfolio 筆數通常只有幾十筆），所以 `import-firestore.js`
+  也跟 AiDiagnosis 一樣加了批次寫入（每 400 筆一批），dry-run 輸出也只印前
+  20 筆，不然終端機會被整頁股票清單淹掉。
+- **這次 Phase 2 只做一次性搬移，不是整批覆蓋式同步**：〈選股引擎遷移藍圖〉
+  §04 提到現行 `ensureIndustryMapSyncedToBigQuery_()` 本來就是「整批重新
+  整理」（來源異動就整份覆蓋，不是逐筆 diff），這次遷移工具只負責把目前的
+  Sheets 內容搬進 Firestore 一次；之後要不要在 Firestore 版也做成「整批
+  覆蓋式」的定期同步，是 Phase 3 跟後端邏輯一起搬的時候再決定，現在的
+  `import-firestore.js` 只會新增/更新文件，不會刪除 Firestore 裡已經有、
+  但這次來源沒有的舊代號。
 
 ## 已知的坑（下次遷移其他表可以少走的路）
 
