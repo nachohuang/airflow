@@ -926,7 +926,105 @@ firebase deploy --only hosting
    歷史結案紀錄→刪除這筆測試紀錄，跟上面 curl 那輪驗證的邏輯一樣，只是
    這次是透過真正的網頁介面操作。
 
-⚠️ 這幾步都還沒有在這個開發環境實際跑過（沒有真正的 Firebase 專案、
-瀏覽器環境），只做到 `npm run build` 編譯成功（`vite build` 過，33 個
-模組、無錯誤）——跟 `functions/` 的 `index.js` 一樣，真正「接線接得對
-不對」要部署後用真實瀏覽器驗證才能確認。
+**✅ 2026-10-06 已在 `flash-arbor-365706` 用真實瀏覽器（手機）驗證登入
+＋持股庫存卡片成功。** 過程中踩到三個坑，都是部署環境本身的問題，不是
+前端程式碼邏輯有錯：
+
+- **Browser key 的 referrer 限制清單是空的**：Firebase 自動建立的
+  「Browser key (auto created by Firebase)」這把 API key，`apiTargets`
+  已經正確包含 `identitytoolkit.googleapis.com`，但
+  `browserKeyRestrictions.allowedReferrers` 是空清單——等於擋掉所有
+  真正從瀏覽器送出的請求（`Referer` header 存在才會被這條規則檢查，
+  Cloud Shell 用 curl 測試不會帶 `Referer`，所以一直測不出這個問題）。
+  用 `gcloud services api-keys update KEY_NAME --allowed-referrers=
+  "https://<project-id>.web.app/*,https://<project-id>.firebaseapp.com/*"`
+  補上部署後的 Hosting 網域解決。
+- **`.env` 裡的 apiKey 被意外存成遮罩過的佔位字元**：排查到最後發現
+  `.env` 裡的 `VITE_FIREBASE_API_KEY` 實際上是一串 `•`（因為在對話中
+  複製貼上遮罩過的版本，不小心貼進真正的設定檔），不是真正的金鑰字串
+  ——瀏覽器送出的請求網址用 URL encode 後看得出 `%E2%80%A2`（就是
+  「•」），才抓到這個問題。改用 `firebase apps:sdkconfig WEB <appId>`
+  配 `jq` 直接用指令組出 `.env`，不手動複製貼上，避免重蹈覆轍。
+- **手機沒有 DevTools 排查不了失敗的網路請求**：加了
+  `src/composables/useDebugLog.js` + `src/components/DebugLogPanel.vue`
+  ——攔截 `console.error`/`console.warn`、沒被 catch 的例外、以及打給
+  `identitytoolkit.googleapis.com`／`cloudfunctions.net` 的 `fetch`
+  請求（含失敗回應的完整內容），畫面最下方（後來改成最上方，見下一條）
+  有個可收合的面板可以直接看、一鍵複製。上面兩個坑都是靠這個面板的紀錄
+  才抓到的。
+- **除錯面板跟底部導覽列疊在一起**：兩個都用 `position: fixed;
+  bottom: 0`，互相蓋住。改成除錯面板放在畫面最上方，`#app` 補
+  `padding-top`、`.topbar` 的 `sticky top` 跟著調整，避免再疊到一起。
+
+## 自動部署（GitHub Actions，2026-10-06）
+
+跟 `apps-script/` 那邊的 `.github/workflows/deploy-stock-app.yml`
+（push 到 `claude/stock-data-apps-script-w1wsk1` 就自動 `clasp push`）
+同一個精神，`.github/workflows/deploy-firebase.yml` 做同樣的事，但對象
+是 `firebase-migration/**`：跑 `functions/lib` 跟 `migration/` 的純邏輯
+單元測試（測試沒過就不會進到部署步驟）、build 前端、驗證到 GCP、最後
+`firebase deploy`（不加 `--only`，`firebase.json` 裡設定的
+Hosting／Functions／Firestore rules+indexes 一次全部部署）。改
+`firebase-migration/` 底下任何檔案、push 上去，幾分鐘內就會自動部署，
+不用再手動跑 Cloud Shell 那一串指令。
+
+**設定步驟（Cloud Shell，只需要做一次）：**
+
+```bash
+# 1. 建立專門給這個 workflow 用的服務帳戶（跟你自己的帳號、跟之前驗證
+#    用完就刪掉的那把臨時金鑰都是分開的，這把要長期留著給 CI 用）
+PROJECT_ID=$(gcloud config get-value project)
+gcloud iam service-accounts create github-deploy \
+  --display-name="GitHub Actions Firebase Deploy" --project="$PROJECT_ID"
+DEPLOY_SA="github-deploy@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# 2. 授權——Cloud Functions 2nd gen 底層是 Cloud Run + Cloud Build +
+#    Artifact Registry，部署需要的角色比「只有 Firebase」想像的還多一點：
+for ROLE in roles/firebase.admin roles/cloudfunctions.developer \
+            roles/run.admin roles/iam.serviceAccountUser \
+            roles/artifactregistry.admin roles/cloudbuild.builds.editor \
+            roles/cloudscheduler.admin; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${DEPLOY_SA}" --role="$ROLE" --quiet
+done
+
+# 3. 生一把金鑰（這把不像之前驗證用的那把，這把要長期留著，不要跑完就刪）
+gcloud iam service-accounts keys create /tmp/github-deploy-key.json \
+  --iam-account="$DEPLOY_SA" --project="$PROJECT_ID"
+cat /tmp/github-deploy-key.json
+```
+
+把 `cat` 印出來的**完整 JSON**複製起來，到 GitHub repo 頁面 → Settings
+→ Secrets and variables → Actions → **Secrets** 分頁 → New repository
+secret，名稱填 `FIREBASE_DEPLOY_SA_KEY`，貼上整份 JSON 存起來。存完在
+Cloud Shell 把本機那份刪掉，不要留在磁碟上：
+
+```bash
+rm /tmp/github-deploy-key.json
+```
+
+接著到同一個頁面的 **Variables** 分頁（不是 Secrets——這幾個值本來就
+不是機密，見上面「坑」的說明），新增 5 個 repository variable，值從
+`frontend/.env` 複製：
+
+```bash
+cat ~/airflow/firebase-migration/frontend/.env
+```
+
+對應填：`VITE_FIREBASE_API_KEY`／`VITE_FIREBASE_AUTH_DOMAIN`／
+`VITE_FIREBASE_PROJECT_ID`／`VITE_FIREBASE_APP_ID`／
+`VITE_FIREBASE_FUNCTIONS_REGION`。
+
+設定完，`git push` 任何 `firebase-migration/` 底下的改動到
+`claude/stock-data-apps-script-w1wsk1`，GitHub repo 頁面的 Actions 分頁
+就會看到這個 workflow 自動跑起來，跑完直接是最新版本上線，不用再手動
+`firebase deploy`。
+
+⚠️ **這把 `github-deploy` 服務帳戶金鑰是長期有效的密鑰**，只存在 GitHub
+Secrets 裡（GitHub 不會把 Secret 內容顯示回來，連你自己之後也看不到，
+只能整個換掉），如果懷疑外洩，到 GCP Console → IAM → 服務帳戶 →
+`github-deploy` → 金鑰，把那把金鑰刪掉重建一把，再更新 GitHub Secret。
+`roles/editor`（專案編輯者）是更簡單但範圍更廣的替代方案——如果上面那組
+精細角色部署時卡在某個權限不足的錯誤，一直抓不出少了哪個角色，直接換成
+`roles/editor` 是務實的退路，單人專案這樣做不算太誇張，只是範圍比精確
+挑選的角色清單廣。

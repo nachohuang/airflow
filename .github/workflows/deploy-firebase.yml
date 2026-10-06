@@ -1,0 +1,78 @@
+name: 部署 Firebase（Hosting + Functions + Firestore）
+
+# 跟 deploy-stock-app.yml 一樣的邏輯：這個專案還只在 claude/stock-data-apps-script-w1wsk1
+# 這條開發分支，還沒合併進 main，直接對這條分支的 push 自動部署。firebase-migration/
+# 底下任何檔案（前端/Cloud Functions/Firestore 規則）有變動就觸發，跟 apps-script/ 那邊
+# 完全獨立（改 apps-script 的程式碼不會觸發這支，改 firebase-migration 也不會觸發那支）。
+#
+# workflow_dispatch（手動觸發）在合併進 main 之前，一樣受 GitHub Actions 的限制看不到
+# Actions 頁面的手動觸發按鈕（同 deploy-stock-app.yml 的說明），push 到這條分支才是目前
+# 唯一能觸發的方式。
+
+on:
+  push:
+    branches: [claude/stock-data-apps-script-w1wsk1]
+    paths:
+      - 'firebase-migration/**'
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: firebase-migration
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # functions/lib 底下是純運算邏輯，不需要雲端憑證就能測試——部署前先跑一次，
+      # 測試沒過就不會進到後面的 deploy 步驟。
+      - name: 安裝並測試 Cloud Functions（functions/lib 純邏輯）
+        working-directory: firebase-migration/functions
+        run: |
+          npm ci
+          npm test
+
+      # migration/ 底下的 transform.js/checks.js 同樣是純邏輯，不需要任何依賴、不需要雲端
+      # 憑證（真正連 Firestore 的 import-firestore.js/validate.js 不在這個測試範圍內，那些
+      # 是手動跑的遷移工具，不是每次部署都要重跑的東西）。
+      - name: 測試 migration 工具（transform/checks 純邏輯）
+        run: npm test
+
+      # 前端的 Firebase 設定值（apiKey 等）不是機密——真正的存取控制在 Cloud Functions 的
+      # assertOwnerAuth_ 跟 Firestore Security Rules，不是靠這把 key 保密，所以用一般的
+      # repository variable 存，不用 Secret（Settings -> Secrets and variables -> Actions
+      # -> Variables 分頁 -> New repository variable，五個值從 frontend/.env 複製）。
+      - name: Build 前端
+        working-directory: firebase-migration/frontend
+        run: |
+          npm ci
+          npm run build
+        env:
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_FUNCTIONS_REGION: ${{ vars.VITE_FIREBASE_FUNCTIONS_REGION }}
+
+      # FIREBASE_DEPLOY_SA_KEY 是專門給這個 workflow 用的服務帳戶金鑰（見
+      # firebase-migration/README.md「Phase 5：自動部署」的建立步驟），整份 JSON 存成這個
+      # repo 的 Secret（名稱要叫 FIREBASE_DEPLOY_SA_KEY）。google-github-actions/auth 會把
+      # 它還原成 GOOGLE_APPLICATION_CREDENTIALS，firebase-tools 自動讀得到，不用額外設定。
+      - name: 驗證到 Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_DEPLOY_SA_KEY }}
+
+      - name: 安裝 firebase-tools
+        run: npm install -g firebase-tools
+
+      # 不加 --only：firebase.json 裡設定了 hosting/functions/firestore 三個 target，
+      # 一次全部部署，跟目前手動在 Cloud Shell 跑 `firebase deploy` 的範圍一致。
+      - name: firebase deploy（Hosting + Functions + Firestore rules/indexes）
+        run: firebase deploy --non-interactive --force
