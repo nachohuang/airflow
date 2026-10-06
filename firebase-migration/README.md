@@ -1,4 +1,4 @@
-# Firebase 遷移工具（Phase 1 / Phase 2 / Phase 3 進行中）
+# Firebase 遷移工具（Phase 1 / Phase 2 / Phase 3 完成，Phase 5 進行中）
 
 對應〈選股引擎遷移藍圖〉的 Phase 1（Firestore schema 設計）跟 Phase 2（資料遷移
 工具＋資料品質驗證）。第一張表（Watchlist）是拿來練手的 spike——資料量最小、
@@ -820,3 +820,113 @@ curl -s -X POST "${FN_URL}/deletePortfolioLot" \
   `exportReportToDrive_()`（存一份完整欄位的 xlsx 到 Drive）還沒有 Firebase
   版對應，如果這個功能還需要保留，大概會改成寫進 Cloud Storage，目前還沒
   決定要不要做。
+
+# Phase 5：前端（2026-10-06 開始）
+
+跟 Phase 3 的 `functions/lib/`（複製、decoupling，見上面「架構決定」）不同，
+前端是**從零開始寫一份新的**，不是從 `apps-script/src/Index.html`／
+`JavaScript.html`／`Stylesheet.html` 複製修改——舊版是純手寫 DOM 操作
+全部塞在一支 3000 多行的 `JavaScript.html`，新版改用元件化的前端框架，
+架構上沒有照搬的理由，只是功能要對齊。
+
+## 技術選型：Vue 3 + Vite
+
+跟純手寫 HTML/JS（舊版的路線）相比，選框架主要是為了：
+
+1. **Firestore 有即時監聽（`onSnapshot`）**——之後如果要把現在「呼叫
+   `onCall` function 才刷新一次」的作法升級成即時推送，響應式狀態管理
+   跟 `onSnapshot`是天生一對，不用像舊版那樣自己寫輪詢（舊版
+   `JavaScript.html` 裡 `getAnalysisJobStatus`/`getAiDiagnosisJobStatus`
+   那堆輪詢邏輯，就是沒有即時推送機制逼出來的 workaround）。目前這版
+   還沒用到 `onSnapshot`（還是呼叫完 `onCall` function 重新 `getXxx()`
+   一次），先把架構搭好，之後要換不用重寫元件邏輯。
+2. 舊版 `JavaScript.html` 已經長到 3000 多行全部塞在一支檔案——元件化
+   可以把「一張持股卡片」「一個表單」拆成獨立、可重複使用的小塊，不會
+   越改越亂。
+
+Vue（相對 React）樣板程式碼少、學習曲線平；Vite 是搭配 Vue 的標準建置
+工具，`npm create vite@latest frontend -- --template vue` 就是這份
+`frontend/` 目錄的起點。
+
+## 這裡有什麼
+
+- `frontend/src/firebase.js` — Firebase 客戶端 SDK 初始化（跟
+  `functions/` 用 `firebase-admin` 的伺服端初始化是兩套東西，權限等級
+  差很多，真正的存取控制在 Cloud Functions 的 `assertOwnerAuth_` 跟
+  Firestore Security Rules，不是這裡）。設定值從 `.env`（複製
+  `.env.example`，不進版控）讀，不寫死在程式碼裡。
+- `frontend/src/composables/useAuth.js` — 全域登入狀態（`onAuthStateChanged`
+  只訂閱一次），`signIn()`/`signOut()` 包 Google 登入彈窗。
+- `frontend/src/composables/useCallable.js` — 呼叫 `onCall` function 的
+  統一入口 `callFn(name, data)`，跟舊版 `JavaScript.html` 的
+  `callServer()` 同一個精神（但底層協定不同，這裡是 Firebase callable
+  SDK，不是 `google.script.run`）。
+- `frontend/src/components/LoginScreen.vue`／`AppShell.vue` — 登入畫面、
+  App 整體骨架（頂部列＋底部四個主 tab）。四個主 tab 對照舊版
+  `Index.html` 的 `data-tab="dashboard"/"portfolio"/"research"/"admin"`，
+  **目前只有「💼 持股庫存」是可以點的**，其他三個顯示「這個頁面還沒遷移」
+  的占位訊息——不是漏做，後端邏輯（戰報的 AI 診斷/job 輪詢、策略研究、
+  系統後台那些）還沒遷移完，先讓使用者清楚知道要去舊版用，不要讓畫面
+  看起來像壞掉。
+- `frontend/src/components/portfolio/` — 持股庫存頁面，對照舊版
+  `Index.html` 持股庫存分頁底下的三個 sub-tab：
+  - `PortfolioView.vue`：sub-tab 切換（持有中／👀 觀察個股／💰 歷史結案紀錄）。
+  - `HoldingList.vue`：呼叫 `getPortfolio`／`savePortfolioItem`／
+    `deletePortfolioLot`／`closePortfolioPosition`，卡片+新增/編輯表單+
+    平倉表單。
+  - `WatchlistList.vue`：呼叫 `getWatchlist`／`addToWatchlist`／
+    `removeFromWatchlist`。
+  - `ClosedHistoryList.vue`：呼叫 `getClosedPortfolioHistory`，純讀取表格。
+- `firebase.json` 加了 `hosting` 設定（`public: "frontend/dist"`，SPA
+  rewrite 全部導回 `index.html`）。
+
+## 部署前要確認的事（Console 手動步驟，沒辦法自動化）
+
+1. **Firebase Console → Authentication → Sign-in method → 確認 Google
+   登入方式是「啟用」狀態**。`firestore.rules` 的註解當時假設 Phase 0
+   已經開了，但部署驗證 Watchlist/Portfolio 時發現擁有者帳號在這個專案
+   裡其實還沒有 Auth 使用者紀錄（見上面「部署驗證」那節的坑記錄）——
+   不確定的話去確認一次，不要假設。
+2. **Firebase Console → 專案設定 → 一般 → 「你的應用程式」→ 註冊一個
+   網頁應用程式**（如果還沒註冊過），拿到 `apiKey`／`authDomain`／
+   `projectId`／`appId` 這幾個值。不用勾選「設定 Firebase Hosting」那個
+   選項，我們是用 `firebase deploy` 部署，不需要它自動生成的那段流程。
+3. 把這幾個值填進 `frontend/.env`（複製 `frontend/.env.example`）。
+
+## 部署＋驗證步驟（Cloud Shell）
+
+```bash
+cd ~/airflow
+git pull origin claude/stock-data-apps-script-w1wsk1
+cd firebase-migration/frontend
+npm install
+# 確認 .env 已經照上面「部署前要確認的事」填好，沒填會在瀏覽器 console
+# 看到 firebase.js 印出來的錯誤提示
+npm run build
+
+cd ~/airflow/firebase-migration
+firebase deploy --only hosting
+```
+
+部署完指令會印出網址（`https://<project-id>.web.app`，也可能同時有
+`https://<project-id>.firebaseapp.com`），**用你自己平常的瀏覽器打開**
+（不是 Cloud Shell 的 Web Preview——Google 登入彈窗需要的 OAuth 授權網域
+預設只包含 `localhost` 跟這兩個 Firebase 網域，Cloud Shell Web Preview
+的網域不在裡面，彈窗登入會直接失敗）：
+
+1. 打開網址，應該看到登入畫面，按「使用 Google 登入」，用擁有者帳號登入。
+2. 登入後應該直接進入「💼 持股庫存」頁面（因為其他三個 tab 目前是
+   disabled 狀態）。
+3. 「持有中」子分頁應該看到目前真實的持股卡片（跟上面 curl 驗證時看到
+   的那幾張卡片一致）。
+4. 切到「👀 觀察個股」，確認看到既有的觀察清單項目；試著加一檔測試用
+   代號，確認出現在列表裡，`latestClose`/名稱有補上；再移除掉。
+5. 切到「💰 歷史結案紀錄」，確認看到過去的結案紀錄（如果有的話）。
+6. 回「持有中」試著新增一筆測試用持股→編輯→標示已賣出→確認出現在
+   歷史結案紀錄→刪除這筆測試紀錄，跟上面 curl 那輪驗證的邏輯一樣，只是
+   這次是透過真正的網頁介面操作。
+
+⚠️ 這幾步都還沒有在這個開發環境實際跑過（沒有真正的 Firebase 專案、
+瀏覽器環境），只做到 `npm run build` 編譯成功（`vite build` 過，33 個
+模組、無錯誤）——跟 `functions/` 的 `index.js` 一樣，真正「接線接得對
+不對」要部署後用真實瀏覽器驗證才能確認。

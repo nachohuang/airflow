@@ -1,0 +1,20 @@
+{
+  "name": "twse-firebase-frontend",
+  "private": true,
+  "description": "Phase 5：新前端（Vue + Vite），呼叫 functions/index.js 的 onCall function，取代 apps-script/src/Index.html 那套舊版網頁應用程式。目前只做了「持股庫存」頁面（持有中／觀察個股／歷史結案紀錄），其他分頁還沒遷移。",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "firebase": "^12.19.0",
+    "vue": "^3.5.42"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "vite": "^8.3.0"
+  }
+}
