@@ -1019,6 +1019,18 @@ firebase deploy --only hosting
   原本的巢狀規則不動）。之後如果還有其他地方要對 Firestore 做
   `collectionGroup` 查詢，記得同一個坑要再補一次對應的 `{path=**}`
   規則，不會因為加過一次別的 collection 就全部自動涵蓋。
+- **`firebase.json` 沒設定快取規則，手機瀏覽器部署完看到的還是舊版**：
+  Dashboard／Admin 兩個 tab 都部署成功了，但手機重新整理後畫面還是只有
+  「持股庫存」可以點的舊版本——`firebase.json` 原本沒有 `hosting.headers`
+  設定，Firebase Hosting 預設會幫 `index.html` 也套用快取（不像很多人
+  以為的「HTML 永遠不快取」），瀏覽器因此沿用舊的 `index.html`，連帶
+  讀到裡面指向的舊版（已經被取代的）雜湊檔名 JS/CSS。**修法**：在
+  `firebase.json` 的 `hosting` 加 `headers` 規則，`/index.html` 設
+  `Cache-Control: no-cache`（每次都要跟伺服器確認是不是最新版）、
+  `/assets/**` 設 `public, max-age=31536000, immutable`（Vite 打包的
+  檔名本來就帶內容雜湊，內容變了檔名就變，可以放心快取一年）。這個改
+  之前部署過的版本，手機上還是可能要手動清一次快取/用無痕分頁才能看到
+  最新版本，改完之後的部署就不會再有這個問題。
 
 ## 自動部署（GitHub Actions，2026-10-06）
 
