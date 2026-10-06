@@ -2,12 +2,15 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { collectionGroup, collection, query, orderBy, limit, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { callFn } from '../../composables/useCallable';
+import StockDetailView from './StockDetailView.vue';
 
 const loading = ref(true);
 const error = ref('');
 const latestDate = ref(null);
 const signals = ref([]);
 const searchText = ref('');
+const selectedCode = ref(null);
 let unsubscribe = null;
 
 async function load() {
@@ -73,16 +76,61 @@ const filteredSignals = computed(function () {
   });
 });
 
+// ---- 搜尋全部股票（不限於今天有沒有訊號），用來開啟任何一檔股票的詳情頁 ----
+const searchResults = ref([]);
+const searching = ref(false);
+let searchDebounceTimer = null;
+
+function scheduleStockSearch() {
+  const q = searchText.value.trim();
+  clearTimeout(searchDebounceTimer);
+  if (!q) {
+    searchResults.value = [];
+    return;
+  }
+  searchDebounceTimer = setTimeout(async function () {
+    searching.value = true;
+    try {
+      searchResults.value = await callFn('searchStockCodes', { query: q });
+    } catch (e) {
+      // 搜尋失敗不影響主要的戰報清單（那邊是 onSnapshot 即時監聽，跟這裡的
+      // 搜尋完全獨立），靜默失敗即可，不用額外跳錯誤訊息擋住整個頁面。
+      searchResults.value = [];
+    } finally {
+      searching.value = false;
+    }
+  }, 400);
+}
+
+function openDetail(code) {
+  selectedCode.value = code;
+}
+
 onMounted(load);
 onUnmounted(function () {
   if (unsubscribe) unsubscribe();
+  clearTimeout(searchDebounceTimer);
 });
 </script>
 
 <template>
-  <section class="dashboard-view">
+  <StockDetailView v-if="selectedCode" :code="selectedCode" @close="selectedCode = null" />
+
+  <section v-else class="dashboard-view">
     <div class="search-bar">
-      <input v-model="searchText" placeholder="輸入股票代號或名稱搜尋（例如 2330 或 台積電）">
+      <input v-model="searchText" placeholder="輸入股票代號或名稱搜尋（例如 2330 或 台積電）" @input="scheduleStockSearch">
+    </div>
+
+    <div v-if="searchText && searchResults.length" class="card-list search-results-list">
+      <button
+        v-for="r in searchResults"
+        :key="r.code"
+        type="button"
+        class="search-result-item"
+        @click="openDetail(r.code)"
+      >
+        {{ r.code }} {{ r.name }}
+      </button>
     </div>
 
     <p v-if="error" class="error-box">{{ error }}</p>
@@ -94,7 +142,7 @@ onUnmounted(function () {
 
     <div class="card-list">
       <article v-for="s in filteredSignals" :key="s.code" class="card">
-        <header>
+        <header class="card-open" @click="openDetail(s.code)">
           <strong>{{ s.code }} {{ s.name }}</strong>
           <span class="signal-badge">{{ s.strategy }}</span>
         </header>
@@ -108,12 +156,12 @@ onUnmounted(function () {
             <template v-if="s.predictedDownsideResistance != null">　抗跌力 {{ fmtPct(s.predictedDownsideResistance, 2) }}</template>
           </div>
           <div v-if="s.monitorUrl">
-            <a :href="s.monitorUrl" target="_blank" rel="noopener">監控連結 ↗</a>
+            <a :href="s.monitorUrl" target="_blank" rel="noopener" @click.stop>監控連結 ↗</a>
           </div>
         </div>
       </article>
       <p v-if="!loading && latestDate && filteredSignals.length === 0" class="hint">
-        {{ searchText ? '沒有符合搜尋的股票。' : '今天沒有訊號。' }}
+        {{ searchText ? '今天的戰報裡沒有符合搜尋的股票，上面「搜尋結果」可以找任何股票看詳情。' : '今天沒有訊號。' }}
       </p>
       <p v-if="!loading && !error && !latestDate" class="hint">
         還沒有任何戰報資料——請先手動觸發一次 generateDailyReport，或等排程執行。
@@ -121,8 +169,8 @@ onUnmounted(function () {
     </div>
 
     <p class="hint dashboard-note">
-      這個頁面目前只顯示戰報清單，股票搜尋（點進去看詳情）、AI 診斷、個股走勢圖還沒遷移，
-      需要這些功能請先用舊版網頁應用程式。
+      點卡片可以看股票詳情（走勢圖、戰報燈號歷史、AI 診斷紀錄）。即時報價、
+      跑新的 AI 診斷還沒遷移，需要這些功能請先用舊版網頁應用程式。
     </p>
   </section>
 </template>

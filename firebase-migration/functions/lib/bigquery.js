@@ -100,6 +100,28 @@ function buildHistoryRowsForCodesSql_(sourceRef, stockIds, startStr) {
 }
 
 /**
+ * 股票搜尋（代號或名稱模糊比對）——從 apps-script/src/StockAnalysis.gs 的
+ * `searchStockCodes` 改寫：原版只掃最近 10 天的 Sheets 檔案，這裡改成查
+ * BigQuery 最近 `cutoffStr` 以後、一般股票（排除權證/ETF，理由同
+ * `buildHistoryRangeSql_` 的 `stocksOnly`）的原始列，用 `LIKE` 比對代號/名稱，
+ * 依日期新到舊排序——呼叫端（index.js 的 `searchStockCodes`）再依代號去重
+ * （同一支股票很多天都會出現，只取最新那筆的名稱），取前幾筆當結果。
+ * query 裡的單引號／SQL LIKE 萬用字元（`%`／`_`）都濾掉，避免使用者輸入的
+ * 搜尋字串意外改變查詢語意或造成注入。
+ */
+function buildStockSearchSql_(sourceRef, query, cutoffStr, limit) {
+  // 只選搜尋用得到的 3 欄，不是 bqColumnNames_() 整組 24 欄——BigQuery 是照掃描
+  // 的欄位位元組數計費，搜尋結果只需要代號/名稱/日期，沒理由多付其他 21 欄的錢。
+  var q = String(query).replace(/['%_]/g, '');
+  var sql = 'SELECT stock_id, stock_name, date_str FROM `' + sourceRef + '`' +
+    " WHERE date_str >= '" + cutoffStr + "' AND LENGTH(stock_id) = 4" +
+    " AND (stock_id LIKE '%" + q + "%' OR stock_name LIKE '%" + q + "%')" +
+    ' ORDER BY date_str DESC' +
+    ' LIMIT ' + (Number(limit) || 500);
+  return sql;
+}
+
+/**
  * 把 BigQuery 查詢回來的一列（ascii 欄名、全部字串）轉回 computeFactors_ 期待的
  * 中文欄名列物件，數值欄位轉成 number，讓 lib/analysis.js 的 computeFactors_
  * 完全不用改。
@@ -135,5 +157,6 @@ module.exports = {
   sourceRefForRead_: sourceRefForRead_,
   buildHistoryRangeSql_: buildHistoryRangeSql_,
   buildHistoryRowsForCodesSql_: buildHistoryRowsForCodesSql_,
+  buildStockSearchSql_: buildStockSearchSql_,
   mapBqRowToHistoryRow_: mapBqRowToHistoryRow_
 };

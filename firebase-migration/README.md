@@ -891,10 +891,10 @@ Vue（相對 React）樣板程式碼少、學習曲線平；Vite 是搭配 Vue �
   手動刷新。找「最新一天是哪天」用 `collectionGroup('signals')` 查
   `date` 欄位排序取第一筆——`reports/{date}` 這個父文件本身從來沒被
   寫過任何欄位（`writeReportDocs_` 只寫 `signals` 這個 subcollection），
-  直接查 `reports` collection 找不到任何文件。**目前只做了清單本身**，
-  股票搜尋自動完成、點進去看 AI 診斷/走勢圖的詳情 modal 都還沒做
-  （那些需要新的 Cloud Function，這裡故意先跳過，見下面 README 開頭的
-  Phase 3「還沒做的事」）。卡片欄位對照舊版 `apps-script/src/JavaScript.html`
+  直接查 `reports` collection 找不到任何文件。股票搜尋跟點進去看走勢圖/AI
+  診斷的詳情頁後來補上了，見下面「股票詳情（Stock Detail）」那節；即時
+  報價、跑新的 AI 診斷還沒做（那些需要新的 Cloud Function／Secret
+  Manager，刻意先跳過）。卡片欄位對照舊版 `apps-script/src/JavaScript.html`
   戰報卡片的 `fmtNum`／百分比慣例調整過：`Trend_Score`／`Inst_Part_Rank`／
   `IBF_20D_Rank` 這幾個原始排名欄位舊版卡片本身就沒有顯示（已經折算進
   `Armor_Score` 裡了），刻意不跟著顯示；`predictedReturn1m`／
@@ -1116,3 +1116,61 @@ repository variable 都設定完成**，這次 commit 就是設定完後的第�
 實際觸發測試——改到這個檔案（在 `firebase-migration/**` 路徑篩選範圍
 內）push 上去，`.github/workflows/deploy-firebase.yml` 應該就會自動
 跑起來。
+
+## 股票詳情（Stock Detail，2026-10-06）
+
+戰報卡片點進去看的頁面：走勢圖（收盤價 + MA5/20/60）、戰報燈號歷史、AI
+診斷紀錄快取，從 `apps-script/src/StockAnalysis.gs` 搬過來。**刻意沒搬**
+`getRealtimeQuote`（打 `mis.twse.com.tw` 這個非官方、沒文件、只在盤中開放、
+有流量限制的即時報價端點，跟這次遷移的 BigQuery/Firestore 資料層無關）跟
+`startAiDiagnosisJob`／`getAiDiagnosisJobStatus`（跑一次新的 AI 診斷需要
+Secret Manager 存 API 金鑰，獨立列為下一步，見下面「還沒做的事」）——這裡
+只讀**已經存在**的快取診斷，不會主動呼叫 AI。
+
+**後端**（`functions/`）：
+- `lib/stockDetail.js` — 純邏輯：`buildPriceSeries_`（History 列轉成英文
+  欄名的時間序列，算 MA5/20/60，重用 `lib/utils.js` 的 `rollingMean`）、
+  `buildScoreHistory_`（Firestore 戰報文件轉成燈號歷史表格形狀）。
+  `test/stockDetail.test.js` 驗證過（排序正確、MA 視窗不足時是 `null`、
+  空輸入不噴錯）。
+- `lib/bigquery.js` 新增 `buildStockSearchSql_`——股票代號/名稱模糊搜尋，
+  只選 `stock_id`／`stock_name`／`date_str` 3 欄（不是整組 24 欄，BigQuery
+  照掃描位元組數計費，沒理由多付其他 21 欄的錢），`LENGTH(stock_id) = 4`
+  排除權證/ETF（跟 `buildHistoryRangeSql_` 的 `stocksOnly` 同一條既有
+  規則），搜尋字串的單引號跟 `%`／`_` 都濾掉。
+- `index.js` 新增兩個 `onCall`：
+  - `getStockDetail({code})`——一次打包回傳走勢圖+燈號歷史+AI 診斷三組
+    資料（混了 BigQuery／Firestore collectionGroup／Firestore 一般
+    collection 三種 I/O，所以用一支函式打包，不拆成三次 round trip）。
+  - `searchStockCodes({query})`——給前端搜尋框用，查全市場（不限於今天
+    有沒有訊號），依代號去重取最新名稱，最多回傳 20 筆。
+  - `fetchSignalHistoryForCode_`（`reports/{date}/signals` collectionGroup
+    查某代號）重用既有的 `(code ASC, date DESC)` 複合索引，沒有加新索引；
+    `fetchAiDiagnosisForCode_`（`ai_diagnosis` collection 查 `code` 相等）
+    刻意不加 `orderBy`，排序交給 Node 做——單欄等號查詢不需要額外索引，
+    同一檔股票的診斷紀錄筆數不多，不值得為了省這幾筆排序多部署一個索引。
+
+**前端**（`frontend/`）：
+- 新增 `chart.js` 依賴（`import Chart from 'chart.js/auto'`，一次註冊全部
+  元件，簡單但會讓打包體積變大——`npm run build` 後主要 bundle 從 630KB
+  漲到 838KB，目前沒有做 code splitting，單人工具先不處理這個，之後如果
+  要延伸更多頁面可以考慮）。
+- `frontend/src/components/dashboard/StockDetailView.vue` — 呼叫
+  `getStockDetail`，渲染 Chart.js 折線圖（收盤價/MA5/MA20/MA60）、戰報
+  燈號歷史表格、AI 診斷紀錄（`<details>` 收合，沒有診斷紀錄時提示跑新
+  診斷的功能還沒遷移）。
+- `DashboardView.vue`：戰報卡片的 `header` 改成可點擊（`openDetail`），
+  點了切換成 `StockDetailView`；搜尋框改成兩層——原本的 client-side 篩選
+  （只篩「今天戰報清單」裡的項目）保留，另外加一層 debounce 400ms 呼叫
+  `searchStockCodes` 的全市場搜尋結果（不限於今天有沒有訊號），點搜尋
+  結果一樣能開詳情頁，對應舊版「輸入代號或名稱可以開啟任何一檔股票詳情」
+  的行為，不是只能看今天有訊號的股票。
+
+⚠️ 跟其他 Cloud Function 一樣，`getStockDetail`／`searchStockCodes`
+本身沒辦法在這個開發環境驗證——`lib/stockDetail.js` 的純邏輯已經靠單元
+測試驗證過，`fetchSignalHistoryForCode_` 重用的複合索引理論上該夠用
+（Firestore 的複合索引可以服務「只用到索引欄位前綴」的查詢，`(code,
+date)` 這組索引本來就能服務「只篩 code」的查詢），但沒有實際部署驗證過
+這個假設——如果部署後這支查詢噴 `FAILED_PRECONDITION` 要求額外索引，
+把錯誤訊息附的索引加進 `firestore.indexes.json`，別用那個連結在 Console
+手動建（跟前面幾次索引坑的處理原則一樣）。

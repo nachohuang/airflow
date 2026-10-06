@@ -36,6 +36,7 @@ const portfolio = require('./lib/portfolio');
 const watchlistLib = require('./lib/watchlist');
 const portfolioOpsLib = require('./lib/portfolioOps');
 const utilsLib = require('./lib/utils');
+const stockDetailLib = require('./lib/stockDetail');
 
 admin.initializeApp();
 
@@ -448,4 +449,120 @@ exports.getClosedPortfolioHistory = onCall(RUNTIME_OPTS_, async function (reques
   assertOwnerAuth_(request);
   const lotDocs = await fetchPortfolioLots_();
   return portfolioOpsLib.buildClosedHistory_(lotDocs);
+});
+
+/**
+ * 以下是股票詳情頁（戰報卡片點進去看的頁面）的讀取邏輯，從
+ * apps-script/src/StockAnalysis.gs 搬過來。**刻意沒搬**的部分：
+ * `getRealtimeQuote`（打 `mis.twse.com.tw` 這個非官方、沒文件、只在盤中
+ * 開放、有流量限制的即時報價端點，跟這次遷移「BigQuery/Firestore 資料層」
+ * 的範圍無關，而且那支端點本身就脆弱，之後要做可以直接對應複製邏輯，不影響
+ * 這裡的其他部分）、`startAiDiagnosisJob`／`getAiDiagnosisJobStatus`（跑一次
+ * 新的 AI 診斷需要 Secret Manager 存 API 金鑰，獨立列為下一步，見 README
+ * 「還沒做的事」）——這裡只讀**已經存在的**快取診斷（`getAiDiagnosisHistoryForCode`
+ * 同款，Phase 2 已經遷移進 Firestore `ai_diagnosis`），不會主動呼叫 AI。
+ */
+
+/** 查 BigQuery 某一檔股票最近 STOCK_DETAIL_LOOKBACK_DAYS 天的原始 History 列，
+ *  轉成中文欄名列（跟 fetchHistoryRows_／fetchBqInfoForCodes_ 同一套轉換）。 */
+async function fetchStockHistoryRows_(bigQueryConfig, code) {
+  if (!bigQueryConfig || !bigQueryConfig.projectId) return [];
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const sourceRef = bigquery.sourceRefForRead_(bigQueryConfig);
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - config.STOCK_DETAIL_LOOKBACK_DAYS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const sql = bigquery.buildHistoryRowsForCodesSql_(sourceRef, [code], cutoffStr);
+  const [rows] = await client.query({ query: sql });
+  return rows.map(bigquery.mapBqRowToHistoryRow_).filter(function (r) { return r !== null; });
+}
+
+/** `reports/{date}/signals` 裡某一檔代號的全部文件（collectionGroup 查詢，
+ *  需要前面「需要的 Firestore 複合索引」那組 (code ASC, date DESC) 索引，
+ *  跟 fetchLatestSignalsByCode_ 共用同一個）。 */
+async function fetchSignalHistoryForCode_(code) {
+  const db = admin.firestore();
+  const snap = await db.collectionGroup('signals').where('code', '==', code).get();
+  return snap.docs.map(function (d) { return d.data(); });
+}
+
+/** `ai_diagnosis` collection 裡某一檔代號的全部快取診斷（Phase 2 已遷移完成，
+ *  見 firestore/schema.md §4）。只查 `code` 相等，不加 `orderBy`——單欄等號
+ *  查詢不需要額外的複合索引，排序交給呼叫端在記憶體裡做（同一檔股票的診斷
+ *  紀錄筆數不多，不值得為了省這幾筆排序多部署一個索引）。 */
+async function fetchAiDiagnosisForCode_(code) {
+  const db = admin.firestore();
+  const snap = await db.collection('ai_diagnosis').where('code', '==', code).get();
+  const docs = snap.docs.map(function (d) { return d.data(); });
+  docs.sort(function (a, b) { return (a.timestamp || '') < (b.timestamp || '') ? 1 : -1; });
+  return docs;
+}
+
+/** data: {code}。回傳股票詳情頁要的三組資料：價格走勢（含 MA5/20/60）、
+ *  戰報燈號歷史、AI 診斷快取歷史。BigQuery／Firestore／collectionGroup 三種
+ *  I/O 混在一起，所以用一支 onCall 一次打包回傳，不拆成三支個別呼叫——前端
+ *  要顯示的是同一個頁面，沒有理由讓使用者等三次 round trip。 */
+exports.getStockDetail = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
+  const code = utilsLib.zfill4(String(data.code).trim());
+
+  const appConfig = await fetchAppConfig_();
+  const [historyRows, signalDocs, aiDiagnoses] = await Promise.all([
+    fetchStockHistoryRows_(appConfig.bigQuery, code),
+    fetchSignalHistoryForCode_(code),
+    fetchAiDiagnosisForCode_(code)
+  ]);
+
+  if (historyRows.length === 0) {
+    throw new HttpsError('not-found', '查無 ' + code + ' 的歷史資料，確認代號是否正確。');
+  }
+
+  const series = stockDetailLib.buildPriceSeries_(historyRows);
+  const scoreHistory = stockDetailLib.buildScoreHistory_(signalDocs);
+  const latest = series[series.length - 1];
+
+  return {
+    code: code,
+    name: historyRows[historyRows.length - 1]['證券名稱'] || '',
+    latestClose: latest ? latest.close : null,
+    series: series,
+    scoreHistory: scoreHistory,
+    aiDiagnoses: aiDiagnoses
+  };
+});
+
+/** data: {query}。股票代號/名稱模糊搜尋，給前端的搜尋框用——跟戰報清單的
+ *  「只篩今天的訊號」不同，這支查的是全市場、不限於今天有沒有訊號，用來找
+ *  任何一檔股票打開詳情頁。回傳最多 20 筆 {code, name}，依最新資料的代號
+ *  去重（BigQuery 查回來的是原始列，同一檔代號會有很多天，這裡只取最新
+ *  那筆的名稱）。 */
+exports.searchStockCodes = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const q = String(data.query || '').trim();
+  if (!q) return [];
+
+  const appConfig = await fetchAppConfig_();
+  if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) return [];
+
+  const client = new BigQuery({ projectId: appConfig.bigQuery.projectId });
+  const sourceRef = bigquery.sourceRefForRead_(appConfig.bigQuery);
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 10);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const sql = bigquery.buildStockSearchSql_(sourceRef, q, cutoffStr);
+  const [rows] = await client.query({ query: sql });
+
+  const seen = new Set();
+  const results = [];
+  for (const row of rows) {
+    const code = utilsLib.sanitizeStockId_(row.stock_id);
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    results.push({ code: code, name: row.stock_name || '' });
+    if (results.length >= 20) break;
+  }
+  return results;
 });

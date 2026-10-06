@@ -280,6 +280,52 @@ label {
   margin-bottom: 8px;
 }
 
+.card-open {
+  cursor: pointer;
+}
+
+/* ---------- 搜尋全部股票的結果列表 ---------- */
+.search-results-list {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.search-result-item {
+  font-size: 13px;
+}
+
+/* ---------- 股票詳情頁 ---------- */
+.stock-detail-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.stock-detail-header strong {
+  font-size: 18px;
+}
+
+.stock-detail-price {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.chart-wrap {
+  position: relative;
+  height: 240px;
+  margin-bottom: 20px;
+}
+
+.ai-diagnosis-content {
+  margin: 10px 0 0;
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+
 .signal-badge {
   font-size: 13px;
   padding: 2px 8px;

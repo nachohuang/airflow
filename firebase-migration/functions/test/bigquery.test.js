@@ -59,6 +59,25 @@ const bq = require('../lib/bigquery');
   console.log('Test buildHistoryRowsForCodesSql_ (IN clause, optional startStr, quote stripping) passed.');
 }
 
+// --- buildStockSearchSql_：只選 3 欄（計費考量）、LIKE 比對代號/名稱、濾掉
+//    單引號跟 LIKE 萬用字元 ---
+{
+  const sql = bq.buildStockSearchSql_('proj.ds.history_unified', '台積電', '2026-09-01', 20);
+  assert.ok(sql.indexOf('SELECT stock_id, stock_name, date_str FROM') !== -1, '只選搜尋需要的 3 欄，不要整組 24 欄（計費考量）');
+  assert.ok(sql.indexOf("date_str >= '2026-09-01'") !== -1);
+  assert.ok(sql.indexOf('LENGTH(stock_id) = 4') !== -1, '只搜一般股票，排除權證/ETF');
+  assert.ok(sql.indexOf("stock_id LIKE '%台積電%'") !== -1 && sql.indexOf("stock_name LIKE '%台積電%'") !== -1);
+  assert.ok(sql.indexOf('LIMIT 20') !== -1);
+
+  const sqlNoLimit = bq.buildStockSearchSql_('proj.ds.history_unified', '2330', '2026-09-01');
+  assert.ok(sqlNoLimit.indexOf('LIMIT 500') !== -1, '沒帶 limit 應該有預設值');
+
+  const sqlInjection = bq.buildStockSearchSql_('proj.ds.history_unified', "%'; DROP TABLE x; --", '2026-09-01');
+  assert.ok(sqlInjection.indexOf("LIKE '%; DROP TABLE x; --%'") !== -1,
+    '搜尋字串裡的單引號跟 % _ 萬用字元都要被濾掉，剩下的字串只會變成 LIKE 比對的一部分，不會提前結束字串字面值');
+  console.log('Test buildStockSearchSql_ (3-column select, LIKE match, quote/wildcard stripping) passed.');
+}
+
 // --- mapBqRowToHistoryRow_：數值欄位轉 number，字串欄位保留字串，缺欄位用空字串 ---
 {
   const bqRow = {

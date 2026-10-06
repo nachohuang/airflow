@@ -24,6 +24,11 @@ module.exports = {
   // （MA60 需要 60 個交易日 + IBF20/Vol20 緩衝，120 天日曆天數綽綽有餘）。
   ANALYSIS_LOOKBACK_DAYS: 150,
 
+  // 股票詳情頁（getStockDetail）的價格走勢圖要讀的天數，跟
+  // apps-script/src/StockAnalysis.gs 的 getStockTimeSeries 預設值一致
+  // （240 天日曆天數，MA60 需要 60 個交易日，其餘留給圖表本身的可視範圍）。
+  STOCK_DETAIL_LOOKBACK_DAYS: 240,
+
   // computeFactors_ 進來的 History 列，這些欄位要先轉成真正的 number。
   HISTORY_NUMERIC_COLUMNS: [
     '外資', '投信', '自營商', '三大法人買賣超股數',
