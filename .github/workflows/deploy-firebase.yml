@@ -59,6 +59,10 @@ jobs:
           VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
           VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_FUNCTIONS_REGION: ${{ vars.VITE_FIREBASE_FUNCTIONS_REGION }}
+          # 除錯日誌面板會顯示這個版本號（見 src/composables/useDebugLog.js），用來
+          # 分辨手機上看到的畫面是不是真的部署到最新的那次——追快取問題時明確踩過
+          # 「畫面看起來舊但說不出哪裡舊」的坑，才加這個。
+          VITE_BUILD_SHA: ${{ github.sha }}
 
       # FIREBASE_DEPLOY_SA_KEY 是專門給這個 workflow 用的服務帳戶金鑰（見
       # firebase-migration/README.md「Phase 5：自動部署」的建立步驟），整份 JSON 存成這個

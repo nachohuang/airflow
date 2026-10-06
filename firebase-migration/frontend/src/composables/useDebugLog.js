@@ -15,6 +15,13 @@ import { ref } from 'vue';
 const entries = ref([]);
 const MAX_ENTRIES = 300;
 
+/** 這次部署的 build 版本——是哪個 commit 建出來的，用來分辨手機上看到的是不是
+ *  真的最新版（跟之前追快取問題時「畫面明明是舊版但看不出來」那次踩的坑直接
+ *  對應）。`VITE_BUILD_SHA` 由 .github/workflows/deploy-firebase.yml 在 CI build
+ *  時從 `github.sha` 帶進來；手動在 Cloud Shell 跑 `npm run build` 的話這個值
+ *  預設是空的，顯示成 'local'，一樣看得出不是透過自動部署建的。 */
+export const BUILD_VERSION = (import.meta.env.VITE_BUILD_SHA || 'local').slice(0, 7);
+
 function stringify(v) {
   if (v instanceof Error) {
     return v.code ? `${v.message}（code: ${v.code}）` : v.message;
@@ -95,7 +102,7 @@ export function useDebugLog() {
   if (!installed) {
     installed = true;
     installGlobalCapture();
-    pushLog('info', '除錯日誌已啟動——會記錄 console.error/warn、沒被 catch 的例外，以及打給 Firebase 的請求（含失敗回應內容）。');
+    pushLog('info', `除錯日誌已啟動（版本 ${BUILD_VERSION}）——會記錄 console.error/warn、沒被 catch 的例外，以及打給 Firebase 的請求（含失敗回應內容）。`);
   }
   function clear() {
     entries.value.splice(0, entries.value.length);

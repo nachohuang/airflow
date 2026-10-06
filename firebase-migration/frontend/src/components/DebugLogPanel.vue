@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue';
-import { useDebugLog } from '../composables/useDebugLog';
+import { useDebugLog, BUILD_VERSION } from '../composables/useDebugLog';
 
 const { entries, clear } = useDebugLog();
 const open = ref(false);
@@ -27,7 +27,7 @@ async function copyAll() {
 <template>
   <div class="debug-log-panel">
     <button type="button" class="debug-log-toggle" @click="open = !open">
-      🐞 除錯日誌（{{ entries.length }}） {{ open ? '收起 ▼' : '展開 ▲' }}
+      🐞 除錯日誌（{{ entries.length }}） · 版本 {{ BUILD_VERSION }} {{ open ? '收起 ▼' : '展開 ▲' }}
     </button>
     <div v-if="open" class="debug-log-body">
       <div class="debug-log-actions">
