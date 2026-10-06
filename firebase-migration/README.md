@@ -1028,3 +1028,9 @@ Secrets 裡（GitHub 不會把 Secret 內容顯示回來，連你自己之後也
 精細角色部署時卡在某個權限不足的錯誤，一直抓不出少了哪個角色，直接換成
 `roles/editor` 是務實的退路，單人專案這樣做不算太誇張，只是範圍比精確
 挑選的角色清單廣。
+
+**2026-10-06：`FIREBASE_DEPLOY_SA_KEY` 跟五個 `VITE_FIREBASE_*`
+repository variable 都設定完成**，這次 commit 就是設定完後的第一次
+實際觸發測試——改到這個檔案（在 `firebase-migration/**` 路徑篩選範圍
+內）push 上去，`.github/workflows/deploy-firebase.yml` 應該就會自動
+跑起來。
