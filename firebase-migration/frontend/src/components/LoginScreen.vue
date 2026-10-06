@@ -12,6 +12,7 @@ async function handleSignIn() {
   try {
     await signIn();
   } catch (e) {
+    console.error(e);
     error.value = e.message || String(e);
   } finally {
     loading.value = false;

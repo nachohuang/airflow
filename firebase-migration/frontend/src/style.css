@@ -345,3 +345,81 @@ details summary {
 .neg {
   color: var(--negative);
 }
+
+/* ---------- 除錯日誌面板（手機沒有 DevTools 時用） ---------- */
+.debug-log-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  font-size: 12px;
+}
+
+.debug-log-toggle {
+  width: 100%;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  background: var(--bg-card);
+  opacity: 0.85;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.debug-log-body {
+  max-height: 50vh;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+}
+
+.debug-log-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.debug-log-actions button {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.debug-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.log-entry {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.log-time {
+  color: var(--text);
+  opacity: 0.6;
+  margin-right: 6px;
+}
+
+.log-message {
+  display: inline;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, Consolas, monospace;
+  margin: 0;
+}
+
+.log-error .log-message {
+  color: var(--danger);
+}
+
+.log-warn .log-message {
+  color: #d97706;
+}
+
+.log-info .log-message {
+  color: var(--text);
+}
