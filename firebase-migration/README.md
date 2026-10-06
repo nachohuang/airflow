@@ -656,8 +656,11 @@ FN_URL="https://${REGION}-${PROJECT_ID}.cloudfunctions.net"
 ```bash
 gcloud iam service-accounts keys list --iam-account="$SA_EMAIL" --project="$PROJECT_ID" \
   --format="table(name.basename(), validAfterTime)" --sort-by="~validAfterTime"
-# 複製最上面（最新）那一筆的 KEY_ID，刪除：
-gcloud iam service-accounts keys delete 貼上面的KEY_ID --iam-account="$SA_EMAIL" --project="$PROJECT_ID" --quiet
+# ⚠️ 下面這行的 KEY_ID 是「要你換成上一行印出來、最上面那筆的 40 碼 ID」的
+# 佔位字元，不是指令本身的一部分——照抄貼上去會是字面上的「KEY_ID」四個字，
+# gcloud 會回報 INVALID_ARGUMENT。例如上一行印出 c072973b881611468a144cd89ee6d2b4fc2b4eff
+# 就是把下面的 KEY_ID 換成那串 40 碼字串。
+gcloud iam service-accounts keys delete KEY_ID --iam-account="$SA_EMAIL" --project="$PROJECT_ID" --quiet
 rm -f /tmp/sa-key.json
 unset GOOGLE_APPLICATION_CREDENTIALS
 ```
@@ -757,6 +760,46 @@ curl -s -X POST "${FN_URL}/deletePortfolioLot" \
 都回到跑這輪驗證之前的狀態（測試用的 2330 觀察清單項目、0050 買賣紀錄都
 清乾淨了），其他步驟的錯誤路徑（步驟 5 的無登入、步驟 9 的跟持股互斥）都
 要回傳對應的 `error.status`，不是意外的 200/`result`。
+
+**✅ 2026-10-06 已在 `flash-arbor-365706` 完整驗證成功**，照上面整套步驟
+跑過一輪，全部符合預期：
+
+- 無登入呼叫 `getWatchlist` → `error.status: PERMISSION_DENIED`。
+- `getWatchlist` 讀到真實資料（既有的 `6491` 晶碩），`addToWatchlist`
+  加入 `2330` 後 `name` 自動從 BigQuery 補成「台積電」、`latestClose`
+  有實際數字、`addedDate` 是正確的台北時區今天日期（`todayStrTaipei_()`
+  算對了），而且依加入日期新到舊排序正確。
+- 對目前持有中的代號（`4104`）呼叫 `addToWatchlist` → `error.status:
+  FAILED_PRECONDITION`，`assertNotHolding_` 擋住了。
+- `removeFromWatchlist` 清除測試項目後只剩原本的 `6491`。
+- `getPortfolio` 讀到 4 張真實持股卡片，其中 `9910`（5 筆分批買進的
+  lot）手動核對加權平均成本 `(20×68.95+55×68.53+125×68.3+30×67.7+
+  20×67.9)/250 = 68.2986`，跟回應裡的 `cost` 完全一致，`lots` 也正確
+  依買進日期排序。
+- `savePortfolioItem` 新增測試用 `0050` 一筆、再帶 `lotId` 編輯備註
+  （確認是改同一筆、不是多出一張卡片）、`closePortfolioPosition`
+  平倉後卡片消失、`getClosedPortfolioHistory` 裡 `realizedPct: 3.33`／
+  `realizedAmount: 500` 跟手算的 `(155-150)/150*100`／`(155-150)*100`
+  一致、`deletePortfolioLot` 刪除後完全恢復成驗證前的 4 張卡片。
+
+部署驗證過程另外踩到兩個跟這台 Cloud Shell 環境本身有關的坑（跟
+`lib/`／`index.js` 的程式碼邏輯無關，純粹是驗證工具鏈的問題，已經更新進
+上面的步驟說明，這裡另外記一次方便之後查）：
+
+- **鑄 custom token 時的 ADC quota project 403**：`admin.initializeApp()`
+  不帶參數在 Cloud Shell 裡找不到本地私鑰，`createCustomToken()` 改打
+  遠端 IAM API 簽章，撞到「沒設 quota project」，而 Cloud Shell 的 ADC
+  又不是檔案形式，`gcloud auth application-default set-quota-project`
+  修不了。改用 `firebase-adminsdk` 服務帳戶的真正金鑰（`GOOGLE_
+  APPLICATION_CREDENTIALS` 指過去）解決——帶私鑰就能本地簽章，不用打
+  那支 API。
+- **`getUserByEmail` 找不到擁有者帳號**：`nachohuang@gmail.com` 在這個
+  專案的 Firebase Auth 裡原來還沒有使用者紀錄（Phase 0 設定當時可能只
+  開了 Google 登入方式，沒有真的登入過一次）。用 `admin.auth().
+  createUser({email, emailVerified: true})` 手動建一筆解決，之後
+  Phase 5 做真的前端、這個帳號真的走一次 Google 登入時，Firebase Auth
+  預設的「每個 email 一個帳號」設定會自動併到這筆，不會變成兩個獨立
+  帳號。
 
 ## 還沒做的事（下一步）
 
