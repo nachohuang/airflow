@@ -606,8 +606,25 @@ echo "$WEB_API_KEY"   # 抓不到就手動去 Console 複製，貼進來 export 
 #    留過登入紀錄（Phase 0 設定時應該已經用這個帳號登入過一次；如果
 #    getUserByEmail 找不到，代表還沒登入過，先用任何一個開了 Google 登入
 #    的 Firebase Auth 測試頁面登入一次這個帳號再重跑這步）。
+#
+#    ⚠️ 坑：admin.initializeApp() 不帶參數時，Cloud Shell 裡沒有真正的 ADC
+#    json 檔案（是跟 gcloud 登入整合的 metadata-server 式憑證，不是檔案），
+#    createCustomToken() 找不到私鑰可以本地簽章，會改打 IAM 的 signBlob API
+#    遠端簽，而那次呼叫會因為「沒設 quota project」被 403 擋掉——
+#    `gcloud auth application-default set-quota-project` 修不了，因為它要改
+#    的 ADC 檔案本身就不存在。繞過去的辦法：改用一把真的帶私鑰的服務帳戶
+#    金鑰（每個 Firebase 專案都會自動建一個 firebase-adminsdk 服務帳戶），
+#    createCustomToken() 找到私鑰就本地簽章，完全不用打網路 API：
+SA_EMAIL=$(gcloud iam service-accounts list --project="$PROJECT_ID" \
+  --filter="email~firebase-adminsdk" --format="value(email)")
+echo "SA_EMAIL=$SA_EMAIL"   # 應該看到 firebase-adminsdk-xxxxx@你的專案.iam.gserviceaccount.com
+
+gcloud iam service-accounts keys create /tmp/sa-key.json \
+  --iam-account="$SA_EMAIL" --project="$PROJECT_ID"
+export GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa-key.json
+
 cd ~/airflow/firebase-migration/functions   # 要在有 firebase-admin 的目錄跑
-cat > /tmp/mint-token.js <<'EOF'
+cat > mint-token.js <<'EOF'
 const admin = require('firebase-admin');
 admin.initializeApp();
 (async () => {
@@ -615,7 +632,12 @@ admin.initializeApp();
   console.log(await admin.auth().createCustomToken(user.uid));
 })().catch(e => { console.error(e); process.exit(1); });
 EOF
-CUSTOM_TOKEN=$(node /tmp/mint-token.js)
+# 注意：腳本要寫在目前目錄（functions/），不要寫到 /tmp——node 的 require 是依
+# 腳本檔案自己的位置找 node_modules，寫到 /tmp 會因為那裡沒有 node_modules
+# 直接 Cannot find module 'firebase-admin'。
+CUSTOM_TOKEN=$(node mint-token.js)
+echo "custom token length: ${#CUSTOM_TOKEN}"   # 要 > 0
+rm mint-token.js
 
 ID_TOKEN=$(curl -s -X POST \
   "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${WEB_API_KEY}" \
@@ -626,6 +648,18 @@ echo "${ID_TOKEN:0:24}...(已省略，拿到非空字串就對)"
 
 REGION="us-central1"   # RUNTIME_OPTS_ 沒指定 region，v2 預設是 us-central1
 FN_URL="https://${REGION}-${PROJECT_ID}.cloudfunctions.net"
+```
+
+⚠️ **整個驗證流程跑完之後一定要刪掉這把服務帳戶金鑰**——它是長期有效的
+密鑰，留著是風險，不是驗證完就自動失效：
+
+```bash
+gcloud iam service-accounts keys list --iam-account="$SA_EMAIL" --project="$PROJECT_ID" \
+  --format="table(name.basename(), validAfterTime)" --sort-by="~validAfterTime"
+# 複製最上面（最新）那一筆的 KEY_ID，刪除：
+gcloud iam service-accounts keys delete 貼上面的KEY_ID --iam-account="$SA_EMAIL" --project="$PROJECT_ID" --quiet
+rm -f /tmp/sa-key.json
+unset GOOGLE_APPLICATION_CREDENTIALS
 ```
 
 **驗證擁有者檢查真的擋得住（負向測試，先測這個再測正常流程）**：
