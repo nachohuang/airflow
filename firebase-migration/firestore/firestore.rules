@@ -50,6 +50,15 @@ service cloud.firestore {
         allow read: if isOwner();
       }
     }
+    // 上面那組巢狀 match 只授權走已知完整路徑的查詢（例如
+    // `collection(db, 'reports', date, 'signals')`）。frontend/src/components/
+    // dashboard/DashboardView.vue 要用 `collectionGroup(db, 'signals')` 找「不管
+    // 哪一天、最新的那筆」，這種跨路徑的 collection group 查詢一定要另外用
+    // `{path=**}` 遞迴萬用字元明確授權，不會因為上面那組巢狀規則就自動涵蓋——
+    // 這是 Firestore Security Rules 的既有限制，不是這份規則寫漏了才需要補。
+    match /{path=**}/signals/{code} {
+      allow read: if isOwner();
+    }
     match /ai_diagnosis/{docId} {
       allow read: if isOwner();
     }

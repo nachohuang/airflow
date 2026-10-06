@@ -991,6 +991,20 @@ firebase deploy --only hosting
 - **除錯面板跟底部導覽列疊在一起**：兩個都用 `position: fixed;
   bottom: 0`，互相蓋住。改成除錯面板放在畫面最上方，`#app` 補
   `padding-top`、`.topbar` 的 `sticky top` 跟著調整，避免再疊到一起。
+- **`DashboardView.vue` 的 `collectionGroup` 查詢被 Security Rules 擋
+  （`Missing or insufficient permissions`）**：`firestore.rules` 原本
+  對 `reports/{date}/signals/{code}` 的授權是巢狀 `match`（`match
+  /reports/{date} { match /signals/{code} {...} } }`），這種寫法只授權
+  走「已知完整路徑」的查詢（例如 `collection(db, 'reports', date,
+  'signals')`）。`DashboardView.vue` 要找「不管哪一天、最新的那筆」，
+  用的是 `collectionGroup(db, 'signals')` 跨路徑查詢——這種查詢一定要
+  另外用 `{path=**}` 遞迴萬用字元明確授權（`match
+  /{path=**}/signals/{code} { allow read: if isOwner(); }`），光靠巢狀
+  `match` 不會自動涵蓋，是 Firestore Security Rules 的既有限制，不是
+  規則寫漏了。**修法**：在 `firestore.rules` 加一條這樣的規則（保留
+  原本的巢狀規則不動）。之後如果還有其他地方要對 Firestore 做
+  `collectionGroup` 查詢，記得同一個坑要再補一次對應的 `{path=**}`
+  規則，不會因為加過一次別的 collection 就全部自動涵蓋。
 
 ## 自動部署（GitHub Actions，2026-10-06）
 

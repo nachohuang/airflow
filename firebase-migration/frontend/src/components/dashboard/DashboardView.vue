@@ -104,7 +104,7 @@ onUnmounted(function () {
       <p v-if="!loading && latestDate && filteredSignals.length === 0" class="hint">
         {{ searchText ? '沒有符合搜尋的股票。' : '今天沒有訊號。' }}
       </p>
-      <p v-if="!loading && !latestDate" class="hint">
+      <p v-if="!loading && !error && !latestDate" class="hint">
         還沒有任何戰報資料——請先手動觸發一次 generateDailyReport，或等排程執行。
       </p>
     </div>
