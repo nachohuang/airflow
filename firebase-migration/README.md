@@ -864,11 +864,11 @@ Vue（相對 React）樣板程式碼少、學習曲線平；Vite 是搭配 Vue �
 - `frontend/src/components/LoginScreen.vue`／`AppShell.vue` — 登入畫面、
   App 整體骨架（頂部列＋底部四個主 tab）。四個主 tab 對照舊版
   `Index.html` 的 `data-tab="dashboard"/"portfolio"/"research"/"admin"`，
-  **目前「📊 戰報與個股」「💼 持股庫存」可以點**，「🧪 策略研究」「⚙️
-  系統與資料後台」還顯示「這個頁面還沒遷移」的占位訊息——不是漏做，
-  那兩個 tab 的後端邏輯（回測、因子掃描、AI 設定）還沒遷移完，先讓
-  使用者清楚知道要去舊版用，不要讓畫面看起來像壞掉。預設停在「戰報與
-  個股」，跟舊版 `Index.html` 的預設 tab 一致（最常看的頁面）。
+  **目前「📊 戰報與個股」「💼 持股庫存」「⚙️ 系統與資料後台」可以點**，
+  「🧪 策略研究」還顯示「這個頁面還沒遷移」的占位訊息——不是漏做，回測
+  跟因子掃描的後端邏輯還沒遷移完，先讓使用者清楚知道要去舊版用，不要讓
+  畫面看起來像壞掉。預設停在「戰報與個股」，跟舊版 `Index.html` 的預設
+  tab 一致（最常看的頁面）。
 - `frontend/src/components/dashboard/DashboardView.vue` — 戰報清單，
   **直接用 Firestore client SDK 讀 `reports/{date}/signals`**，不是走
   `onCall` function：`firestore.rules` 本來就開放擁有者讀這個
@@ -890,6 +890,29 @@ Vue（相對 React）樣板程式碼少、學習曲線平；Vite 是搭配 Vue �
   - `WatchlistList.vue`：呼叫 `getWatchlist`／`addToWatchlist`／
     `removeFromWatchlist`。
   - `ClosedHistoryList.vue`：呼叫 `getClosedPortfolioHistory`，純讀取表格。
+- `frontend/src/components/admin/AdminView.vue` — 系統與資料後台，跟
+  `DashboardView.vue` 一樣**直接用 Firestore client SDK 讀寫
+  `config/app`**（`firestore.rules` 的 `match /config/{configId} {
+  allow read, write: if isOwner(); }` 本來就開放擁有者直接讀寫，見
+  `firestore/schema.md` §8），不需要新的 `onCall` function。**目前只做
+  了兩項實際有被新系統讀取、改了真的會生效的設定**：
+  - `screeningStrategy`（下拉選單，對應 `functions/lib/analysis.js` 的
+    `SCREENING_STRATEGIES`，跟手動用 Firestore 指令切換 `rule_v17`/
+    `hybrid` 是同一個欄位，現在可以直接在畫面上切換，不用再開 Cloud
+    Shell）。
+  - `bigQuery.sourceMode`（下拉選單，對應 `functions/lib/bigquery.js`
+    的 `sourceRefForRead_`）。
+
+  **刻意沒做**的部分：`config/app` 裡 `triggerHour`／`triggerMinute`／
+  `skipWeekends` 這幾個欄位，Firebase 版的排程是 `index.js` 裡寫死的
+  Cloud Scheduler cron（`'0 15 * * 1-5'`），完全沒讀這幾個 Firestore
+  欄位——這是舊版 Apps Script 觸發器時代留下的欄位，在新架構裡沒有接
+  任何東西，做了也是假按鈕，所以沒放進畫面，避免讓使用者以為改了這幾個
+  值會改到排程時間。`bigQuery.projectId`／`dataset`／`pricePerTb`
+  也沒開放編輯（打錯字會讓戰報整個查不到資料，風險比效益高，要改先去
+  Firebase Console 的 Firestore 頁面直接編輯文件）。AI 金鑰設定、AI
+  用量統計（在 BigQuery，不在 Firestore，見「資料庫分工」的說明）、
+  History 補抓/整理工具都還沒做。
 - `firebase.json` 加了 `hosting` 設定（`public: "frontend/dist"`，SPA
   rewrite 全部導回 `index.html`）。
 

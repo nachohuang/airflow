@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import DashboardView from './dashboard/DashboardView.vue';
 import PortfolioView from './portfolio/PortfolioView.vue';
+import AdminView from './admin/AdminView.vue';
 
 const { currentUser, signOut } = useAuth();
 /** 跟舊版 apps-script/src/Index.html 一致，預設停在戰報與個股（最常看的頁面），
@@ -12,12 +13,14 @@ const activeTab = ref('dashboard');
 /** 跟舊版 apps-script/src/Index.html 的四個主 tab 對應（data-tab="dashboard"／
  *  "portfolio"／"research"／"admin"）。「戰報與個股」目前只做了讀取戰報清單
  *  （直接讀 Firestore，見 DashboardView.vue），AI 診斷/股票搜尋/走勢圖還沒做；
- *  「策略研究」「系統與資料後台」兩個 tab 完全還沒遷移，先放占位頁面。 */
+ *  「系統與資料後台」目前只做了篩選策略／BigQuery 來源模式這兩項最常改的設定
+ *  （見 AdminView.vue），AI 金鑰／用量統計／History 補抓工具還沒做；
+ *  「策略研究」（回測/因子掃描）完全還沒遷移，先放占位頁面。 */
 const tabs = [
   { key: 'dashboard', label: '📊 戰報與個股', ready: true },
   { key: 'portfolio', label: '💼 持股庫存', ready: true },
   { key: 'research', label: '🧪 策略研究', ready: false },
-  { key: 'admin', label: '⚙️ 系統與資料後台', ready: false }
+  { key: 'admin', label: '⚙️ 系統與資料後台', ready: true }
 ];
 </script>
 
@@ -34,6 +37,7 @@ const tabs = [
     <main class="content">
       <DashboardView v-if="activeTab === 'dashboard'" />
       <PortfolioView v-else-if="activeTab === 'portfolio'" />
+      <AdminView v-else-if="activeTab === 'admin'" />
       <div v-else class="placeholder-box">
         這個頁面還沒遷移到新系統，請先用舊版的 Apps Script 網頁應用程式。
       </div>
