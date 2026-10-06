@@ -894,7 +894,13 @@ Vue（相對 React）樣板程式碼少、學習曲線平；Vite 是搭配 Vue �
   直接查 `reports` collection 找不到任何文件。**目前只做了清單本身**，
   股票搜尋自動完成、點進去看 AI 診斷/走勢圖的詳情 modal 都還沒做
   （那些需要新的 Cloud Function，這裡故意先跳過，見下面 README 開頭的
-  Phase 3「還沒做的事」）。
+  Phase 3「還沒做的事」）。卡片欄位對照舊版 `apps-script/src/JavaScript.html`
+  戰報卡片的 `fmtNum`／百分比慣例調整過：`Trend_Score`／`Inst_Part_Rank`／
+  `IBF_20D_Rank` 這幾個原始排名欄位舊版卡片本身就沒有顯示（已經折算進
+  `Armor_Score` 裡了），刻意不跟著顯示；`predictedReturn1m`／
+  `predictedDownsideResistance` 格式化成帶正負號的百分比（部署驗證時
+  第一版忘了格式化，顯示成一長串原始小數，跟舊版卡片的風格對不起來，
+  照舊版補上）。
 - `frontend/src/components/portfolio/` — 持股庫存頁面，對照舊版
   `Index.html` 持股庫存分頁底下的三個 sub-tab：
   - `PortfolioView.vue`：sub-tab 切換（持有中／👀 觀察個股／💰 歷史結案紀錄）。

@@ -55,6 +55,16 @@ async function load() {
   }
 }
 
+/** 對應舊版 apps-script/src/JavaScript.html 的 fmtNum(v*100, digits) + '%' 慣例
+ *  （簽名加正負號）——Inst_Part_Rank／IBF_20D_Rank／Trend_Score 這幾個原始排名
+ *  欄位舊版卡片本來就沒有顯示（已經折算進 Armor Score 裡了），這裡刻意不跟著
+ *  顯示，只保留舊版卡片原本就有秀出來的欄位。 */
+function fmtPct(v, digits) {
+  if (v === null || v === undefined || isNaN(v)) return '';
+  const pct = v * 100;
+  return (pct >= 0 ? '+' : '') + pct.toFixed(digits) + '%';
+}
+
 const filteredSignals = computed(function () {
   const q = searchText.value.trim();
   if (!q) return signals.value;
@@ -89,13 +99,14 @@ onUnmounted(function () {
           <span class="signal-badge">{{ s.strategy }}</span>
         </header>
         <div class="card-body">
-          <div>Armor Score：{{ s.armorScore }}</div>
-          <div>建議動作：{{ s.action }}</div>
-          <div v-if="s.interpretation">實相解讀：{{ s.interpretation }}</div>
-          <div>Trend Score：{{ s.trendScore }}　法人參與度排名：{{ s.instPartRank }}　IBF20D排名：{{ s.ibf20dRank }}</div>
-          <div v-if="s.referenceHigh != null">參考最高價：{{ s.referenceHigh }}</div>
-          <div v-if="s.predictedReturn1m != null">因子模型_預測1月報酬：{{ s.predictedReturn1m }}</div>
-          <div v-if="s.predictedDownsideResistance != null">因子模型_預測抗跌力：{{ s.predictedDownsideResistance }}</div>
+          <div>Armor Score：{{ s.armorScore != null ? s.armorScore.toFixed(1) : '-' }}</div>
+          <div>{{ s.action }}</div>
+          <div v-if="s.interpretation">{{ s.interpretation }}</div>
+          <div v-if="s.predictedReturn1m != null || s.predictedDownsideResistance != null">
+            因子模型預測：
+            <template v-if="s.predictedReturn1m != null">1個月 {{ fmtPct(s.predictedReturn1m, 1) }}</template>
+            <template v-if="s.predictedDownsideResistance != null">　抗跌力 {{ fmtPct(s.predictedDownsideResistance, 2) }}</template>
+          </div>
           <div v-if="s.monitorUrl">
             <a :href="s.monitorUrl" target="_blank" rel="noopener">監控連結 ↗</a>
           </div>
