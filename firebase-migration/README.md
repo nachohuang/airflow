@@ -864,10 +864,23 @@ Vue（相對 React）樣板程式碼少、學習曲線平；Vite 是搭配 Vue �
 - `frontend/src/components/LoginScreen.vue`／`AppShell.vue` — 登入畫面、
   App 整體骨架（頂部列＋底部四個主 tab）。四個主 tab 對照舊版
   `Index.html` 的 `data-tab="dashboard"/"portfolio"/"research"/"admin"`，
-  **目前只有「💼 持股庫存」是可以點的**，其他三個顯示「這個頁面還沒遷移」
-  的占位訊息——不是漏做，後端邏輯（戰報的 AI 診斷/job 輪詢、策略研究、
-  系統後台那些）還沒遷移完，先讓使用者清楚知道要去舊版用，不要讓畫面
-  看起來像壞掉。
+  **目前「📊 戰報與個股」「💼 持股庫存」可以點**，「🧪 策略研究」「⚙️
+  系統與資料後台」還顯示「這個頁面還沒遷移」的占位訊息——不是漏做，
+  那兩個 tab 的後端邏輯（回測、因子掃描、AI 設定）還沒遷移完，先讓
+  使用者清楚知道要去舊版用，不要讓畫面看起來像壞掉。預設停在「戰報與
+  個股」，跟舊版 `Index.html` 的預設 tab 一致（最常看的頁面）。
+- `frontend/src/components/dashboard/DashboardView.vue` — 戰報清單，
+  **直接用 Firestore client SDK 讀 `reports/{date}/signals`**，不是走
+  `onCall` function：`firestore.rules` 本來就開放擁有者讀這個
+  collection（見 `firestore/schema.md` §3），用 `onSnapshot` 即時監聽
+  （不是读一次就結束），之後排程重算戰報時畫面會自動更新，不用使用者
+  手動刷新。找「最新一天是哪天」用 `collectionGroup('signals')` 查
+  `date` 欄位排序取第一筆——`reports/{date}` 這個父文件本身從來沒被
+  寫過任何欄位（`writeReportDocs_` 只寫 `signals` 這個 subcollection），
+  直接查 `reports` collection 找不到任何文件。**目前只做了清單本身**，
+  股票搜尋自動完成、點進去看 AI 診斷/走勢圖的詳情 modal 都還沒做
+  （那些需要新的 Cloud Function，這裡故意先跳過，見下面 README 開頭的
+  Phase 3「還沒做的事」）。
 - `frontend/src/components/portfolio/` — 持股庫存頁面，對照舊版
   `Index.html` 持股庫存分頁底下的三個 sub-tab：
   - `PortfolioView.vue`：sub-tab 切換（持有中／👀 觀察個股／💰 歷史結案紀錄）。

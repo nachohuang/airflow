@@ -212,6 +212,22 @@ label {
   margin-bottom: 16px;
 }
 
+.search-bar {
+  margin-bottom: 12px;
+}
+
+.meta-bar {
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.75;
+  margin-bottom: 12px;
+}
+
+.dashboard-note {
+  margin-top: 16px;
+  text-align: center;
+}
+
 .form-card {
   border: 1px solid var(--border);
   background: var(--bg-card);

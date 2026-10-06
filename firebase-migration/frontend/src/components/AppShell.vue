@@ -1,16 +1,20 @@
 <script setup>
 import { ref } from 'vue';
 import { useAuth } from '../composables/useAuth';
+import DashboardView from './dashboard/DashboardView.vue';
 import PortfolioView from './portfolio/PortfolioView.vue';
 
 const { currentUser, signOut } = useAuth();
-const activeTab = ref('portfolio');
+/** 跟舊版 apps-script/src/Index.html 一致，預設停在戰報與個股（最常看的頁面），
+ *  不是持股庫存。 */
+const activeTab = ref('dashboard');
 
 /** 跟舊版 apps-script/src/Index.html 的四個主 tab 對應（data-tab="dashboard"／
- *  "portfolio"／"research"／"admin"）。目前只有「持股庫存」後端邏輯遷移完成，
- *  其他三個先放占位頁面，不是漏做，是 Phase 5 還沒排到。 */
+ *  "portfolio"／"research"／"admin"）。「戰報與個股」目前只做了讀取戰報清單
+ *  （直接讀 Firestore，見 DashboardView.vue），AI 診斷/股票搜尋/走勢圖還沒做；
+ *  「策略研究」「系統與資料後台」兩個 tab 完全還沒遷移，先放占位頁面。 */
 const tabs = [
-  { key: 'dashboard', label: '📊 戰報與個股', ready: false },
+  { key: 'dashboard', label: '📊 戰報與個股', ready: true },
   { key: 'portfolio', label: '💼 持股庫存', ready: true },
   { key: 'research', label: '🧪 策略研究', ready: false },
   { key: 'admin', label: '⚙️ 系統與資料後台', ready: false }
@@ -28,7 +32,8 @@ const tabs = [
     </header>
 
     <main class="content">
-      <PortfolioView v-if="activeTab === 'portfolio'" />
+      <DashboardView v-if="activeTab === 'dashboard'" />
+      <PortfolioView v-else-if="activeTab === 'portfolio'" />
       <div v-else class="placeholder-box">
         這個頁面還沒遷移到新系統，請先用舊版的 Apps Script 網頁應用程式。
       </div>

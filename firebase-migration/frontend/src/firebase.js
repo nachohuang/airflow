@@ -13,6 +13,7 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFunctions } from 'firebase/functions';
+import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -32,6 +33,12 @@ if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+
+/** 戰報（`reports/{date}/signals`）是唯讀的衍生資料，`firestore.rules` 已經開放
+ *  擁有者直接讀（見 schema.md §3／rules 的 `match /reports/{date}`），不需要像
+ *  Watchlist/Portfolio 那樣繞道 onCall function——前端直接用 Firestore client SDK
+ *  讀（甚至可以用 onSnapshot 即時監聽），比多開一支 Cloud Function 再轉一手簡單。 */
+export const db = getFirestore(app);
 
 /** index.js 的 RUNTIME_OPTS_ 沒指定 region，v2 function 預設部署在 us-central1——
  *  這裡要跟後端部署的 region 對上，不對會打到一個不存在的 endpoint。 */
