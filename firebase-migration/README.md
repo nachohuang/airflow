@@ -542,6 +542,20 @@ npm test
 - `portfolio_lots`：`(code ASC, status ASC)`——`closePortfolioPosition`
   查「某代號目前持有中的所有紀錄」需要，也是 `firestore/schema.md` §2
   一開始就寫好要建的索引。
+- `signals`（collection group）的 `date` 欄位單欄索引（`fieldOverrides`
+  裡的設定，不是 `indexes` 那個複合索引陣列）——`frontend/src/components/
+  dashboard/DashboardView.vue` 單純查「`signals` 底下 `date` 最新的
+  一筆」（`collectionGroup('signals').orderBy('date','desc').limit(1)`，
+  沒有搭配其他欄位的等號條件）需要。**這個真的部署驗證過才發現**：
+  Firestore 對「一般 collection」範圍的每個欄位本來就會自動建單欄索引
+  （升冪＋降冪都有），但這個自動行為**不包含 collection group 範圍**，
+  即使只是單欄位、不需要複合索引的查詢，只要是 collection group 範圍
+  就一定要透過 `fieldOverrides` 手動開啟——沒開會在瀏覽器 console 看到
+  `The query requires a COLLECTION_GROUP_DESC index for collection
+  signals and field date` 這種錯誤，附的連結點進去可以手動建，但我們
+  已經用 `firestore.indexes.json` 宣告過，用那個連結建的話下次 deploy
+  可能會跟宣告檔衝突，一樣不建議用那條路（跟前面「需要的 Firestore
+  複合索引」提過的原則一致）。
 
 ⚠️ 跟 `generateDailyReport` 一樣，這 8 個 `onCall` function 本身沒辦法在
 這個開發環境驗證（沒有真正的雲端憑證）——`lib/` 的純邏輯已經靠單元測試
