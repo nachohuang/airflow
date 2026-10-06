@@ -45,6 +45,8 @@ body {
 
 #app {
   min-height: 100svh;
+  /* 幫 .debug-log-panel 的收合橫條（固定在最上方）留出空間，不蓋住下面的內容 */
+  padding-top: 32px;
 }
 
 h1, h2, h3 {
@@ -117,7 +119,9 @@ label {
   border-bottom: 1px solid var(--border);
   background: var(--bg-card);
   position: sticky;
-  top: 0;
+  /* 32px = .debug-log-panel 收合橫條的高度，sticky 貼齊時要讓在它下面，
+     不是蓋在 viewport 最上面（那裡已經被除錯面板占住）。 */
+  top: 32px;
   z-index: 10;
 }
 
@@ -346,34 +350,39 @@ details summary {
   color: var(--negative);
 }
 
-/* ---------- 除錯日誌面板（手機沒有 DevTools 時用） ---------- */
+/* ---------- 除錯日誌面板（手機沒有 DevTools 時用） ----------
+ * 放在畫面最上方，不是最下方——AppShell 的 .bottom-nav 也是
+ * position: fixed; bottom: 0，兩個搶同一個位置會疊在一起、互相擋住。
+ * #app 的 padding-top 已經留了剛好這個收合橫條高度的空間。 */
 .debug-log-panel {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 0;
-  z-index: 100;
+  top: 0;
+  z-index: 1000;
   font-size: 12px;
 }
 
 .debug-log-toggle {
   width: 100%;
+  height: 32px;
+  line-height: 20px;
   border-radius: 0;
   border-left: none;
   border-right: none;
-  border-bottom: none;
+  border-top: none;
   background: var(--bg-card);
-  opacity: 0.85;
   font-size: 12px;
   padding: 6px 10px;
 }
 
 .debug-log-body {
-  max-height: 50vh;
+  max-height: 60vh;
   overflow-y: auto;
   background: var(--bg-card);
-  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   padding: 8px 10px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
 }
 
 .debug-log-actions {
