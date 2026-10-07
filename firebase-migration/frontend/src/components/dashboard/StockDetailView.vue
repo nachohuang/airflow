@@ -1,6 +1,8 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
 import Chart from 'chart.js/auto';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
 import { strategyColor } from '../../utils/strategyColor';
 import {
@@ -23,6 +25,34 @@ let chartInstance = null;
 
 const diagnosing = ref(false);
 const diagnosisError = ref('');
+
+// 2026-10-07：跟 AdminView.vue 的「補抓區間」同一個理由（見 README「補抓
+// 區間：用 jobs/{jobKey} 取代等這次呼叫本身回應」那節）——AI 診斷常常跑
+// 30 秒到 1 分鐘（要查 Goodinfo + 呼叫 LLM），手機切到背景很容易把連線
+// 中斷掉，或是使用者切到別的股票/分頁再切回來，這個元件會被整個砍掉
+// 重建，原本存在元件內的 `diagnosing` 也會跟著消失。後端在
+// `runDeepDiagnosisForCode_`／`runPortfolioHoldDiagnosis` 開始執行跟結束
+// 時都會把狀態寫進 `jobs/aiDiagnosis_{code}`，這裡改成即時監聽那份文件，
+// 不管連線有沒有中斷、元件有沒有被重新掛載，都能看到當下真正的執行狀態。
+const diagnosisJob = ref(null);
+let unsubscribeDiagnosisJob = null;
+
+function subscribeDiagnosisJob(code) {
+  if (unsubscribeDiagnosisJob) unsubscribeDiagnosisJob();
+  diagnosisJob.value = null;
+  unsubscribeDiagnosisJob = onSnapshot(doc(db, 'jobs', 'aiDiagnosis_' + code), function (snap) {
+    diagnosisJob.value = snap.exists() ? snap.data() : null;
+  });
+}
+
+// diagnosing：按下按鈕到 onCall 第一次回應（或失敗）這一小段；
+// diagnosisJob：後端真正的執行狀態，透過 jobs/aiDiagnosis_{code} 監聽，
+// 不受這次呼叫本身的連線狀態或元件有沒有被重新掛載影響。兩個合起來才是
+// 完整的「現在是不是在跑」——即使這個元件剛掛載（diagnosing 一定是
+// false），只要 diagnosisJob 顯示 'running'，也要照樣顯示「診斷中」。
+const diagnosisBusy = computed(function () {
+  return diagnosing.value || (diagnosisJob.value && diagnosisJob.value.status === 'running');
+});
 
 /** 對應 firestore/schema.md §4 的 diagnosisType 列舉，翻回中文顯示用。 */
 const DIAGNOSIS_TYPE_LABEL = { deep: '深度診斷', hold: '持股續抱診斷', top3: 'TOP3推薦' };
@@ -84,7 +114,16 @@ async function runDiagnosis(fnName) {
     await callFn(fnName, { code: props.code });
     await load();
   } catch (e) {
-    diagnosisError.value = e.message || String(e);
+    // 「送出就失敗」（驗證錯誤／not-found／failed-precondition，代表後端
+    // 根本沒真的開始跑）才顯示在這裡；deadline-exceeded／unavailable 這類
+    // 連線層級的錯誤不代表後端真的失敗了（後端通常還是會繼續跑完），真正
+    // 的執行狀態一律看上面 diagnosisJob 即時監聽到的內容，這裡顯示反而會
+    // 誤導使用者以為診斷失敗了——跟 AdminView.vue「補抓區間」同一個理由。
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('not-found') >= 0 ||
+        code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      diagnosisError.value = e.message || String(e);
+    }
   } finally {
     diagnosing.value = false;
   }
@@ -103,9 +142,20 @@ function sectionsOf(content) {
 }
 
 watch(function () { return props.code; }, load);
+watch(function () { return props.code; }, subscribeDiagnosisJob, { immediate: true });
+
+// 診斷從「執行中」變成別的狀態就自動刷新（重新呼叫 getStockDetail，拿到
+// 剛寫入的診斷紀錄）——不管使用者這段期間是不是一直盯著這個瀏覽器分頁。
+watch(diagnosisJob, function (newVal, oldVal) {
+  if (newVal && newVal.status !== 'running' && oldVal && oldVal.status === 'running') {
+    load();
+  }
+});
+
 onMounted(load);
 onBeforeUnmount(function () {
   if (chartInstance) chartInstance.destroy();
+  if (unsubscribeDiagnosisJob) unsubscribeDiagnosisJob();
 });
 </script>
 
@@ -157,13 +207,17 @@ onBeforeUnmount(function () {
 
       <h3>AI 診斷紀錄</h3>
       <div class="toolbar">
-        <button type="button" :disabled="diagnosing" @click="runDiagnosis('runAiDiagnosis')">
-          {{ diagnosing ? '診斷中（約需 30 秒~1 分鐘）...' : '跑新的深度診斷' }}
+        <button type="button" :disabled="diagnosisBusy" @click="runDiagnosis('runAiDiagnosis')">
+          {{ diagnosisBusy ? '診斷中（約需 30 秒~1 分鐘）...' : '跑新的深度診斷' }}
         </button>
-        <button v-if="detail.holding" type="button" :disabled="diagnosing" @click="runDiagnosis('runPortfolioHoldDiagnosis')">
-          {{ diagnosing ? '診斷中（約需 30 秒~1 分鐘）...' : '跑新的持股續抱診斷' }}
+        <button v-if="detail.holding" type="button" :disabled="diagnosisBusy" @click="runDiagnosis('runPortfolioHoldDiagnosis')">
+          {{ diagnosisBusy ? '診斷中（約需 30 秒~1 分鐘）...' : '跑新的持股續抱診斷' }}
         </button>
       </div>
+      <p v-if="diagnosisBusy" class="hint">
+        執行狀態即時連到伺服器端，放心切到別的股票、切到背景或關掉再打開，
+        回來這裡都看得到當下真正的進度。
+      </p>
       <p v-if="diagnosisError" class="error-box">{{ diagnosisError }}</p>
       <div v-if="detail.aiDiagnoses.length" class="card-list">
         <details v-for="(d, idx) in detail.aiDiagnoses" :key="d.timestamp" class="form-card" :open="idx === 0">

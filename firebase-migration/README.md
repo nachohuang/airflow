@@ -1893,10 +1893,43 @@ SPA 內切頁再切回來，都不應該影響看得到目前執行狀況。
 狀態，不受瀏覽器分頁生命週期影響。
 
 **刻意沒做**：沒有把同一套 `jobs/{jobKey}` 機制套用到
-`runManualHistoryFetch`（單日抓取，實測數秒等級完成，風險低很多）或
-AI 診斷三支 onCall（`runAiDiagnosis`／`runPortfolioHoldDiagnosis`／
-`runAiTopPicks`）——後者理論上有同一類風險（Goodinfo 爬蟲+LLM 呼叫
-經常跑超過一分鐘），但牽涉的呼叫端分散在 `StockDetailView.vue`／
-`Top3PicksCard.vue` 兩個檔案，範圍比這次單一檔案的修正大，先只處理
-使用者實際回報、重現得出來的這一個，模式確立之後要擴大套用不難，
-等使用者確認要不要做再動。
+`runManualHistoryFetch`（單日抓取，實測數秒等級完成，風險低很多）——
+AI 診斷三支 onCall 則已經在下一節擴大套用了（使用者確認要做）。
+
+## 擴大套用：AI 診斷三支 onCall 也用 jobs/{jobKey}（2026-10-07）
+
+上一節修完「補抓區間」之後，使用者明確表示要把同一套做法也套用到 AI
+診斷（深度診斷／持股續抱診斷／Top3 推薦）——這三支 onCall 常態性會跑
+30 秒到 1 分鐘以上（查 Goodinfo + 呼叫 LLM），風險跟補抓區間完全同一類。
+
+**後端**（`functions/index.js`）：
+- `runDeepDiagnosisForCode_`（`exports.runAiDiagnosis` 跟每日自動候選名單
+  深度診斷共用的核心）跟 `exports.runPortfolioHoldDiagnosis` 都寫進同一把
+  key：`jobs/aiDiagnosis_{code}`（不分深度/續抱診斷用同一把 key，因為
+  前端目前兩顆按鈕共用同一組 loading 狀態，不會真的同時跑兩種診斷；
+  `kind` 欄位記錄是哪一種，供以後要分開顯示時用）。開始執行寫
+  `{status:'running', kind, startedAt}`，結束寫
+  `{status:'succeeded'|'failed', finishedAt, error}`。
+- `exports.runAiTopPicks` 寫進固定 key `jobs/aiTopPicks`（一次只會有一個
+  Top3 掃描在跑，不需要像診斷那樣依代號分流）。
+
+**前端**：
+- `StockDetailView.vue` 新增 `diagnosisJob`（監聽
+  `jobs/aiDiagnosis_{code}`，隨 `props.code` 改變重新訂閱）；
+  `diagnosisBusy`（`computed`）合併本地 `diagnosing`（按下按鈕到 onCall
+  第一次回應這一小段）跟 `diagnosisJob.value?.status === 'running'`
+  （後端真正的執行狀態），兩顆診斷按鈕的 disabled／文字都改用
+  `diagnosisBusy`。診斷從「執行中」變成別的狀態時自動呼叫 `load()`
+  刷新（重新讀 `getStockDetail`，拿到剛寫入的診斷紀錄），不用使用者
+  自己發現、自己重新整理。
+- `Top3PicksCard.vue` 的推薦內容（`latest`）本來就是直接監聽
+  `ai_diagnosis`，不需要額外處理；這次只補上「正在掃描中」這個過程
+  狀態的可見度（新增 `topPicksJob` 監聽 `jobs/aiTopPicks`，`scanBusy`
+  合併本地 `running` 跟它）。
+- 兩邊的 `catch` 都比照「補抓區間」的做法：只有「送出就失敗」的錯誤
+  （`invalid-argument`／`not-found`／`failed-precondition`／
+  `permission-denied`，代表後端根本沒真的開始跑）才顯示給使用者看，
+  `deadline-exceeded`／`unavailable` 這類連線層級的錯誤完全忽略——
+  真正的狀態一律看 `jobs/{jobKey}` 監聽到的內容。
+
+**驗證**：`npm test`（後端）、`npm run build`（前端）都通過。

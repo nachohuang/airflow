@@ -1,6 +1,6 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { collection, doc, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
 import { renderMarkdownLite } from '../../utils/markdownLite';
@@ -11,6 +11,18 @@ const error = ref('');
 const running = ref(false);
 const runError = ref('');
 let unsubscribe = null;
+
+// 2026-10-07：跟 StockDetailView.vue 的 AI 診斷同一個理由（見 README
+// 「補抓區間：用 jobs/{jobKey} 取代等這次呼叫本身回應」）——這張卡片顯示
+// 的 `latest` 本來就是直接監聽 `ai_diagnosis`，掃描完成會自動更新，已經
+// 不受元件重新掛載影響；但「正在掃描中」這個過程狀態本來是純本地的
+// `running`，App 切到背景或切頁再切回來一樣會被重置成「可以按」，看不出
+// 其實後端可能還在跑。改成額外監聽 `jobs/aiTopPicks` 補上這段過程可見度。
+const topPicksJob = ref(null);
+let unsubscribeJob = null;
+const scanBusy = computed(function () {
+  return running.value || (topPicksJob.value && topPicksJob.value.status === 'running');
+});
 
 /**
  * `ai_diagnosis` 的 TOP3 推薦文件 ID 是 `TOP3_{date}_top3`（每天一筆，見
@@ -35,8 +47,14 @@ onMounted(function () {
     }
   );
 });
+onMounted(function () {
+  unsubscribeJob = onSnapshot(doc(db, 'jobs', 'aiTopPicks'), function (snap) {
+    topPicksJob.value = snap.exists() ? snap.data() : null;
+  });
+});
 onUnmounted(function () {
   if (unsubscribe) unsubscribe();
+  if (unsubscribeJob) unsubscribeJob();
 });
 
 /** 跟 StockDetailView 的「跑新的深度診斷」按鈕同一個模式：呼叫 onCall，成功後
@@ -48,7 +66,14 @@ async function runNow() {
   try {
     await callFn('runAiTopPicks', {});
   } catch (e) {
-    runError.value = e.message || String(e);
+    // 「送出就失敗」才顯示（例如沒有戰報資料可以比較）；deadline-exceeded／
+    // unavailable 這類連線層級的錯誤不代表後端真的失敗，真正狀態看
+    // topPicksJob／latest 即時監聽到的內容，見 StockDetailView.vue 同一個
+    // 理由的說明。
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      runError.value = e.message || String(e);
+    }
   } finally {
     running.value = false;
   }
@@ -63,8 +88,8 @@ async function runNow() {
     </summary>
 
     <div class="toolbar">
-      <button type="button" :disabled="running" @click.prevent="runNow">
-        {{ running ? '掃描中（約需 30 秒~1 分鐘）...' : '重新掃描 Top3' }}
+      <button type="button" :disabled="scanBusy" @click.prevent="runNow">
+        {{ scanBusy ? '掃描中（約需 30 秒~1 分鐘）...' : '重新掃描 Top3' }}
       </button>
     </div>
     <p v-if="runError" class="error-box">{{ runError }}</p>

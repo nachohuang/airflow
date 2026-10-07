@@ -1219,6 +1219,7 @@ async function logAiUsage_(code, llmResult, costUsd, timestampLabel) {
  */
 async function runDeepDiagnosisForCode_(appConfig, code) {
   const startTime = Date.now();
+  await writeJobStatus_('aiDiagnosis_' + code, { status: 'running', startedAt: startTime, kind: 'deep', error: null });
   try {
     const signalDocs = await fetchSignalHistoryForCode_(code);
     const row = signalDocs[0];
@@ -1261,10 +1262,12 @@ async function runDeepDiagnosisForCode_(appConfig, code) {
     await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
     await logAiUsage_(code, llmResult, cost, timestampLabel);
     await logRun_('AI診斷', '成功', code + ' ' + (row.name || '') + ' -> ' + verdict, Date.now() - startTime);
+    await writeJobStatus_('aiDiagnosis_' + code, { status: 'succeeded', finishedAt: Date.now(), error: null });
 
     return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
   } catch (e) {
     await logRun_('AI診斷', '失敗', code + '：' + String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('aiDiagnosis_' + code, { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
     throw e;
   }
 }
@@ -1385,12 +1388,17 @@ exports.runAiTopPicks = onCall(
   Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
   async function (request) {
     assertOwnerAuth_(request);
+    const startTime = Date.now();
+    await writeJobStatus_('aiTopPicks', { status: 'running', startedAt: startTime, error: null });
     try {
       const appConfig = await fetchAppConfig_();
       const candidatesResult = await fetchLatestReportCandidates_();
-      return await runTopPicksCore_(appConfig, candidatesResult);
+      const result = await runTopPicksCore_(appConfig, candidatesResult);
+      await writeJobStatus_('aiTopPicks', { status: 'succeeded', finishedAt: Date.now(), error: null });
+      return result;
     } catch (e) {
       await logRun_('AI Top3 推薦', '失敗', String(e.message || e), 0);
+      await writeJobStatus_('aiTopPicks', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
       throw e;
     }
   }
@@ -1498,6 +1506,7 @@ exports.runPortfolioHoldDiagnosis = onCall(
     if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
     const code = utilsLib.zfill4(String(data.code).trim());
     const startTime = Date.now();
+    await writeJobStatus_('aiDiagnosis_' + code, { status: 'running', startedAt: startTime, kind: 'hold', error: null });
 
     try {
       const [appConfig, lotDocs] = await Promise.all([fetchAppConfig_(), fetchPortfolioLots_()]);
@@ -1552,10 +1561,12 @@ exports.runPortfolioHoldDiagnosis = onCall(
       await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_hold').set(record);
       await logAiUsage_(code, llmResult, cost, timestampLabel);
       await logRun_('持股續抱診斷', '成功', code + ' ' + (row.name || '') + ' -> ' + verdict, Date.now() - startTime);
+      await writeJobStatus_('aiDiagnosis_' + code, { status: 'succeeded', finishedAt: Date.now(), error: null });
 
       return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
     } catch (e) {
       await logRun_('持股續抱診斷', '失敗', code + '：' + String(e.message || e), Date.now() - startTime);
+      await writeJobStatus_('aiDiagnosis_' + code, { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
       throw e;
     }
   }
