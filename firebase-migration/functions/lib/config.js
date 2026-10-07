@@ -29,6 +29,15 @@ module.exports = {
   // （240 天日曆天數，MA60 需要 60 個交易日，其餘留給圖表本身的可視範圍）。
   STOCK_DETAIL_LOOKBACK_DAYS: 240,
 
+  // 每日排程自動補抓股價資料時，單次 tick 最多補幾天的缺口——比 apps-script
+  // 版 DataFetch.gs 的 MAX_CATCHUP_DAYS=5 大，因為那個 5 是 Apps Script 6
+  // 分鐘硬性執行上限逼出來的保守值；Cloud Functions 的逾時是
+  // generateDailyReportScheduled 自己宣告的（見 index.js），一天的抓取
+  // （3 個 TWSE 端點 + 2 次 BigQuery 查詢）實測數秒等級，10 天的缺口遠遠
+  // 不會撞到逾時。超過這個天數的缺口要用 Admin 頁面「手動補抓區間」
+  // （exports.runHistoryBackfill，範圍不受這個常數限制）處理。
+  HISTORY_FETCH_MAX_CATCHUP_DAYS: 10,
+
   // computeFactors_ 進來的 History 列，這些欄位要先轉成真正的 number。
   HISTORY_NUMERIC_COLUMNS: [
     '外資', '投信', '自營商', '三大法人買賣超股數',

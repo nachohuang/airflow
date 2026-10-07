@@ -40,6 +40,7 @@ var BQ_COLUMN_MAP = [
   { cn: '財報年/季', bq: 'fin_report_period' }
 ];
 
+var RAW_TABLE = 'history_raw'; // sourceMode: native
 var DEDUPED_VIEW = 'history_deduped'; // sourceMode: external
 var UNIFIED_VIEW = 'history_unified'; // sourceMode: materialized
 
@@ -47,14 +48,39 @@ function bqColumnNames_() {
   return BQ_COLUMN_MAP.map(function (m) { return m.bq; });
 }
 
-/** config/app 的 bigQuery 設定（projectId/dataset/sourceMode，Phase 2 已經遷移進
- *  Firestore）→ 這次查詢要讀的來源 view 的完整參照字串。跟
- *  apps-script/src/BigQuerySync.gs 的 sourceRefForBigQueryRead_ 同一套規則：
- *  materialized 用「統一讀取 view」（UNION 了 history_raw 跟 history_materialized），
- *  其餘（含 native 退回的 external 行為）用去重 view。 */
+/**
+ * config/app 的 bigQuery 設定（projectId/dataset/sourceMode，Phase 2 已經遷移進
+ * Firestore）→ 這次查詢要讀的來源表/view 的完整參照字串。跟
+ * apps-script/src/BigQuerySync.gs 的 `bqActiveSourceTableRef_` 同一套規則：
+ *   native       -> history_raw（每天直接寫入的原生表，本身就不會重複，不需要去重）
+ *   external     -> history_deduped（外部資料表去重後的 view，即時讀 Drive）
+ *   materialized -> history_unified（history_raw 每天直接寫入的新資料 UNION
+ *                   history_materialized 那份從舊 Drive 大檔案整理進來的歷史基準）
+ *
+ * **2026-10-07 修正**：這支函式原本把 native 也當成 external 處理（兩者都讀
+ * history_deduped），跟 apps-script 版的對照邏輯不一致——Firebase 版沒有
+ * Drive 這條讀取路徑（見 README「每日股價資料抓取」那節），`history_deduped`
+ * 只有「有在寫 Drive 外部資料表」才會更新；native 模式的每日新資料只會寫進
+ * history_raw（見 `buildInsertRowsSql_`／`buildDeleteDatesSql_`），不會出現在
+ * history_deduped 依賴的 history_external 裡，native 模式讀 history_deduped
+ * 只會看到「開始用 BigQuery 之前最後一次寫 Drive」那個時間點就凍結的舊資料
+ * ——這正是真實發生過的「戰報卡在很久以前的某一天不動」事故的根本原因，不是
+ * 排程沒有在跑，是讀錯了來源表。
+ */
 function sourceRefForRead_(bigQueryConfig) {
-  var view = bigQueryConfig.sourceMode === 'materialized' ? UNIFIED_VIEW : DEDUPED_VIEW;
+  var view = bigQueryConfig.sourceMode === 'materialized' ? UNIFIED_VIEW
+    : bigQueryConfig.sourceMode === 'external' ? DEDUPED_VIEW
+      : RAW_TABLE;
   return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + view;
+}
+
+/** `history_raw` 的完整參照字串——每天／補抓直接寫入的原生表，跟
+ *  `sourceRefForRead_` 可能因為 sourceMode 讀到別的 view/table 不同，寫入
+ *  一律固定寫這張表（跟 apps-script 版 `upsertHistoryRowsToBigQuery_` 一致，
+ *  不管 sourceMode 設什麼，新抓到的資料都是先進 history_raw，external／
+ *  materialized 模式各自的 view 再從這裡或 Drive 間接看到）。 */
+function rawTableRef_(bigQueryConfig) {
+  return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + RAW_TABLE;
 }
 
 /**
@@ -151,12 +177,77 @@ function mapBqRowToHistoryRow_(bqRow) {
   return row;
 }
 
+// ---------------- 每日股價資料寫入 `history_raw`（見 lib/twseFetch.js） ----------------
+
+/** 刪除「指定幾個日期」既有資料的 SQL——寫入前先清掉當天既有的資料，避免兩次
+ *  寫入同一天造成重複列（例如重新抓某一天覆蓋掉舊資料，或排程/手動補抓對同
+ *  一天重複呼叫），跟 apps-script/src/BigQuerySync.gs 的 `buildDeleteDatesSql_`
+ *  同一個用途。 */
+function buildDeleteDatesSql_(tableRef, dateStrs) {
+  var list = dateStrs.map(function (d) { return "'" + String(d).replace(/'/g, '') + "'"; }).join(', ');
+  return 'DELETE FROM `' + tableRef + '` WHERE date_str IN (' + list + ')';
+}
+
+/**
+ * 把合併好的列（`lib/twseFetch.js` 的 `mergeDayRows_` 輸出，中文欄名）寫進
+ * `history_raw` 的 INSERT DML。`history_raw` 的 schema 全部欄位都是 STRING
+ * （見 README「每日股價資料抓取」那節——跟 apps-script 版 `ensureRawTable_`
+ * 建表時的 schema 一致，數值轉型留到讀取時 `mapBqRowToHistoryRow_` 做），
+ * 所以每個值都當字串字面值處理，不用區分欄位型別。
+ *
+ * **2026-10-07 架構決定：用 DML INSERT，不是 load job**——apps-script 版把
+ * 整天的資料轉成 CSV blob 餵給 BigQuery load job（`upsertHistoryRowsToBigQuery_`）
+ * ，Node 版改用一般的 `INSERT ... VALUES (...), (...)` DML 敘述，原因：
+ *   1. 一天的資料量很小（通常一千多列），組成一條 INSERT 敘述完全不會超過
+ *      BigQuery 查詢文字 1MB 的上限，不需要 load job 的額外複雜度（準備
+ *      blob／等待 load job 完成）。
+ *   2. DML INSERT 寫入的列可以立刻被後續的 DELETE 刪除；BigQuery 的
+ *      streaming insert（`tabledata.insertAll`）寫入的列會先進「串流緩衝區」，
+ *      緩衝區裡的資料短時間內（官方說法是最多到 90 分鐘）無法被 DML 刪除或
+ *      更新——如果改用 streaming insert，補抓/重新抓某一天時的
+ *      「先刪除當天舊資料再寫入」這個 idempotent 寫法會在緩衝區未清空前
+ *      失敗，load job／一般 DML 都沒有這個限制，才是正確選擇。
+ */
+function buildInsertRowsSql_(tableRef, rows) {
+  var cols = BQ_COLUMN_MAP;
+  function escapeVal_(v) {
+    return "'" + String(v === undefined || v === null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+  }
+  var valuesSql = rows.map(function (row) {
+    return '(' + cols.map(function (m) { return escapeVal_(row[m.cn]); }).join(', ') + ')';
+  }).join(',\n');
+  return 'INSERT INTO `' + tableRef + '` (' + bqColumnNames_().join(', ') + ')\nVALUES\n' + valuesSql;
+}
+
+/** `history_raw` 目前最新的 `date_str`——每日排程／補抓用這個決定要從哪一天
+ *  開始補（下一天）。查無任何資料時回傳 null（全新安裝，或這張表還是空的），
+ *  呼叫端自行決定 fallback（通常是從今天開始抓）。 */
+function buildMaxDateSql_(tableRef) {
+  return 'SELECT MAX(date_str) AS max_date FROM `' + tableRef + '`';
+}
+
+/** 資料總覽（Admin 頁面顯示用）：日期範圍／交易日數／股票數／總列數，查的是
+ *  `sourceRef`（通常是 `sourceRefForRead_` 算出來的那個，也就是這個 App 實際
+ *  在用的來源），不是固定查 `history_raw`——這樣看到的數字跟戰報實際讀到的
+ *  資料是同一份，不會「總覽看起來資料很新，戰報卻用著別的來源算出舊結果」。
+ *  跟 apps-script 版 `buildDateBoundsSql_` 一致。 */
+function buildDateBoundsSql_(sourceRef) {
+  return 'SELECT MIN(date_str) AS min_date, MAX(date_str) AS max_date, ' +
+    'COUNT(DISTINCT date_str) AS trading_days, COUNT(DISTINCT stock_id) AS stock_count, COUNT(*) AS row_count ' +
+    'FROM `' + sourceRef + '`';
+}
+
 module.exports = {
   BQ_COLUMN_MAP: BQ_COLUMN_MAP,
   bqColumnNames_: bqColumnNames_,
   sourceRefForRead_: sourceRefForRead_,
+  rawTableRef_: rawTableRef_,
   buildHistoryRangeSql_: buildHistoryRangeSql_,
   buildHistoryRowsForCodesSql_: buildHistoryRowsForCodesSql_,
   buildStockSearchSql_: buildStockSearchSql_,
-  mapBqRowToHistoryRow_: mapBqRowToHistoryRow_
+  mapBqRowToHistoryRow_: mapBqRowToHistoryRow_,
+  buildDeleteDatesSql_: buildDeleteDatesSql_,
+  buildInsertRowsSql_: buildInsertRowsSql_,
+  buildMaxDateSql_: buildMaxDateSql_,
+  buildDateBoundsSql_: buildDateBoundsSql_
 };

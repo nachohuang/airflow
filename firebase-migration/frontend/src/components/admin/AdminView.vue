@@ -13,11 +13,18 @@ const STRATEGIES = [
   { key: 'hybrid', label: '規則式門檻＋模型排名混合' }
 ];
 
-/** 跟 apps-script/src/Index.html 的 #bqSourceModeSelect 選項文字一致。 */
+/**
+ * 2026-10-07：文字對照更新過——apps-script/src/Index.html 的 #bqSourceModeSelect
+ * 選項文字是「native 需要先匯入成月份檔案」那個年代的描述，現在 Firebase 版
+ * 的每日股價抓取（見下面「歷史股價資料」卡片）一律直接寫進 history_raw，
+ * native 模式直接讀 history_raw、是三個模式裡最新鮮的，不再需要先匯入月份
+ * 檔案這個前提。external 模式讀的是 Drive 外部資料表，新抓到的資料不會出現
+ * 在那裡（見下面「歷史股價資料」卡片的架構說明），特別標註。
+ */
 const SOURCE_MODES = [
-  { key: 'native', label: '同步進 BigQuery（native，查詢快，需要先匯入成月份檔案）' },
-  { key: 'external', label: '直接讀 Drive 檔案（external，免匯入，查詢較慢）' },
-  { key: 'materialized', label: '自動整理進 BigQuery（materialized，推薦）' }
+  { key: 'native', label: '直接讀最新寫入的資料（native，最新鮮，推薦）' },
+  { key: 'materialized', label: '整理過的歷史基準 + 最新資料（materialized）' },
+  { key: 'external', label: '即時讀 Drive 檔案（external，看不到新抓的資料，見下方說明）' }
 ];
 
 const AI_PROVIDERS = [
@@ -267,6 +274,66 @@ async function saveDailyAiSettings() {
   }
 }
 
+// ---- 歷史股價資料（資料總覽／立即抓取／補抓區間） ----
+// 跟 apps-script 版「資料總覽」頁面同一個用途，見 functions/index.js
+// getHistoryOverview／runManualHistoryFetch／runHistoryBackfill 的說明。
+const historyOverview = ref(null);
+const historyOverviewError = ref('');
+const historyOverviewLoading = ref(true);
+
+async function loadHistoryOverview() {
+  historyOverviewLoading.value = true;
+  historyOverviewError.value = '';
+  try {
+    historyOverview.value = await callFn('getHistoryOverview', {});
+  } catch (e) {
+    historyOverviewError.value = e.message || String(e);
+  } finally {
+    historyOverviewLoading.value = false;
+  }
+}
+onMounted(loadHistoryOverview);
+
+const fetchTodayRunning = ref(false);
+const fetchTodayResult = ref(null);
+const fetchTodayError = ref('');
+
+async function fetchTodayNow() {
+  fetchTodayRunning.value = true;
+  fetchTodayError.value = '';
+  fetchTodayResult.value = null;
+  try {
+    fetchTodayResult.value = await callFn('runManualHistoryFetch', {});
+    await loadHistoryOverview();
+  } catch (e) {
+    fetchTodayError.value = e.message || String(e);
+  } finally {
+    fetchTodayRunning.value = false;
+  }
+}
+
+const backfillForm = ref({ startDate: '', endDate: '', skipWeekends: true });
+const backfillRunning = ref(false);
+const backfillResult = ref(null);
+const backfillError = ref('');
+
+async function runBackfillNow() {
+  backfillRunning.value = true;
+  backfillError.value = '';
+  backfillResult.value = null;
+  try {
+    backfillResult.value = await callFn('runHistoryBackfill', {
+      startDate: backfillForm.value.startDate,
+      endDate: backfillForm.value.endDate,
+      skipWeekends: !!backfillForm.value.skipWeekends
+    });
+    await loadHistoryOverview();
+  } catch (e) {
+    backfillError.value = e.message || String(e);
+  } finally {
+    backfillRunning.value = false;
+  }
+}
 </script>
 
 <template>
@@ -473,6 +540,72 @@ async function saveDailyAiSettings() {
       </div>
 
       <div class="form-card">
+        <h3>歷史股價資料</h3>
+        <p v-if="historyOverviewError" class="error-box">{{ historyOverviewError }}</p>
+        <p v-if="historyOverviewLoading" class="hint">載入中...</p>
+        <div v-else-if="historyOverview" class="card-body">
+          <div>目前來源模式：{{ historyOverview.sourceMode }}</div>
+          <div>日期範圍：{{ historyOverview.minDate || '-' }} ~ {{ historyOverview.maxDate || '-' }}</div>
+          <div>交易日數：{{ historyOverview.tradingDays }}　股票數：{{ historyOverview.stockCount }}　總列數：{{ historyOverview.rowCount }}</div>
+        </div>
+        <div class="form-actions">
+          <button type="button" :disabled="historyOverviewLoading" @click="loadHistoryOverview">⟳ 重新整理</button>
+        </div>
+
+        <h3 style="margin-top:16px;">立即抓取今天的資料</h3>
+        <div class="form-actions">
+          <button type="button" :disabled="fetchTodayRunning" @click="fetchTodayNow">
+            {{ fetchTodayRunning ? '抓取中...' : '立即抓取今天' }}
+          </button>
+        </div>
+        <p v-if="fetchTodayError" class="error-box">{{ fetchTodayError }}</p>
+        <p v-if="fetchTodayResult" class="hint">
+          {{ fetchTodayResult.date }}：成功寫入 {{ fetchTodayResult.rowCount }} 檔股票。
+        </p>
+        <p class="hint">
+          太早按（例如收盤後不久，證交所三大法人資料還沒公布）會抓到「資料過少」
+          的錯誤，這是正常現象，晚一點再試即可。
+        </p>
+
+        <h3 style="margin-top:16px;">補抓區間</h3>
+        <form class="skip-date-form" @submit.prevent="runBackfillNow">
+          <input v-model="backfillForm.startDate" type="date" required placeholder="開始日期">
+          <input v-model="backfillForm.endDate" type="date" required placeholder="結束日期">
+          <label class="checkbox-label">
+            <input v-model="backfillForm.skipWeekends" type="checkbox">
+            跳過週六日
+          </label>
+          <button type="submit" :disabled="backfillRunning">
+            {{ backfillRunning ? '補抓中...' : '開始補抓' }}
+          </button>
+        </form>
+        <p v-if="backfillError" class="error-box">{{ backfillError }}</p>
+        <template v-if="backfillResult">
+          <p class="hint">
+            嘗試 {{ backfillResult.attempted.length }} 天，成功 {{ backfillResult.succeeded.length }} 天
+            <template v-if="backfillResult.failed.length">
+              、失敗 {{ backfillResult.failed.length }} 天：
+              {{ backfillResult.failed.map(f => f.date + '（' + f.error + '）').join('、') }}
+            </template>
+            <template v-if="backfillResult.truncated">（區間超過單次上限，請分批補抓剩下的部分）</template>
+          </p>
+        </template>
+        <p class="hint">
+          單次最多補 60 天，區間更大請分幾次呼叫。這裡刻意不套用「不跑日」
+          （`skip_dates`）設定——那是給每日自動排程用的，手動補抓區間時你明確
+          指定了日期，不應該被悄悄跳過。
+        </p>
+
+        <p class="hint">
+          <strong>架構說明：</strong>每日排程（見上面「每日排程」卡片）跟這裡的
+          手動按鈕抓到的新資料，一律直接寫進 BigQuery 的 <code>history_raw</code>
+          表，不會寫回 Google Drive——如果資料來源模式選的是 external（讀 Drive
+          外部資料表），不會看到新抓到的資料，想看到最新資料請選 native 或
+          materialized。
+        </p>
+      </div>
+
+      <div class="form-card">
         <h3>BigQuery 設定</h3>
         <label>資料來源模式
           <select :value="config.bigQuery?.sourceMode" :disabled="saving"
@@ -493,7 +626,9 @@ async function saveDailyAiSettings() {
     </template>
 
     <p class="hint dashboard-note">
-      History 補抓/整理工具還沒遷移到這裡，需要這個功能請先用舊版網頁應用程式。
+      格式錯誤日期列的檢查/清理工具還沒遷移到這裡，需要這個功能請先用舊版
+      網頁應用程式（一般情況下用不到，資料格式一直都是這個 App 自己寫入的
+      乾淨格式）。
     </p>
   </section>
 </template>

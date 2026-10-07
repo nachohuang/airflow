@@ -28,6 +28,7 @@ const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onRequest, onCall, HttpsError } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
 const { BigQuery } = require('@google-cloud/bigquery');
+const iconv = require('iconv-lite');
 
 const config = require('./lib/config');
 const bigquery = require('./lib/bigquery');
@@ -40,6 +41,7 @@ const stockDetailLib = require('./lib/stockDetail');
 const scheduleLib = require('./lib/schedule');
 const aiDiagnosisLib = require('./lib/aiDiagnosis');
 const aiUsageLib = require('./lib/aiUsage');
+const twseFetchLib = require('./lib/twseFetch');
 
 admin.initializeApp();
 
@@ -258,6 +260,140 @@ async function runDailyAnalysis_() {
   return result;
 }
 
+/**
+ * 以下是每日股價資料抓取，從 apps-script/src/DataFetch.gs 的
+ * `scheduledDailyFetch()` 整套管線搬過來——這是這個 App 的「資料從哪裡來」，
+ * 跟上面的 `runDailyAnalysis_`（從 History 已經有的資料算戰報）是完全不同的
+ * 兩件事，以前只有舊版 Apps Script 在做，Firebase 版一直沒有接手，這是這次
+ * 要補的部分。
+ *
+ * 跟 apps-script 版的架構差異：
+ * - **不重建 Drive 月份 CSV 這一層**——apps-script 版「沒設定 BigQuery 的
+ *   使用者才會寫 Drive」這個 fallback 路徑，Firebase 版用不到（這個 App
+ *   一定有設定 BigQuery，不然 Firebase 版完全沒有別的資料來源），新抓到的
+ *   資料一律直接寫 `history_raw`（跟 apps-script 版「有設定 BigQuery 就
+ *   不再寫 Drive」的行為一致，見 apps-script/src/SheetUtils.gs
+ *   `upsertHistoryRows_` 的說明）。
+ * - **不重建補抓 job 的「跨次執行續跑」機制**（`startBackfillJob`／
+ *   `processBackfillJobTick_` 那一整套存游標、排下一次觸發器繼續跑的
+ *   Script Properties 機制）——那是 Apps Script 6 分鐘硬性執行上限逼出來的
+ *   設計，Cloud Functions 的逾時是這支函式自己宣告的（見下面
+ *   `generateDailyReportScheduled` 的 `timeoutSeconds`），直接給夠時間一次
+ *   跑完就好，不需要那套複雜度，跟 AI 診斷那邊拿掉 `budgetDeadline` 機制是
+ *   同一個理由。
+ * - **可以跟舊版 Apps Script 的 `scheduledDailyFetch()` 安全並存**——兩邊
+ *   寫入同一張 `history_raw` 都是「先刪除這些日期既有資料、再寫入」的
+ *   idempotent 寫法，誰先跑完某一天的資料就是誰的結果，不會重複或衝突。
+ *   這次遷移沒有要停用舊系統的觸發器，純粹是新增一條獨立的資料來源路徑。
+ */
+
+/** TWSE 的 CSV 端點用 `Big5` 編碼回應（不是 UTF-8），Node 原生 `fetch`／
+ *  `Response.text()` 只會用 UTF-8 解碼，中文字（股票名稱）會變成亂碼——用
+ *  `iconv-lite` 手動解碼，對應 apps-script 版 `fetchCsvText_` 的
+ *  `resp.getContentText('Big5')`。 */
+async function fetchTwseCsvText_(url) {
+  const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' - ' + url);
+  const buf = Buffer.from(await resp.arrayBuffer());
+  return iconv.decode(buf, 'big5');
+}
+
+/** 抓單一交易日的三個 TWSE 端點、合併成 `history_raw` 要的列格式（中文欄名）。
+ *  dateStr 是 'yyyy-MM-dd'。BWIBBU 查無資料（例如太早查詢）不擋住整天的
+ *  資料——跟 apps-script 版的合併邏輯一致，BWIBBU 是 left join，缺值用
+ *  `twseFetchLib.mergeDayRows_` 內建的預設值補。 */
+async function fetchAndMergeOneDay_(dateStr) {
+  const ymd = twseFetchLib.toTwseDateParam_(dateStr);
+  const [t86Text, miText, bwText] = await Promise.all([
+    fetchTwseCsvText_('https://www.twse.com.tw/rwd/zh/fund/T86?date=' + ymd + '&selectType=ALL&response=csv'),
+    fetchTwseCsvText_('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=' + ymd + '&type=ALL&response=csv'),
+    fetchTwseCsvText_('https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?date=' + ymd + '&selectType=ALL&response=csv')
+  ]);
+  const t86Rows = twseFetchLib.parseT86Rows_(t86Text);
+  const miRows = twseFetchLib.parseMiIndexRows_(miText);
+  let bwRows = [];
+  try {
+    bwRows = twseFetchLib.parseBwibbuRows_(bwText);
+  } catch (e) { /* BWIBBU 缺值不擋住整天的資料，見上面的說明 */ }
+  return twseFetchLib.mergeDayRows_(t86Rows, miRows, bwRows, dateStr);
+}
+
+/** 把合併好的一天（或多天）資料寫進 BigQuery `history_raw`：先刪除這些日期
+ *  的既有資料，再用 INSERT DML 寫入新資料（見 lib/bigquery.js
+ *  `buildInsertRowsSql_` 的架構決定說明：DML 不是 load job）。 */
+async function writeHistoryRowsToBigQuery_(bigQueryConfig, rows) {
+  if (!rows || rows.length === 0) return;
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const tableRef = bigquery.rawTableRef_(bigQueryConfig);
+  const dates = Array.from(new Set(rows.map(function (r) { return r['日期']; })));
+  await client.query({ query: bigquery.buildDeleteDatesSql_(tableRef, dates) });
+  await client.query({ query: bigquery.buildInsertRowsSql_(tableRef, rows) });
+}
+
+/** `history_raw` 目前最新的 date_str，查無資料回傳 null（全新安裝，或這張表
+ *  還是空的）。 */
+async function fetchHistoryMaxDate_(bigQueryConfig) {
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const tableRef = bigquery.rawTableRef_(bigQueryConfig);
+  const [rows] = await client.query({ query: bigquery.buildMaxDateSql_(tableRef) });
+  return (rows[0] && rows[0].max_date) || null;
+}
+
+/** 抓單一天、寫進 BigQuery，回傳跟 apps-script 版 `backfillOneDay_` 同樣形狀
+ *  的結果（`kind: 'succeeded'|'failed'`，呼叫端逐天累計統計用）——單天失敗
+ *  不拋例外，讓呼叫端的迴圈可以繼續處理下一天，跟 apps-script 版「一天抓完
+ *  就立刻寫入、單日失敗不影響已成功的其他日期」同一個設計。 */
+async function fetchOneDayAndWrite_(bigQueryConfig, dateStr) {
+  try {
+    const rows = await fetchAndMergeOneDay_(dateStr);
+    await writeHistoryRowsToBigQuery_(bigQueryConfig, rows);
+    return { kind: 'succeeded', date: dateStr, rowCount: rows.length };
+  } catch (e) {
+    return { kind: 'failed', date: dateStr, error: String(e.message || e) };
+  }
+}
+
+/**
+ * 每日排程呼叫（`generateDailyReportScheduled` 算戰報之前）：找出 `history_raw`
+ * 目前最新到哪一天，逐天補抓到「今天」為止（跳過週末／`skip_dates`，見
+ * `scheduleLib.buildCatchupDateList_`），最多補 `config.HISTORY_FETCH_MAX_CATCHUP_DAYS`
+ * 天——正常情況下只差一天，缺口較大時交給 `exports.runHistoryBackfill`
+ * （Admin 頁面手動觸發，範圍不受這裡的上限限制）。
+ *
+ * 不拋例外：抓取整個失敗（例如 TWSE 暫時連不上、BigQuery 查詢失敗）不該讓
+ * 後面的「重新計算戰報」步驟也跟著不跑——沒抓到新資料，戰報就照舊用
+ * BigQuery 裡目前最新的既有資料算一次，不會是空白結果，跟 apps-script 版
+ * `runScheduleStep2_` 的「這步失敗不代表後面步驟沒有意義」設計一致（那邊是
+ * `partial` 不算整步失敗；這裡更保守，連「整個 catchup 都失敗」也不拋）。
+ */
+async function runDailyCatchupFetch_(appConfig, skipDates) {
+  if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+    return { skipped: true, reason: 'config/app 沒有設定 BigQuery 專案 ID' };
+  }
+  try {
+    const maxDate = await fetchHistoryMaxDate_(appConfig.bigQuery);
+    const todayStr = utilsLib.todayStrTaipei_();
+    const fromDateStr = maxDate
+      ? new Date(new Date(maxDate + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10)
+      : todayStr;
+    const dates = scheduleLib.buildCatchupDateList_(fromDateStr, todayStr, {
+      skipWeekends: appConfig.skipWeekends,
+      skipDates: skipDates,
+      maxDays: config.HISTORY_FETCH_MAX_CATCHUP_DAYS
+    });
+
+    const succeeded = [];
+    const failed = [];
+    for (const dateStr of dates) {
+      const result = await fetchOneDayAndWrite_(appConfig.bigQuery, dateStr);
+      if (result.kind === 'succeeded') succeeded.push(result.date); else failed.push(result);
+    }
+    return { skipped: false, maxDateBefore: maxDate, attempted: dates, succeeded: succeeded, failed: failed };
+  } catch (e) {
+    return { skipped: true, reason: String(e.message || e) };
+  }
+}
+
 /** 全市場 1000+ 檔股票 x ANALYSIS_LOOKBACK_DAYS(150)天的原始 History，實測需要
  *  的記憶體比 Cloud Functions 2nd gen 預設的 256 MiB 略高（部署後實測跑到
  *  256 MiB 就被 OOM 砍掉，見 firebase-migration/README.md 的部署驗證紀錄）——
@@ -292,14 +428,15 @@ async function fetchSkipDates_() {
  * 絕大多數的 tick 只做兩次 Firestore 讀取就直接 return，成本可以忽略（一天
  * 288 次 tick，遠低於 Cloud Functions 免費額度）。
  *
- * `timeoutSeconds: 540`（蓋掉 `RUNTIME_OPTS_` 的 180，見下面 `Object.assign`
+ * `timeoutSeconds: 600`（蓋掉 `RUNTIME_OPTS_` 的 180，見下面 `Object.assign`
  * 的參數順序——後面的物件屬性覆蓋前面的，所以客製化選項要放在 `RUNTIME_OPTS_`
- * 後面，不是像其他呼叫端那樣放前面）：真正算戰報那一次 tick，寫完戰報之後如果
- * `config/app.aiDailyEnabled` 開著，還要接著跑 Top3 橫向比較＋候選名單橫向
- * 比較＋逐檔深度診斷（見 `runDailyAiDiagnosisForTopPicks_`），候選數上限 10
- * 檔（`setAiDailySettings` 的驗證邏輯搬到 Admin 頁面的輸入框也一樣夾在
- * 3~10），180 秒不夠用；540 秒（9 分鐘）在這個上限下留了充足餘裕，不需要像
- * apps-script 版那樣另外維護一套 `budgetDeadline` 提早跳過剩餘代號的機制
+ * 後面，不是像其他呼叫端那樣放前面）：真正算戰報那一次 tick，現在開頭會先跑
+ * `runDailyCatchupFetch_`（補抓最新股價資料，見該函式的說明，最多
+ * `HISTORY_FETCH_MAX_CATCHUP_DAYS`＝10 天，實測一天數秒等級），寫完戰報之後
+ * 如果 `config/app.aiDailyEnabled` 開著，還要接著跑 Top3 橫向比較＋候選名單
+ * 橫向比較＋逐檔深度診斷（見 `runDailyAiDiagnosisForTopPicks_`，候選數上限
+ * 10 檔）。180 秒遠遠不夠用；600 秒（10 分鐘）在這些上限下留了充足餘裕，
+ * 不需要像 apps-script 版那樣另外維護一套 `budgetDeadline` 提早收手的機制
  * ——那是 Apps Script 6 分鐘硬性執行上限逼出來的設計，Cloud Functions 的逾時
  * 是這支函式自己宣告的，直接給夠就不會撞到。需要 `secrets: ['GEMINI_API_KEY']`
  * ——這支函式現在也會直接呼叫 Gemini，不是只靠 `runDailyAiDiagnosisForTopPicks_`
@@ -307,7 +444,7 @@ async function fetchSkipDates_() {
  * 各自獨立宣告，見 `runAiDiagnosis`/`getAiKeyStatus` 的說明）。
  */
 exports.generateDailyReportScheduled = onSchedule(
-  Object.assign({}, RUNTIME_OPTS_, { schedule: '*/5 * * * *', timeoutSeconds: 540, secrets: ['GEMINI_API_KEY'] }),
+  Object.assign({}, RUNTIME_OPTS_, { schedule: '*/5 * * * *', timeoutSeconds: 600, secrets: ['GEMINI_API_KEY'] }),
   async function () {
     const appConfig = await fetchAppConfig_();
     const skipDates = await fetchSkipDates_();
@@ -318,6 +455,7 @@ exports.generateDailyReportScheduled = onSchedule(
       skipDates: skipDates
     });
     if (!should) return;
+    await runDailyCatchupFetch_(appConfig, skipDates);
     await runDailyAnalysis_();
     if (appConfig.aiDailyEnabled) {
       // runDailyAiDiagnosisForTopPicks_ 內部已經把 Top3／候選名單這兩段各自包了
@@ -346,6 +484,100 @@ exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res)
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
+});
+
+/** data: {date?}。手動抓取單一天的股價資料並寫進 BigQuery，不帶 date 時抓
+ *  今天（台北時間）——對應 apps-script 版「立即更新今日資料」按鈕
+ *  （`runManualFetchToday`）。回傳這一天的抓取結果，方便 Admin 頁面顯示／
+ *  部署後用 curl 直接驗證有沒有接線成功。 */
+exports.runManualHistoryFetch = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const dateStr = data.date || utilsLib.todayStrTaipei_();
+  const appConfig = await fetchAppConfig_();
+  if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+    throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+  }
+  const result = await fetchOneDayAndWrite_(appConfig.bigQuery, dateStr);
+  if (result.kind === 'failed') throw new HttpsError('internal', result.error);
+  return result;
+});
+
+/**
+ * data: {startDate, endDate}（皆為 'yyyy-MM-dd'，含頭尾）。手動補抓一段區間
+ * 的股價資料——對應 apps-script 版「資料總覽」頁面的「重新抓取/合併此區間」
+ * 背景 job（`startBackfillJob`），差別是這裡同步跑完才回傳，不是排一個背景
+ * job 輪詢進度：Cloud Functions 沒有 Apps Script 6 分鐘的硬性執行上限，不需要
+ * 那套跨次執行續跑的機制（見本檔案「每日股價資料抓取」那段開頭的完整說明）。
+ *
+ * 區間長度上限 `BACKFILL_MAX_RANGE_DAYS`——不是 `HISTORY_FETCH_MAX_CATCHUP_DAYS`
+ * 那個給「每日自動補抓」用的保守上限，這支是使用者明確要補一段區間時用的，
+ * 給更寬裕的額度，但還是要有上限：避免使用者不小心填了超大區間（例如忘記
+ * 填年份變成補好幾年），單次呼叫跑太久而撞上這支函式自己宣告的逾時，真的
+ * 要補更大的區間，分批呼叫幾次即可（每次呼叫都是獨立的，不會互相干擾，
+ * 跟 apps-script 版「重複呼叫同一天會先刪除再寫入」的 idempotent 設計一致）。
+ */
+var BACKFILL_MAX_RANGE_DAYS = 60;
+
+exports.runHistoryBackfill = onCall(
+  Object.assign({}, RUNTIME_OPTS_, { timeoutSeconds: 540 }),
+  async function (request) {
+    assertOwnerAuth_(request);
+    const data = request.data || {};
+    if (!data.startDate || !data.endDate) {
+      throw new HttpsError('invalid-argument', '請提供 startDate／endDate（yyyy-MM-dd）。');
+    }
+    const appConfig = await fetchAppConfig_();
+    if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+      throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+    }
+
+    const dates = scheduleLib.buildCatchupDateList_(data.startDate, data.endDate, {
+      skipWeekends: !!data.skipWeekends,
+      maxDays: BACKFILL_MAX_RANGE_DAYS
+    });
+    if (dates.length === 0) {
+      throw new HttpsError('invalid-argument', '這個區間沒有任何要補抓的日期（確認 startDate 不晚於 endDate）。');
+    }
+
+    const succeeded = [];
+    const failed = [];
+    for (const dateStr of dates) {
+      const result = await fetchOneDayAndWrite_(appConfig.bigQuery, dateStr);
+      if (result.kind === 'succeeded') succeeded.push(result.date); else failed.push(result);
+    }
+    return {
+      attempted: dates,
+      succeeded: succeeded,
+      failed: failed,
+      truncated: dates.length >= BACKFILL_MAX_RANGE_DAYS
+    };
+  }
+);
+
+/** 給 Admin 頁面「資料總覽」顯示：目前這個 App 實際在用的來源（依
+ *  `config/app.bigQuery.sourceMode` 決定，見 `bigquery.sourceRefForRead_`）
+ *  的日期範圍／交易日數／股票數／總列數——跟 apps-script 版 `getHistoryOverview`
+ *  同一個用途，查的是「App 實際讀到的來源」而不是固定查 `history_raw`，
+ *  這樣畫面上的數字才會跟戰報實際算出來的結果對得上。 */
+exports.getHistoryOverview = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const appConfig = await fetchAppConfig_();
+  if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+    throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+  }
+  const client = new BigQuery({ projectId: appConfig.bigQuery.projectId });
+  const sourceRef = bigquery.sourceRefForRead_(appConfig.bigQuery);
+  const [rows] = await client.query({ query: bigquery.buildDateBoundsSql_(sourceRef) });
+  const row = rows[0] || {};
+  return {
+    sourceMode: appConfig.bigQuery.sourceMode,
+    minDate: row.min_date || null,
+    maxDate: row.max_date || null,
+    tradingDays: Number(row.trading_days) || 0,
+    stockCount: Number(row.stock_count) || 0,
+    rowCount: Number(row.row_count) || 0
+  };
 });
 
 /**

@@ -1,13 +1,24 @@
 const assert = require('assert');
 const bq = require('../lib/bigquery');
 
-// --- sourceRefForRead_：external/native 用去重 view，materialized 用統一讀取 view ---
+// --- sourceRefForRead_：native 用原生表，external 用去重 view，materialized 用
+//    統一讀取 view——對照 apps-script/src/BigQuerySync.gs 的 bqActiveSourceTableRef_
+//    （2026-10-07 修正：native 原本誤當成跟 external 一樣讀 history_deduped，
+//    這份測試原本斷言的就是那個錯誤行為，見 lib/bigquery.js sourceRefForRead_
+//    的完整說明） ---
 {
   const cfg = { projectId: 'my-proj', dataset: 'twse_factor_model', sourceMode: 'native' };
-  assert.strictEqual(bq.sourceRefForRead_(cfg), 'my-proj.twse_factor_model.history_deduped');
+  assert.strictEqual(bq.sourceRefForRead_(cfg), 'my-proj.twse_factor_model.history_raw');
   assert.strictEqual(bq.sourceRefForRead_(Object.assign({}, cfg, { sourceMode: 'external' })), 'my-proj.twse_factor_model.history_deduped');
   assert.strictEqual(bq.sourceRefForRead_(Object.assign({}, cfg, { sourceMode: 'materialized' })), 'my-proj.twse_factor_model.history_unified');
   console.log('Test sourceRefForRead_ passed.');
+}
+
+// --- rawTableRef_：寫入固定目標，跟 sourceMode 無關 ---
+{
+  const cfg = { projectId: 'my-proj', dataset: 'twse_factor_model', sourceMode: 'materialized' };
+  assert.strictEqual(bq.rawTableRef_(cfg), 'my-proj.twse_factor_model.history_raw');
+  console.log('Test rawTableRef_ (write target is sourceMode-independent) passed.');
 }
 
 // --- buildHistoryRangeSql_：日期區間條件、全部欄位都要有、沒帶 start/end 時不加 WHERE ---
@@ -127,6 +138,48 @@ const bq = require('../lib/bigquery');
   const row3 = bq.mapBqRowToHistoryRow_({ date_str: 'x', stock_id: '00635u' });
   assert.strictEqual(row3['證券代號'], '00635U', 'ETF 代號要統一轉大寫，跟乾淨格式的同一檔股票合併');
   console.log('Test mapBqRowToHistoryRow_ (dirty-but-valid stock_id variants normalize to the same code) passed.');
+}
+
+// --- buildDeleteDatesSql_：IN 清單、單引號防注入 ---
+{
+  const sql = bq.buildDeleteDatesSql_('proj.ds.history_raw', ['2026-10-06', "2026-10-07'; DROP TABLE x; --"]);
+  assert.ok(sql.indexOf("DELETE FROM `proj.ds.history_raw`") === 0);
+  assert.ok(sql.indexOf("'2026-10-06'") !== -1);
+  assert.ok(sql.indexOf("DROP TABLE") !== -1, '惡意字串本身還在，但單引號應該已經被濾掉');
+  assert.strictEqual((sql.match(/'/g) || []).length % 2, 0, '單引號要維持成對，不能讓注入字串自己帶的引號逃脫字串字面值');
+  console.log('Test buildDeleteDatesSql_ (IN list, strips embedded single quotes) passed.');
+}
+
+// --- buildInsertRowsSql_：欄位順序跟 BQ_COLUMN_MAP 一致、值跳脫單引號/反斜線 ---
+{
+  const rows = [
+    { 日期: '2026-10-07', 證券代號: '2330', 證券名稱: "台積電's test", 外資: 1000 }
+  ];
+  const sql = bq.buildInsertRowsSql_('proj.ds.history_raw', rows);
+  assert.ok(sql.indexOf('INSERT INTO `proj.ds.history_raw` (date_str, stock_id, stock_name,') === 0);
+  assert.ok(sql.indexOf("'2026-10-07'") !== -1);
+  assert.ok(sql.indexOf("'2330'") !== -1);
+  assert.ok(sql.indexOf("\\'") !== -1, '名稱裡的單引號要被跳脫');
+  // 缺欄位的值要變成空字串字面值，不是 'undefined'/'null' 這種字面文字
+  assert.ok(sql.indexOf("''") !== -1, '沒提供的欄位（例如本益比等）要補空字串，不是 undefined');
+  console.log('Test buildInsertRowsSql_ (column order matches BQ_COLUMN_MAP, escapes quotes) passed.');
+}
+
+// --- buildMaxDateSql_ ---
+{
+  const sql = bq.buildMaxDateSql_('proj.ds.history_raw');
+  assert.strictEqual(sql, 'SELECT MAX(date_str) AS max_date FROM `proj.ds.history_raw`');
+  console.log('Test buildMaxDateSql_ passed.');
+}
+
+// --- buildDateBoundsSql_ ---
+{
+  const sql = bq.buildDateBoundsSql_('proj.ds.history_raw');
+  assert.ok(sql.indexOf('MIN(date_str) AS min_date') !== -1);
+  assert.ok(sql.indexOf('MAX(date_str) AS max_date') !== -1);
+  assert.ok(sql.indexOf('COUNT(DISTINCT stock_id) AS stock_count') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_raw`') !== -1);
+  console.log('Test buildDateBoundsSql_ passed.');
 }
 
 console.log('All bigquery.js tests passed.');

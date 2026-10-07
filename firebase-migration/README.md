@@ -1584,3 +1584,145 @@ apps-script 版寫進 Sheets 的 `AiUsage` 分頁，這版改寫進 Firestore �
 ⚠️ 沒辦法在這個開發環境實際驗證——純邏輯的分組/加總已經靠單元測試驗證
 過，但「真的打 LLM 之後 `ai_usage` 有沒有正確寫入一筆、Admin 頁面的
 每日明細表格算得對不對」需要部署後、實際跑過幾次 AI 診斷才能確認。
+
+## 每日股價資料抓取（2026-10-07）
+
+**背景**：使用者發現戰報卡在某一天不再更新。追查後發現這是這次遷移從一
+開始就留下的一個缺口——**Firebase 版從來沒有接手「每天向證交所（TWSE）
+抓最新股價資料」這件事**。`generateDailyReportScheduled` 一直以來只做
+「用 BigQuery 裡已經有的資料算戰報」，真正負責把新資料抓進 BigQuery 的，
+從頭到尾都還是舊版 Apps Script 的 `scheduledDailyFetch()`
+（`apps-script/src/DataFetch.gs`）——這支函式一直都還留著在跑，Firebase
+版只是從來沒有自己的對應實作，完全仰賴舊系統這條管線繼續運作。
+
+這一節把這條管線整套搬過來（對應 `apps-script/src/DataFetch.gs` 的
+`scheduledDailyFetch()`／`fetchT86_`／`fetchMiIndex_`／`fetchBwibbu_`／
+`fetchAndMergeOneDay_`／`runScheduleStep1_`／`runScheduleStep2_`／
+`startBackfillJob` 這一組），Firebase 版現在自己就能抓最新資料，不再
+單方面依賴舊系統繼續運作（兩邊可以安全並存，見下面的說明）。
+
+### 附帶修正：`sourceRefForRead_` 的 native 模式讀錯來源表
+
+**這是這次追查順便挖出來的一個真實存在的 bug**，獨立於上面「沒有抓資料
+管線」這件事。`functions/lib/bigquery.js` 的 `sourceRefForRead_`
+（Phase 3 複製時寫的）原本把 `native` 模式也當成跟 `external` 一樣讀
+`history_deduped`，但對照 `apps-script/src/BigQuerySync.gs` 的
+`bqActiveSourceTableRef_`，`native` 模式應該直接讀 `history_raw`（每天
+直接寫入的原生表）。
+
+`history_deduped` 是 `history_external`（讀 Google Drive 檔案的 BigQuery
+外部資料表）去重後的 view——只有「真的有在寫 Drive」才會更新，而
+apps-script 版只要設定了 BigQuery 專案，新資料一律只寫 `history_raw`，
+不再寫 Drive（見 `apps-script/src/SheetUtils.gs` `upsertHistoryRows_`
+的說明）。如果正式環境的 `config/app.bigQuery.sourceMode` 當時設的是
+`native`，Firebase 版讀到的就會是「開始用 BigQuery 之前最後一次寫
+Drive」那個時間點就凍結住的舊資料——不管 `history_raw` 裡新資料寫得再
+怎麼勤快，`native` 模式下的戰報都看不到，這完全可以是「卡住不動」這個
+症狀的根本原因，獨立於排程本身跑不跑得動。已經修正，見
+`functions/lib/bigquery.js` 該函式的完整說明與 `test/bigquery.test.js`
+的對應測試。
+
+### 架構決定：跟 apps-script 版的差異
+
+1. **不重建 Drive 月份 CSV 這一層**——apps-script 版「沒設定 BigQuery
+   專案的使用者改寫 Drive 月份 CSV 檔案」這個 fallback 路徑，Firebase
+   版用不到（這個 App 的 `config/app.bigQuery.projectId` 一定有設定，
+   不然整個戰報計算都動不了），新抓到的資料一律直接寫
+   `history_raw`（跟 apps-script 版「設定了 BigQuery 之後就不再寫
+   Drive」的既有行為完全一致，不是新發明的簡化）。
+2. **寫入用 DML INSERT，不是 CSV blob + load job**——apps-script 版把
+   整天的資料轉成 CSV blob 餵給 BigQuery load job
+   （`upsertHistoryRowsToBigQuery_`）。Node 版改用一般的
+   `INSERT ... VALUES (...), (...)` DML 敘述：一天的資料量小（通常一千
+   多列），組成一條 INSERT 完全不會超過 BigQuery 查詢文字 1MB 的上限；
+   而且 DML INSERT 寫入的列可以立刻被後續的 DELETE 刪除，BigQuery 的
+   streaming insert（`tabledata.insertAll`）寫入的列會先進「串流緩衝
+   區」，緩衝區裡的資料短時間內（官方說法最多到 90 分鐘）無法被 DML
+   刪除或更新——如果改用 streaming insert，補抓/重新抓某一天時「先刪除
+   當天舊資料再寫入」這個 idempotent 寫法會在緩衝區未清空前失敗。見
+   `functions/lib/bigquery.js` `buildInsertRowsSql_` 的完整說明。
+3. **不重建補抓 job 的「跨次執行續跑」機制**——apps-script 版
+   `startBackfillJob`／`processBackfillJobTick_` 那一整套在 Script
+   Properties 存游標、排下一次觸發器繼續跑的機制，是 Apps Script 6
+   分鐘硬性執行上限逼出來的設計。Cloud Functions 的逾時是函式自己宣告
+   的（`exports.runHistoryBackfill` 宣告 540 秒），不需要那套複雜度，
+   跟 AI 診斷那邊拿掉 `budgetDeadline` 機制是同一個理由——改成「單次呼叫
+   同步跑完，區間太大就分批呼叫」，每次呼叫都是獨立、idempotent 的。
+4. **每日自動補抓的天數上限從 5 調大到 10**
+   （`config.HISTORY_FETCH_MAX_CATCHUP_DAYS`）——apps-script 版的
+   `MAX_CATCHUP_DAYS = 5` 一樣是 Apps Script 執行上限逼出來的保守值；
+   Cloud Functions 這裡的逾時是 `generateDailyReportScheduled` 自己
+   宣告的 600 秒，一天的抓取（3 個 TWSE 端點 + 2 次 BigQuery 查詢）實測
+   數秒等級，10 天缺口遠遠不會撞到逾時。更大的缺口交給 Admin 頁面的
+   「補抓區間」工具（單次上限 60 天，不受這個常數限制）。
+5. **可以跟舊版 Apps Script 的 `scheduledDailyFetch()` 安全並存**——兩邊
+   寫入同一張 `history_raw` 都是「先刪除這些日期既有資料、再寫入」的
+   idempotent 寫法，誰先跑完某一天的資料就是誰的結果，不會重複或衝突。
+   **這次遷移沒有停用舊系統的觸發器**，純粹是新增一條獨立的資料來源
+   路徑——即使 Firebase 版這條管線有問題，舊系統仍然繼續運作當備援，
+   反之亦然。要不要正式停用舊版 Apps Script，是後續獨立的決定。
+
+### 實作
+
+- **`functions/lib/twseFetch.js`**（純邏輯，`test/twseFetch.test.js`
+  驗證過）：`parseT86Rows_`／`parseMiIndexRows_`／`parseBwibbuRows_`
+  （從 Big5 解碼後的 CSV 文字解析成列，TWSE 回應格式的怪癖——跳過頁尾
+  註記列、`="..."` 包裝的代號、先找區塊標題再找標題列——都是照抄
+  apps-script 版已經實測對過的規則，不是重新設計）、`mergeDayRows_`
+  （T86 inner join MI_INDEX、BWIBBU left join，缺值補預設值）、
+  `parseCsvLine_`（取代 `Utilities.parseCsv`）。跟 apps-script 版的
+  差異：不維護 `yyyy/MM/dd`（給 Drive CSV 用）跟 `yyyy-MM-dd`（給
+  BigQuery 用）兩種日期格式，合併出來的「日期」欄位直接就是
+  `yyyy-MM-dd`（見檔案開頭的架構差異說明）。
+- **`functions/lib/schedule.js`** 新增 `buildCatchupDateList_`：從
+  「目前最新資料日期的下一天」列到「今天」，跳過週末／`skip_dates`，
+  有 `maxDays` 上限——純函式化 apps-script 版 `runScheduleStep2_` 的
+  「該抓哪幾天」這一步。
+- **`functions/lib/bigquery.js`** 新增 `rawTableRef_`／
+  `buildDeleteDatesSql_`／`buildInsertRowsSql_`／`buildMaxDateSql_`／
+  `buildDateBoundsSql_`，並修正 `sourceRefForRead_`（見上面的 bug 說明）。
+- **`functions/index.js`**：
+  - `fetchTwseCsvText_`——TWSE 的 CSV 端點用 `Big5` 編碼回應（不是
+    UTF-8），Node 原生 `fetch`／`Response.text()` 只會用 UTF-8 解碼，
+    改用 `iconv-lite`（新增的 npm 依賴）手動解碼，對應 apps-script 版
+    `fetchCsvText_` 的 `resp.getContentText('Big5')`。
+  - `fetchAndMergeOneDay_`／`writeHistoryRowsToBigQuery_`／
+    `fetchHistoryMaxDate_`／`fetchOneDayAndWrite_`——單日抓取/寫入的
+    完整流程，單日失敗不拋例外（回傳 `{kind:'failed', error}`），跟
+    apps-script 版「一天抓完就立刻寫入、單日失敗不影響其他日期」同一個
+    設計。
+  - `runDailyCatchupFetch_`——每日排程呼叫，找出目前最新資料日期、補抓
+    到今天為止；整個補抓失敗（例如 TWSE 暫時連不上）不拋例外，不會讓
+    後面「重新計算戰報」的步驟也跟著不跑——沒抓到新資料，戰報就照舊用
+    BigQuery 裡既有的最新資料算一次。
+  - `exports.generateDailyReportScheduled` 現在在算戰報之前先呼叫
+    `runDailyCatchupFetch_`；`timeoutSeconds` 從 540 調到 600，多留一點
+    餘裕給抓取這一步。
+  - `exports.runManualHistoryFetch`（`onCall`，data: `{date?}`）——手動
+    抓取單一天，對應 apps-script 版「立即更新今日資料」按鈕。
+  - `exports.runHistoryBackfill`（`onCall`，data:
+    `{startDate, endDate, skipWeekends?}`）——手動補抓一段區間，單次
+    上限 60 天，同步跑完才回傳（不像 apps-script 版排一個背景 job 輪詢
+    進度，見上面架構決定 #3）。刻意不套用 `skip_dates`——那是給每日
+    自動排程用的，手動補抓區間時使用者已經明確指定了日期，不該被悄悄
+    跳過。
+  - `exports.getHistoryOverview`（`onCall`）——日期範圍／交易日數／
+    股票數／總列數，查的是 `sourceRefForRead_` 算出來的「這個 App 實際
+    在用的來源」，不是固定查 `history_raw`，對應 apps-script 版
+    `getHistoryOverview`。
+- **Admin 頁面**新增「歷史股價資料」卡片：資料總覽、「立即抓取今天」
+  按鈕、「補抓區間」表單（起訖日期＋跳過週末 checkbox），並更新
+  「BigQuery 設定」卡片的來源模式說明文字（舊文字是「native 需要先
+  匯入成月份檔案」那個年代的描述，現在 native 模式直接讀最新寫入的
+  `history_raw`，不再需要先匯入月份檔案；external 模式新增警語——
+  新抓到的資料不會出現在那裡）。
+
+⚠️ 沒辦法在這個開發環境實際驗證——`lib/twseFetch.js`／`lib/schedule.js`／
+`lib/bigquery.js` 的純邏輯都靠單元測試驗證過（CSV 解析用手寫的仿真
+fixture，不是真的 TWSE 回應；這個開發環境的網路政策也不開放連到
+twse.com.tw，沒辦法直接測試真實端點），但「真的連得上 TWSE 三個端點、
+Big5 解碼正不正確、BigQuery DML 寫入能不能成功」都需要部署後才能確認。
+部署後的驗證順序建議：先用 Admin 頁面的「立即抓取今天」測試單日抓取
+（最容易看出端點格式/編碼有沒有問題），確認沒問題後再用「補抓區間」
+補回缺的那幾天，最後看「每日排程」是不是接上了（下一次排程 tick 的戰報
+日期有沒有跟著動）。

@@ -63,8 +63,44 @@ function shouldRunDailyReport_(now, opts) {
   return true;
 }
 
+/**
+ * 從 fromDateStr（含）到 toDateStr（含）逐天列出「需要補抓股價資料」的日期
+ * 字串，跳過週末（skipWeekends）／`skipDates` 集合裡的日期，最多列出 maxDays
+ * 天（超過的部分直接捨棄——自動每日排程只處理「正常情況下只差一兩天」的小
+ * 缺口，缺口真的很大時要另外用「手動補抓區間」分批處理，不是這支函式要解決
+ * 的問題，見 index.js `exports.runHistoryBackfill` 的說明）。
+ *
+ * 跟 apps-script/src/DataFetch.gs 的 `runScheduleStep2_` 邏輯等價，純函式化
+ * 方便測試——那邊是「逐天呼叫 I/O＋累計結果」混在一起，這裡先把「該抓哪幾天」
+ * 這一步獨立出來，I/O（實際呼叫 TWSE／寫 BigQuery）留給 index.js。
+ *
+ * `fromDateStr` 用純字串比較跟 `toDateStr` 比大小（`'yyyy-MM-dd'` 字典序剛好
+ * 等於時間序），`fromDateStr > toDateStr`（已經追上進度）自然回傳空陣列，不用
+ * 額外判斷。
+ */
+function buildCatchupDateList_(fromDateStr, toDateStr, opts) {
+  opts = opts || {};
+  var skipWeekends = opts.skipWeekends === null || opts.skipWeekends === undefined ? true : opts.skipWeekends;
+  var skipDates = opts.skipDates || new Set();
+  var maxDays = opts.maxDays || 10;
+
+  var result = [];
+  if (fromDateStr > toDateStr) return result;
+
+  var cur = new Date(fromDateStr + 'T00:00:00Z');
+  var end = new Date(toDateStr + 'T00:00:00Z');
+  while (cur.getTime() <= end.getTime() && result.length < maxDays) {
+    var d = cur.toISOString().slice(0, 10);
+    var isWeekendDay = skipWeekends && (cur.getUTCDay() === 0 || cur.getUTCDay() === 6);
+    if (!isWeekendDay && !skipDates.has(d)) result.push(d);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return result;
+}
+
 module.exports = {
   shouldRunDailyReport_: shouldRunDailyReport_,
   isScheduledTick_: isScheduledTick_,
-  isWeekend_: isWeekend_
+  isWeekend_: isWeekend_,
+  buildCatchupDateList_: buildCatchupDateList_
 };

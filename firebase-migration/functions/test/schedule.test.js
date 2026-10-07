@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { shouldRunDailyReport_, isScheduledTick_, isWeekend_ } = require('../lib/schedule');
+const { shouldRunDailyReport_, isScheduledTick_, isWeekend_, buildCatchupDateList_ } = require('../lib/schedule');
 
 // 2026-10-05 是週一，2026-10-04 是週日，2026-10-03 是週六（跟本次對話的日期一致）。
 function utc(y, m, d, h, min) {
@@ -62,6 +62,41 @@ function utc(y, m, d, h, min) {
     true
   );
   console.log('Test 3 (shouldRunDailyReport_ combines tick/weekend/skipDates checks) passed.');
+}
+
+// --- 4. buildCatchupDateList_：逐天列出需要補抓的日期，跳過週末/skipDates，有上限 ---
+{
+  // 10/3（六）~10/6（二）：預設跳過週末，應該只剩 10/5（一）跟 10/6（二）
+  assert.deepStrictEqual(
+    buildCatchupDateList_('2026-10-03', '2026-10-06', {}),
+    ['2026-10-05', '2026-10-06']
+  );
+
+  // skipWeekends:false 時六日都要列出來
+  assert.deepStrictEqual(
+    buildCatchupDateList_('2026-10-03', '2026-10-06', { skipWeekends: false }),
+    ['2026-10-03', '2026-10-04', '2026-10-05', '2026-10-06']
+  );
+
+  // skipDates 命中的那天也要跳過
+  assert.deepStrictEqual(
+    buildCatchupDateList_('2026-10-05', '2026-10-07', { skipDates: new Set(['2026-10-06']) }),
+    ['2026-10-05', '2026-10-07']
+  );
+
+  // maxDays 上限：缺口比上限大時只列出前 maxDays 天（不含被跳過的週末，仍然只數「真的列出來」的天數）
+  assert.deepStrictEqual(
+    buildCatchupDateList_('2026-10-05', '2026-10-20', { maxDays: 3, skipWeekends: false }),
+    ['2026-10-05', '2026-10-06', '2026-10-07']
+  );
+
+  // from > to（已經追上進度）回傳空陣列，不報錯
+  assert.deepStrictEqual(buildCatchupDateList_('2026-10-07', '2026-10-05', {}), []);
+
+  // from === to 且剛好是平日，回傳剛好那一天
+  assert.deepStrictEqual(buildCatchupDateList_('2026-10-05', '2026-10-05', {}), ['2026-10-05']);
+
+  console.log('Test 4 (buildCatchupDateList_ lists trading days, skipping weekends/skipDates, capped at maxDays) passed.');
 }
 
 console.log('All schedule.js tests passed.');
