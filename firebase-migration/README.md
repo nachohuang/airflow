@@ -1311,21 +1311,36 @@ Claude/Gemini 呼叫、費用估算這些 I/O 跟計算邏輯大部分都已經�
   `lib/aiDiagnosis.js` 測過，這裡只是把資料接上外部端點。
 
 **Secret Manager**：`runAiDiagnosis` 用 Cloud Functions v2 的
-`secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']` 選項——部署時
-Firebase CLI 會自動把這兩個密鑰的值注入成 `process.env.ANTHROPIC_API_KEY`／
-`process.env.GEMINI_API_KEY`，並自動只授權這支函式的執行身分讀取這兩個
-密鑰，不需要手動設定 IAM。密鑰本身要先建立（這個開發環境沒辦法代勞）：
+`secrets: ['GEMINI_API_KEY']` 選項——部署時 Firebase CLI 會自動把這個
+密鑰的值注入成 `process.env.GEMINI_API_KEY`，並自動只授權這支函式的
+執行身分讀取這個密鑰，不需要手動設定 IAM。密鑰本身要先建立（這個開發
+環境沒辦法代勞）：
 
 ```bash
-firebase functions:secrets:set ANTHROPIC_API_KEY
 firebase functions:secrets:set GEMINI_API_KEY
-# 各自會提示貼上金鑰值，按 Enter 確認即可，不會印在終端機畫面上
+# 會提示貼上金鑰值，按 Enter 確認即可，不會印在終端機畫面上。金鑰去
+# Google AI Studio（https://aistudio.google.com/apikey）申請，用 Google
+# 帳號登入就能直接產生，免費額度內可以先用。
 ```
 
 建立後要重新部署一次（`firebase deploy --only functions:runAiDiagnosis`
 或讓 GitHub Actions 自動部署跑一次）才會生效。沒設定金鑰時呼叫會收到
-`failed-precondition`：「尚未設定 Anthropic API 金鑰／Gemini API 金鑰」，
-不是模糊的 `INTERNAL`。
+`failed-precondition`：「尚未設定 Gemini API 金鑰」，不是模糊的
+`INTERNAL`。部署前記得到 Admin 頁面「AI 設定」把供應商切成 Gemini
+（Firestore 遷移過來的預設值是 `claude`，沒切的話 `runAiDiagnosis` 會
+繼續分派到 Claude，但 Claude 的密鑰根本沒建立）。
+
+**2026-10-07：刻意只接 Gemini，沒有宣告 `ANTHROPIC_API_KEY`**——
+`firebase deploy` 會驗證 `secrets` 陣列裡列出的每一個密鑰在 Secret
+Manager 真的存在、至少有一個版本，缺一個就整個部署失敗（不是只有用到
+Claude 才失敗，是部署當下就卡住，而且這支 workflow 沒加 `--only`，
+Hosting／Firestore 會被一起擋住）。使用者目前只打算用 Gemini，為了不
+逼自己生一把根本不會用到的 Claude 金鑰，`runAiDiagnosis`／
+`getAiKeyStatus` 的 `secrets` 陣列都只列 `GEMINI_API_KEY`，
+`getAiKeyStatus` 的 `hasClaudeKey` 固定回傳 `false`（不是查過沒設定，
+是這支函式根本沒有權限讀那個密鑰）。`callLlm_` 的 Claude 分支程式碼還
+留著，之後真的要用 Claude，把 `'ANTHROPIC_API_KEY'` 加回兩支函式的
+`secrets` 陣列、建好密鑰、重新部署即可，不用改其他程式碼。
 
 **前端**：`StockDetailView.vue` 的 AI 診斷紀錄區塊上面加了「跑新的深度
 診斷」按鈕，呼叫 `runAiDiagnosis({code})`，成功後整頁重新 `getStockDetail`
@@ -1348,13 +1363,14 @@ Admin 頁面新增「AI 設定」卡片，把 AI 診斷相關、而且**後端�
 - **深度診斷使用的供應商**（`aiProvider`：Claude／Gemini）——下拉選單，
   跟其他下拉選單（篩選策略／BigQuery 來源模式）同一個「一改就存」模式，
   `runAiDiagnosis` 已經會讀這個欄位分派 provider。
-- **API 金鑰狀態**——新增 `exports.getAiKeyStatus`（`onCall`，一樣宣告
-  `secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']` 才能讀到
-  `process.env`）只回傳「有沒有設定」，絕不回傳金鑰本身，頁面打開時查一次。
-  金鑰要設定／更新都只能用終端機
-  `firebase functions:secrets:set ANTHROPIC_API_KEY`／`GEMINI_API_KEY`，
-  這裡只顯示狀態，不提供輸入框——輸入框會把金鑰明文留在瀏覽器表單狀態／
-  network log 裡，沒有必要承擔這個風險換取一點點方便。
+- **API 金鑰狀態**——新增 `exports.getAiKeyStatus`（`onCall`，宣告
+  `secrets: ['GEMINI_API_KEY']` 才能讀到 `process.env`）只回傳「有沒有
+  設定」，絕不回傳金鑰本身，頁面打開時查一次。金鑰要設定／更新都只能用
+  終端機 `firebase functions:secrets:set GEMINI_API_KEY`，這裡只顯示
+  狀態，不提供輸入框——輸入框會把金鑰明文留在瀏覽器表單狀態／network log
+  裡，沒有必要承擔這個風險換取一點點方便。`hasClaudeKey` 目前固定顯示
+  「未設定」，見上面「AI 診斷」那節「刻意只接 Gemini」的說明，不是真的
+  查過。
 - **Claude／Gemini 價格單位**（`pricing.*`）——`calcCost_` 算「預估費用」
   真的會讀這幾個數字，跟「每日排程」的數字輸入框同一個「本機草稿 + 套用
   按鈕」模式（避免打字過程每個字元都存一次）。

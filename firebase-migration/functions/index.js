@@ -785,12 +785,23 @@ async function callLlm_(systemPrompt, userPrompt, provider, apiKeys) {
  * 這裡是前端「股票詳情頁」單檔觸發用的互動式按鈕，一次只診斷使用者正在看的這
  * 一檔，不需要批次省 TWSE 資料集重複抓取的成本。
  *
- * 需要 `secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']`——Firebase CLI 部署時
- * 會自動把這兩個 Secret Manager 的密鑰值注入成這支函式執行環境的
- * `process.env.ANTHROPIC_API_KEY`／`process.env.GEMINI_API_KEY`，並自動只授權
- * 這支函式的執行身分讀取這兩個密鑰（不用手動設定 IAM）。密鑰本身要靠使用者
- * 自己跑 `firebase functions:secrets:set ANTHROPIC_API_KEY` /
- * `GEMINI_API_KEY` 建立，這裡沒辦法（也不應該）用程式自動建立。
+ * 需要 `secrets: ['GEMINI_API_KEY']`——Firebase CLI 部署時會自動把這個 Secret
+ * Manager 的密鑰值注入成這支函式執行環境的 `process.env.GEMINI_API_KEY`，並
+ * 自動只授權這支函式的執行身分讀取這個密鑰（不用手動設定 IAM）。密鑰本身要靠
+ * 使用者自己跑 `firebase functions:secrets:set GEMINI_API_KEY` 建立，這裡沒
+ * 辦法（也不應該）用程式自動建立。
+ *
+ * **刻意不宣告 `ANTHROPIC_API_KEY`**——`firebase deploy` 會驗證 `secrets`
+ * 陣列裡列出的每一個密鑰在 Secret Manager 裡真的存在、至少有一個版本，缺一個
+ * 就整個部署失敗（不是只有用到 Claude 才失敗，是部署當下就失敗，Hosting／
+ * Firestore 都會被一起卡住，因為這支 workflow 沒加 `--only`）。使用者目前只用
+ * Gemini，沒有 Anthropic 金鑰，為了不逼使用者去生一個根本不會用到的 Claude
+ * 金鑰只為了湊齊這個陣列，這裡只宣告真正會用到的這一個。`callLlm_` 的 Claude
+ * 分支程式碼還留著（`config/app.aiProvider` 還是可以設回 `'claude'`），只是
+ * 這種狀態下 `process.env.ANTHROPIC_API_KEY` 會是 `undefined`，`callLlm_`
+ * 會拋出跟原來一樣清楚的 `failed-precondition`「尚未設定 Anthropic API 金鑰」
+ * ——之後真的要用 Claude，把 `'ANTHROPIC_API_KEY'` 加回這個陣列、建好密鑰、
+ * 重新部署即可，不用改其他程式碼。
  *
  * **不寫入 AiUsage 歷史費用記錄**（apps-script 版寫進 Sheets 的 AiUsage 分頁）
  * ——這版只計算並回傳這一次呼叫的費用給前端顯示，不持久化成歷史記錄，見
@@ -798,7 +809,7 @@ async function callLlm_(systemPrompt, userPrompt, provider, apiKeys) {
  * 一個 BigQuery 表或 Firestore collection 存這份歷史。
  */
 exports.runAiDiagnosis = onCall(
-  Object.assign({ secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY'] }, RUNTIME_OPTS_),
+  Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
   async function (request) {
     assertOwnerAuth_(request);
     const data = request.data || {};
@@ -853,17 +864,22 @@ exports.runAiDiagnosis = onCall(
 /**
  * 給 Admin 頁面「AI 設定」卡片顯示用：只回傳「有沒有設定」，絕不回傳金鑰本身
  * ——跟 apps-script 版 getAiSettings() 的 hasClaudeKey/hasGeminiKey 同一個
- * 設計。要檢查 `process.env.ANTHROPIC_API_KEY`／`GEMINI_API_KEY` 有沒有值，
- * 一樣要宣告 `secrets` 選項，不然 Secret Manager 的值不會被注入這支函式的
- * 執行環境（跟 runAiDiagnosis 是分開的兩支函式，各自獨立宣告，即使共用同兩個
- * 密鑰名稱）。
+ * 設計。要檢查 `process.env.GEMINI_API_KEY` 有沒有值，一樣要宣告 `secrets`
+ * 選項，不然 Secret Manager 的值不會被注入這支函式的執行環境（跟
+ * runAiDiagnosis 是分開的兩支函式，各自獨立宣告）。
+ *
+ * 刻意不宣告 `ANTHROPIC_API_KEY`（理由跟 runAiDiagnosis 同一段說明一致——
+ * 目前只用 Gemini，沒必要逼自己建一個不會用到的密鑰只為了讓部署通過），
+ * `hasClaudeKey` 固定回傳 `false`，不是因為查過沒設定，是這支函式沒有權限
+ * 讀取那個密鑰的值（即使之後真的設定了也一樣會回傳 false，直到把
+ * `'ANTHROPIC_API_KEY'` 加回兩支函式的 `secrets` 陣列重新部署）。
  */
 exports.getAiKeyStatus = onCall(
-  Object.assign({ secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY'] }, RUNTIME_OPTS_),
+  Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
   async function (request) {
     assertOwnerAuth_(request);
     return {
-      hasClaudeKey: !!process.env.ANTHROPIC_API_KEY,
+      hasClaudeKey: false,
       hasGeminiKey: !!process.env.GEMINI_API_KEY
     };
   }
