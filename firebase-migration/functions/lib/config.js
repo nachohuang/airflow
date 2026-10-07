@@ -37,6 +37,13 @@ module.exports = {
     '殖利率(%)', '本益比', '股價淨值比'
   ],
 
+  // AI 深度診斷呼叫 Claude／Gemini 用的模型名稱/token 上限，從
+  // apps-script/src/Config.gs 複製（CONFIG.CLAUDE_MODEL 等）。
+  CLAUDE_MODEL: 'claude-sonnet-5',
+  CLAUDE_MAX_TOKENS: 3000,
+  GEMINI_MODEL: 'gemini-2.5-flash',
+  GEMINI_MAX_TOKENS: 8192,
+
   // 給精簡戰報（Firestore reports/{date}/signals/{code}）用的欄位，對應
   // firestore/schema.md §3。
   REPORT_COLUMNS: [

@@ -1235,3 +1235,71 @@ form-card，一樣直接讀寫 Firestore（不經過 `onCall`）：
 本身沒辦法在這個開發環境驗證——`lib/schedule.js` 的純邏輯已經靠單元測試
 驗證過，但「Cloud Scheduler 真的每 5 分鐘叫醒一次」「改了 Admin 頁面的
 設定，等幾分鐘後排程真的照新設定跑」這兩件事要部署後才能確認。
+
+## AI 診斷（2026-10-07）
+
+從 `apps-script/src/AiDiagnosis.gs` 搬過來，股票詳情頁點「跑新的深度
+診斷」按鈕觸發，呼叫 Claude 或 Gemini 針對單一股票做「第二層思考」診斷
+（財報查核、籌碼/技術面辯證、CoVE 自我驗證、最終給出明確的買賣建議）。
+
+**這一版刻意只搬「深度診斷」**（新進場決策，`diagnosisType='deep'`），
+apps-script 版同時還有的「持股續抱診斷」（`'hold'`，決策基準改成體質
+變化而不是進場）跟「TOP3橫向推薦」（`'top3'`，全候選名單比較，不查
+財報）**先不搬**——這兩個之後要加的話，Goodinfo／TWSE 財報抓取、
+Claude/Gemini 呼叫、費用估算這些 I/O 跟計算邏輯大部分都已經在
+`functions/index.js`／`functions/lib/aiDiagnosis.js` 裡可以直接重用，
+只差 system prompt 文字跟批次/候選名單這一層的邏輯。
+
+**也刻意不搬的部分**：AiUsage 歷史費用記錄——apps-script 版把每次呼叫
+的 tokens/費用寫進 Sheets 的 `AiUsage` 分頁（`logAiUsage_`），`getAiUsageSummary`
+統計最近 N 天花費。這份 Firebase 版只計算並回傳**這一次呼叫**的費用給
+前端顯示，不持久化成歷史記錄（`firestore/schema.md` 把 AiUsage 標成
+「Phase 1 blueprint 設計決定要搬去 BigQuery」，是前瞻性的設計，不是
+現狀——目前舊系統的 AiUsage 實際還是存在 Sheets 裡）。之後要做歷史費用
+統計，需要先決定要不要新增一個 BigQuery 表或 Firestore collection。
+
+**檔案**：
+- `functions/lib/aiDiagnosis.js`（純邏輯，`test/aiDiagnosis.test.js`
+  驗證過）：system prompt 文字逐字照搬；
+  `buildTwseOfficialFinancialsTextForCode_`／`buildDiagnosisPrompt_`／
+  `extractVerdict_`／`extractCoreReason_`／`calcCost_` 純函式邏輯照搬，
+  欄位存取從 Sheets 版的中文欄名改成 Firestore 版的英文欄名
+  （`reports/{date}/signals/{code}` 已經是英文欄名，見 schema.md §3）。
+- `functions/index.js` 的 `exports.runAiDiagnosis`（`onCall`）+ 幾支
+  I/O helper：`fetchGoodinfoText_`（抓 Goodinfo 網頁、正規表示式去
+  HTML 標籤，抓不到就回說明文字不拋例外）、
+  `fetchTwseOfficialFinancialsDatasets_`（抓 3 個 TWSE OpenAPI 全市場
+  資料集）、`callClaude_`／`callGeminiOnce_`／`callGemini_`（Gemini
+  帶跟 apps-script 版一樣的「grounding 空內容重試，最後一次關掉
+  grounding」機制）、`callLlm_`（依 `config/app.aiProvider` 分派）。
+  這幾支是純 I/O，沒有獨立寫測試——組 prompt/抽結論的運算邏輯已經在
+  `lib/aiDiagnosis.js` 測過，這裡只是把資料接上外部端點。
+
+**Secret Manager**：`runAiDiagnosis` 用 Cloud Functions v2 的
+`secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']` 選項——部署時
+Firebase CLI 會自動把這兩個密鑰的值注入成 `process.env.ANTHROPIC_API_KEY`／
+`process.env.GEMINI_API_KEY`，並自動只授權這支函式的執行身分讀取這兩個
+密鑰，不需要手動設定 IAM。密鑰本身要先建立（這個開發環境沒辦法代勞）：
+
+```bash
+firebase functions:secrets:set ANTHROPIC_API_KEY
+firebase functions:secrets:set GEMINI_API_KEY
+# 各自會提示貼上金鑰值，按 Enter 確認即可，不會印在終端機畫面上
+```
+
+建立後要重新部署一次（`firebase deploy --only functions:runAiDiagnosis`
+或讓 GitHub Actions 自動部署跑一次）才會生效。沒設定金鑰時呼叫會收到
+`failed-precondition`：「尚未設定 Anthropic API 金鑰／Gemini API 金鑰」，
+不是模糊的 `INTERNAL`。
+
+**前端**：`StockDetailView.vue` 的 AI 診斷紀錄區塊上面加了「跑新的深度
+診斷」按鈕，呼叫 `runAiDiagnosis({code})`，成功後整頁重新 `getStockDetail`
+刷新（不是把這次結果插進陣列開頭——同一天同一檔的舊紀錄是同一個 Firestore
+文件 ID，會被直接覆蓋，整頁刷新才能正確反映覆蓋後的結果，不會顯示成
+重複的兩筆）。呼叫中按鈕顯示「診斷中（約需 30 秒~1 分鐘）...」並停用，
+失敗時在按鈕下方顯示錯誤訊息。
+
+⚠️ 沒辦法在這個開發環境實際呼叫 Claude／Gemini API 驗證——純邏輯單元
+測試驗證過組 prompt/抽結論的正確性，但「真的打 API 拿到診斷結果、寫進
+`ai_diagnosis` collection、前端正確顯示」需要部署後、建立好 Secret
+Manager 密鑰才能驗證。

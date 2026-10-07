@@ -296,6 +296,19 @@ function todayStrTaipei_() {
   return y + '-' + m + '-' + day;
 }
 
+/** AI 診斷的時間戳記字串，跟 apps-script 版 runAiDiagnosis 裡
+ *  `'台股監控 ' + Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm')`
+ *  同一個格式——沿用 todayStrTaipei_ 的 +8 小時位移手法，多取 HH:mm。 */
+function timestampLabelTaipei_() {
+  var d = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var day = String(d.getUTCDate()).padStart(2, '0');
+  var h = String(d.getUTCHours()).padStart(2, '0');
+  var min = String(d.getUTCMinutes()).padStart(2, '0');
+  return '台股監控 ' + y + '-' + m + '-' + day + ' ' + h + ':' + min;
+}
+
 /** yyyy-MM-dd 字串比較用的日期正規化（避免時區問題，純字串操作）。 */
 function normalizeDateStr(v) {
   if (v === null || v === undefined) return null;
@@ -336,5 +349,6 @@ module.exports = {
   percentRank: percentRank,
   pearsonCorrelation: pearsonCorrelation,
   normalizeDateStr: normalizeDateStr,
-  todayStrTaipei_: todayStrTaipei_
+  todayStrTaipei_: todayStrTaipei_,
+  timestampLabelTaipei_: timestampLabelTaipei_
 };

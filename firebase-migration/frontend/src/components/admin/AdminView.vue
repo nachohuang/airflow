@@ -246,8 +246,9 @@ async function removeSkipDate(date) {
     </template>
 
     <p class="hint dashboard-note">
-      AI 診斷設定（API 金鑰）、用量統計、History 補抓/整理工具還沒遷移到這裡，
-      需要這些功能請先用舊版網頁應用程式。
+      AI 深度診斷已經可以在股票詳情頁跑了（跑新的深度診斷按鈕）。AI 供應商/金鑰
+      設定、用量統計、History 補抓/整理工具還沒遷移到這裡，需要這些功能請先用
+      舊版網頁應用程式。
     </p>
   </section>
 </template>

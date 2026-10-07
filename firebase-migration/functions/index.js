@@ -38,6 +38,7 @@ const portfolioOpsLib = require('./lib/portfolioOps');
 const utilsLib = require('./lib/utils');
 const stockDetailLib = require('./lib/stockDetail');
 const scheduleLib = require('./lib/schedule');
+const aiDiagnosisLib = require('./lib/aiDiagnosis');
 
 admin.initializeApp();
 
@@ -602,3 +603,249 @@ exports.searchStockCodes = onCall(RUNTIME_OPTS_, async function (request) {
   }
   return results;
 });
+
+/**
+ * 以下是 AI 深度診斷（新進場決策，diagnosisType='deep'）的 I/O，從
+ * apps-script/src/AiDiagnosis.gs 搬過來（純邏輯部分見 lib/aiDiagnosis.js 開頭的
+ * 範圍說明——這一版刻意只搬「深度診斷」，'hold'／'top3' 兩種診斷類型跟 AiUsage
+ * 歷史費用記錄先不搬，見 README「AI 診斷」那節）。
+ *
+ * Goodinfo／TWSE OpenAPI／Claude／Gemini 都是打外部 HTTP 端點，跟這支檔案其餘
+ * 的 BigQuery／Firestore I/O 同一個檔案管理，不獨立成 lib/ 底下的模組——這些
+ * 函式本身就是「純 I/O」，沒有值得抽出來單元測試的運算邏輯（組 prompt／抽結論
+ * 的運算邏輯已經在 lib/aiDiagnosis.js 測過）。Node 20 執行環境內建全域
+ * `fetch`，不需要額外加 node-fetch 依賴。
+ */
+
+/** 跟 apps-script 版 fetchGoodinfoText_ 同一套抓取/去標籤邏輯——Goodinfo 沒有
+ *  公開 API，只能抓網頁 HTML 用正規表示式去標籤，抓不到 JS 動態載入的內容，
+ *  抓取失敗時回傳說明文字而不是拋例外，讓整個診斷流程可以繼續跑下去（AI 看到
+ *  說明文字會依系統 prompt 規則 1 明確標註「此部分資料不足」）。 */
+async function fetchGoodinfoText_(code) {
+  const url = 'https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=' + code;
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept-Language': 'zh-TW,zh;q=0.9'
+      }
+    });
+    if (!resp.ok) {
+      return '（無法取得 Goodinfo 頁面，HTTP ' + resp.status + '，這部分請依你既有的知識判斷，並在報告中註明缺乏即時資料）';
+    }
+    const html = await resp.text();
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const MAX_CHARS = 6000; // 避免整段塞爆 prompt，只取前面精華（頁首通常是股價/基本資訊區塊）
+    return text.slice(0, MAX_CHARS);
+  } catch (e) {
+    return '（抓取 Goodinfo 頁面時發生錯誤：' + String(e.message || e) + '，這部分請依你既有的知識判斷，並在報告中註明缺乏即時資料）';
+  }
+}
+
+/** 跟 apps-script 版 TWSE_OFFICIAL_FINANCIALS_DATASETS_ 同一份端點清單——只接了
+ *  「一般業」的財報端點，金融/證券/保險/金控等特殊產業別查無資料是預期行為。 */
+var TWSE_OFFICIAL_FINANCIALS_DATASETS_ = [
+  { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap05_L', label: '上市公司每月營業收入彙總表' },
+  { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci', label: '上市公司綜合損益表（一般業）' },
+  { url: 'https://openapi.twse.com.tw/v1/opendata/t187ap07_L_ci', label: '上市公司資產負債表（一般業）' }
+];
+
+/** 抓 3 個 TWSE OpenAPI 全市場資料集（一次），單一資料集抓取失敗就讓那個資料集
+ *  的 rows 是空陣列，不拋例外、不中斷整體流程——跟 apps-script 版同一個設計。 */
+async function fetchTwseOfficialFinancialsDatasets_() {
+  return Promise.all(TWSE_OFFICIAL_FINANCIALS_DATASETS_.map(async function (ds) {
+    try {
+      const resp = await fetch(ds.url);
+      if (!resp.ok) return { label: ds.label, rows: [] };
+      const rows = await resp.json();
+      return { label: ds.label, rows: Array.isArray(rows) ? rows : [] };
+    } catch (e) {
+      return { label: ds.label, rows: [] };
+    }
+  }));
+}
+
+/** 跟 apps-script 版 callClaude_ 同一套呼叫方式（system prompt 帶
+ *  `cache_control: {type: 'ephemeral'}` 做 prompt caching，省同一段系統規則文字
+ *  重複呼叫的費用）。 */
+async function callClaude_(systemPrompt, userPrompt, apiKey) {
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: config.CLAUDE_MODEL,
+      max_tokens: config.CLAUDE_MAX_TOKENS,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: userPrompt }]
+    })
+  });
+  const body = await resp.text();
+  if (!resp.ok) {
+    throw new Error('Claude API 呼叫失敗 HTTP ' + resp.status + '：' + body.slice(0, 300));
+  }
+  const json = JSON.parse(body);
+  const text = (json.content || []).map(function (block) { return block.text || ''; }).join('\n');
+  const usage = json.usage || {};
+  return {
+    text: text,
+    inputTokens: usage.input_tokens || 0,
+    outputTokens: usage.output_tokens || 0,
+    cacheCreationInputTokens: usage.cache_creation_input_tokens || 0,
+    cacheReadInputTokens: usage.cache_read_input_tokens || 0,
+    provider: 'claude',
+    model: config.CLAUDE_MODEL
+  };
+}
+
+/** 跟 apps-script 版 callGeminiOnce_ 同一套呼叫方式。 */
+async function callGeminiOnce_(apiKey, systemPrompt, userPrompt, useGrounding) {
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + config.GEMINI_MODEL +
+    ':generateContent?key=' + encodeURIComponent(apiKey);
+  const payload = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    generationConfig: { maxOutputTokens: config.GEMINI_MAX_TOKENS }
+  };
+  if (useGrounding) payload.tools = [{ google_search: {} }];
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const body = await resp.text();
+  if (!resp.ok) {
+    throw new Error('Gemini API 呼叫失敗 HTTP ' + resp.status + '：' + body.slice(0, 300));
+  }
+  const json = JSON.parse(body);
+  const candidate = (json.candidates || [])[0];
+  if (!candidate || !candidate.content || !candidate.content.parts) {
+    const finishReason = candidate && candidate.finishReason;
+    throw new Error('Gemini 回傳格式異常（finishReason：' + (finishReason || '未知') +
+      '，grounding：' + (useGrounding ? '開啟' : '關閉') + '）：' + body.slice(0, 300));
+  }
+  const text = candidate.content.parts.map(function (p) { return p.text || ''; }).join('');
+  const usage = json.usageMetadata || {};
+  return {
+    text: text,
+    inputTokens: usage.promptTokenCount || 0,
+    outputTokens: usage.candidatesTokenCount || 0,
+    provider: 'gemini',
+    model: config.GEMINI_MODEL
+  };
+}
+
+/** 跟 apps-script 版 callGemini_ 同一套重試/降級機制：gemini-2.5-flash 開
+ *  google_search grounding 時，Google API 端偶爾回傳「空內容」（見
+ *  lib/aiDiagnosis.js 之外、這支函式本身的這段說明在 apps-script 版原文有完整
+ *  描述）——最多重試 3 次，連續兩次空內容失敗就在第 3 次關掉 grounding 再試。 */
+async function callGemini_(systemPrompt, userPrompt, apiKey) {
+  const maxAttempts = 3;
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const useGrounding = attempt < maxAttempts;
+    try {
+      const result = await callGeminiOnce_(apiKey, systemPrompt, userPrompt, useGrounding);
+      result.groundingDisabled = !useGrounding;
+      return result;
+    } catch (e) {
+      lastError = e;
+      if (!/回傳格式異常/.test(String(e.message || e))) throw e;
+      if (attempt < maxAttempts) await new Promise(function (r) { setTimeout(r, 1500); });
+    }
+  }
+  throw lastError;
+}
+
+/** 依 provider 分派到 Claude 或 Gemini，apiKeys 是 {claude, gemini}（從
+ *  process.env 讀出來的 Secret Manager 密鑰，見 exports.runAiDiagnosis）。 */
+async function callLlm_(systemPrompt, userPrompt, provider, apiKeys) {
+  if (provider === 'gemini') {
+    if (!apiKeys.gemini) throw new HttpsError('failed-precondition', '尚未設定 Gemini API 金鑰（Secret Manager 的 GEMINI_API_KEY）。');
+    return callGemini_(systemPrompt, userPrompt, apiKeys.gemini);
+  }
+  if (!apiKeys.claude) throw new HttpsError('failed-precondition', '尚未設定 Anthropic API 金鑰（Secret Manager 的 ANTHROPIC_API_KEY）。');
+  return callClaude_(systemPrompt, userPrompt, apiKeys.claude);
+}
+
+/**
+ * data: {code}。對單一股票代號跑一次 AI 深度診斷（會真正呼叫 Claude／Gemini
+ * API，消耗額度）——跟 apps-script 版 runAiDiagnosis 一次對一批代號跑的設計不同，
+ * 這裡是前端「股票詳情頁」單檔觸發用的互動式按鈕，一次只診斷使用者正在看的這
+ * 一檔，不需要批次省 TWSE 資料集重複抓取的成本。
+ *
+ * 需要 `secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']`——Firebase CLI 部署時
+ * 會自動把這兩個 Secret Manager 的密鑰值注入成這支函式執行環境的
+ * `process.env.ANTHROPIC_API_KEY`／`process.env.GEMINI_API_KEY`，並自動只授權
+ * 這支函式的執行身分讀取這兩個密鑰（不用手動設定 IAM）。密鑰本身要靠使用者
+ * 自己跑 `firebase functions:secrets:set ANTHROPIC_API_KEY` /
+ * `GEMINI_API_KEY` 建立，這裡沒辦法（也不應該）用程式自動建立。
+ *
+ * **不寫入 AiUsage 歷史費用記錄**（apps-script 版寫進 Sheets 的 AiUsage 分頁）
+ * ——這版只計算並回傳這一次呼叫的費用給前端顯示，不持久化成歷史記錄，見
+ * README「AI 診斷」那節的說明；之後要做歷史費用統計，需要先決定要不要新增
+ * 一個 BigQuery 表或 Firestore collection 存這份歷史。
+ */
+exports.runAiDiagnosis = onCall(
+  Object.assign({ secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY'] }, RUNTIME_OPTS_),
+  async function (request) {
+    assertOwnerAuth_(request);
+    const data = request.data || {};
+    if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
+    const code = utilsLib.zfill4(String(data.code).trim());
+
+    const appConfig = await fetchAppConfig_();
+    const signalDocs = await fetchSignalHistoryForCode_(code);
+    const row = signalDocs[0];
+    if (!row) {
+      throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
+    }
+
+    const timestampLabel = utilsLib.timestampLabelTaipei_();
+    const [goodinfoText, twseDatasets] = await Promise.all([
+      fetchGoodinfoText_(code),
+      fetchTwseOfficialFinancialsDatasets_()
+    ]);
+    const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
+    const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel);
+
+    const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
+    const llmResult = await callLlm_(aiDiagnosisLib.AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
+      claude: process.env.ANTHROPIC_API_KEY,
+      gemini: process.env.GEMINI_API_KEY
+    });
+
+    const diagnosisText = llmResult.text;
+    const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
+    const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
+      cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
+      cacheReadInputTokens: llmResult.cacheReadInputTokens
+    }, appConfig.pricing);
+
+    const record = {
+      date: row.date,
+      code: code,
+      name: row.name || '',
+      armorScore: row.armorScore,
+      strategy: row.strategy,
+      verdict: verdict,
+      diagnosisType: 'deep',
+      content: diagnosisText,
+      timestamp: timestampLabel
+    };
+    await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
+
+    return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
+  }
+);

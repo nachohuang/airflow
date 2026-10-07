@@ -12,6 +12,9 @@ const detail = ref(null);
 const chartCanvas = ref(null);
 let chartInstance = null;
 
+const diagnosing = ref(false);
+const diagnosisError = ref('');
+
 /** 對應 firestore/schema.md §4 的 diagnosisType 列舉，翻回中文顯示用。 */
 const DIAGNOSIS_TYPE_LABEL = { deep: '深度診斷', hold: '持股續抱診斷', top3: 'TOP3推薦' };
 
@@ -56,6 +59,22 @@ async function load() {
     error.value = e.message || String(e);
   } finally {
     loading.value = false;
+  }
+}
+
+/** 觸發一次新的 AI 深度診斷（會真正呼叫 Claude／Gemini API，消耗額度）——成功後
+ *  整頁重新呼叫 getStockDetail 刷新，不只是把這次結果插進陣列開頭，避免跟既有
+ *  同一天同一檔的舊紀錄（同一個文件 ID 被覆蓋）顯示成重複的兩筆。 */
+async function runDiagnosis() {
+  diagnosing.value = true;
+  diagnosisError.value = '';
+  try {
+    await callFn('runAiDiagnosis', { code: props.code });
+    await load();
+  } catch (e) {
+    diagnosisError.value = e.message || String(e);
+  } finally {
+    diagnosing.value = false;
   }
 }
 
@@ -104,6 +123,12 @@ onBeforeUnmount(function () {
       <p v-else class="hint">這檔股票還沒有戰報燈號紀錄。</p>
 
       <h3>AI 診斷紀錄</h3>
+      <div class="toolbar">
+        <button type="button" :disabled="diagnosing" @click="runDiagnosis">
+          {{ diagnosing ? '診斷中（約需 30 秒~1 分鐘）...' : '跑新的深度診斷' }}
+        </button>
+      </div>
+      <p v-if="diagnosisError" class="error-box">{{ diagnosisError }}</p>
       <div v-if="detail.aiDiagnoses.length" class="card-list">
         <details v-for="d in detail.aiDiagnoses" :key="d.timestamp" class="form-card">
           <summary>
@@ -112,9 +137,7 @@ onBeforeUnmount(function () {
           <p class="ai-diagnosis-content">{{ d.content }}</p>
         </details>
       </div>
-      <p v-else class="hint">
-        這檔股票還沒有 AI 診斷紀錄——跑新的 AI 診斷這功能還沒遷移到新系統，請先用舊版網頁應用程式。
-      </p>
+      <p v-else class="hint">這檔股票還沒有 AI 診斷紀錄。</p>
     </template>
   </section>
 </template>
