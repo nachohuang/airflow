@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { collection, doc, onSnapshot, updateDoc, setDoc, deleteDoc, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
@@ -312,26 +312,73 @@ async function fetchTodayNow() {
   }
 }
 
+// 2026-10-07：原本 backfillRunning／backfillResult／backfillError 是純前端
+// 本地狀態，跟著這次 callFn 呼叫本身走——使用者實際回報：按下「開始補抓」
+// 後把 App 切到背景，回來看不到任何進度。根因有兩層：(1) 手機瀏覽器切到
+// 背景常常直接把這次呼叫的連線中斷掉，但後端其實不受影響、還是會繼續跑
+// 完，只是「回應送不回這個已經斷線的瀏覽器」；(2) 如果使用者是在 App 內
+// 切頁籤（例如切到「戰報與個股」再切回「系統與資料後台」），這個元件會被
+// 整個砍掉重建，`ref` 裡存的「目前在執行中」狀態也跟著消失。改成後端在
+// 開始/完成時都把狀態寫進 `jobs/historyBackfill`（見 index.js
+// writeJobStatus_ 的完整說明），前端改用 onSnapshot 即時監聽那份文件來
+// 畫面——不管是不是同一次連線、同一個元件實例收到最終結果，重新打開頁面
+// 都看得到當下真正的狀態，跟舊版 apps-script「排程佇列」的體驗一致。
 const backfillForm = ref({ startDate: '', endDate: '', skipWeekends: true });
-const backfillRunning = ref(false);
-const backfillResult = ref(null);
-const backfillError = ref('');
+const backfillStarting = ref(false); // 只蓋「按下按鈕到 onCall 回應」這一小段
+const backfillStartError = ref(''); // 只在「送出就失敗」（例如驗證錯誤）時顯示
+const backfillJob = ref(null);
+let unsubscribeBackfillJob = null;
+
+onMounted(function () {
+  unsubscribeBackfillJob = onSnapshot(doc(db, 'jobs', 'historyBackfill'), function (snap) {
+    backfillJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeBackfillJob) unsubscribeBackfillJob();
+});
+
+// 工作完成（狀態從執行中變成別的）就順便刷新「資料總覽」——不管使用者這段
+// 期間是不是真的一直盯著這個瀏覽器分頁，只要分頁現在是開著的就會自動更新。
+watch(backfillJob, function (newVal, oldVal) {
+  if (newVal && newVal.status !== 'running' && oldVal && oldVal.status === 'running') {
+    loadHistoryOverview();
+  }
+});
+
+const backfillJobStatusLabel = computed(function () {
+  if (!backfillJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', partial: '部分成功', failed: '失敗' };
+  return labels[backfillJob.value.status] || backfillJob.value.status;
+});
+
+const backfillButtonDisabled = computed(function () {
+  return backfillStarting.value || (backfillJob.value && backfillJob.value.status === 'running');
+});
 
 async function runBackfillNow() {
-  backfillRunning.value = true;
-  backfillError.value = '';
-  backfillResult.value = null;
+  backfillStarting.value = true;
+  backfillStartError.value = '';
   try {
-    backfillResult.value = await callFn('runHistoryBackfill', {
+    await callFn('runHistoryBackfill', {
       startDate: backfillForm.value.startDate,
       endDate: backfillForm.value.endDate,
       skipWeekends: !!backfillForm.value.skipWeekends
     }, 540000); // 跟後端 exports.runHistoryBackfill 宣告的 timeoutSeconds: 540 對齊
-    await loadHistoryOverview();
+    // 回傳值不需要處理——執行狀態一律透過上面的 jobs/historyBackfill 監聽
+    // 顯示，這裡呼叫送出後就結束，`loadHistoryOverview` 交給上面的 watch
+    // 在工作真正完成時觸發。
   } catch (e) {
-    backfillError.value = e.message || String(e);
+    // 「送出就失敗」（驗證錯誤／沒有 BigQuery 設定／沒有登入）才在這裡顯示；
+    // deadline-exceeded／unavailable 這類連線層級的錯誤不代表後端真的失敗
+    // ——後端通常還是會繼續跑完，真正的結果看上面即時監聽到的執行狀態，
+    // 這裡顯示反而會誤導使用者以為操作失敗了。
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      backfillStartError.value = e.message || String(e);
+    }
   } finally {
-    backfillRunning.value = false;
+    backfillStarting.value = false;
   }
 }
 
@@ -635,25 +682,36 @@ const runLogLatestByCategory = computed(function () {
             <input v-model="backfillForm.skipWeekends" type="checkbox">
             跳過週六日
           </label>
-          <button type="submit" :disabled="backfillRunning">
-            {{ backfillRunning ? '補抓中...' : '開始補抓' }}
+          <button type="submit" :disabled="backfillButtonDisabled">
+            {{ backfillStarting ? '送出中...' : (backfillJob && backfillJob.status === 'running' ? '執行中...' : '開始補抓') }}
           </button>
         </form>
-        <p v-if="backfillError" class="error-box">{{ backfillError }}</p>
-        <template v-if="backfillResult">
-          <p class="hint">
-            嘗試 {{ backfillResult.attempted.length }} 天，成功 {{ backfillResult.succeeded.length }} 天
-            <template v-if="backfillResult.failed.length">
-              、失敗 {{ backfillResult.failed.length }} 天：
-              {{ backfillResult.failed.map(f => f.date + '（' + f.error + '）').join('、') }}
+        <p v-if="backfillStartError" class="error-box">{{ backfillStartError }}</p>
+        <div v-if="backfillJob" class="run-log-status-card" style="margin-top:8px;">
+          <div class="run-log-status-card-top">
+            <span>目前執行狀態</span>
+            <span class="signal-badge" :style="{ color: runLogStatusColor(backfillJobStatusLabel) }">{{ backfillJobStatusLabel }}</span>
+          </div>
+          <div class="hint">
+            區間 {{ backfillJob.params?.startDate }} ~ {{ backfillJob.params?.endDate }}
+            <template v-if="backfillJob.status === 'running'">，還在執行中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+            <template v-else-if="backfillJob.result">
+              ：嘗試 {{ backfillJob.result.attempted.length }} 天，成功 {{ backfillJob.result.succeeded.length }} 天
+              <template v-if="backfillJob.result.failed.length">
+                、失敗 {{ backfillJob.result.failed.length }} 天：
+                {{ backfillJob.result.failed.map(f => f.date + '（' + f.error + '）').join('、') }}
+              </template>
+              <template v-if="backfillJob.result.truncated">（區間超過單次上限，請分批補抓剩下的部分）</template>
             </template>
-            <template v-if="backfillResult.truncated">（區間超過單次上限，請分批補抓剩下的部分）</template>
-          </p>
-        </template>
+            <template v-else-if="backfillJob.error">：{{ backfillJob.error }}</template>
+          </div>
+        </div>
         <p class="hint">
           單次最多補 60 天，區間更大請分幾次呼叫。這裡刻意不套用「不跑日」
           （`skip_dates`）設定——那是給每日自動排程用的，手動補抓區間時你明確
-          指定了日期，不應該被悄悄跳過。
+          指定了日期，不應該被悄悄跳過。執行狀態是看 <code>jobs/historyBackfill</code>
+          即時更新的，跟這次按鈕點擊本身有沒有收到回應無關——把 App 切到背景
+          或切到別的分頁再回來，都看得到當下真正的狀態。
         </p>
 
         <p class="hint">

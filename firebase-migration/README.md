@@ -1849,3 +1849,54 @@ AI 診斷（`StockDetailView.vue` 的 `runDiagnosis`）原本可能受同一個
 來源跟下面的完整清單同一份最近 50 筆，很少執行的項目（例如持股續抱
 診斷）如果最近一次執行已經不在這 50 筆之內，這裡會顯示不出來——這個
 限制直接寫在卡片下面的提示文字裡，不是要使用者自己發現。
+
+## 補抓區間：用 jobs/{jobKey} 取代「等這次呼叫本身回應」（2026-10-07）
+
+**症狀**：使用者實際按「開始補抓」之後把 App 切到背景，回來發現畫面上
+完全看不到任何進度，也沒有錯誤訊息；另一次則是直接看到
+`deadline-exceeded`（已經被上一節的 timeout 修正處理掉，但即使不逾時，
+畫面本身的「進度看不見」是另一個獨立問題）。使用者明確要求：跟舊版
+apps-script 一樣，AI 診斷／因子分析這類長時間操作，App 切到背景或在
+SPA 內切頁再切回來，都不應該影響看得到目前執行狀況。
+
+**根因**：`AdminView.vue` 原本的 `backfillRunning`／`backfillResult` 是
+純前端本地 `ref`，狀態完全綁定在「這次 `callFn('runHistoryBackfill', ...)`
+呼叫」身上，有兩層問題：(1) 手機瀏覽器切到背景很容易直接把這次呼叫的
+底層連線中斷掉——但後端 Cloud Function 本身完全不受影響，還是會繼續
+執行到完成，純粹是「這次呼叫的 HTTP 回應送不回一個已經斷線的瀏覽器」，
+前端卻把這個連線層級的失敗誤認為「操作失敗」；(2) 如果使用者是在 App
+內切頁籤（例如切到「戰報與個股」分頁再切回「系統與資料後台」），
+`AdminView.vue` 會被整個砍掉重新掛載，存在元件內的 `ref`（包含「目前
+正在執行中」這個狀態本身）也會跟著被清空重建，不管連線有沒有中斷都一樣
+會「忘記」有工作正在跑。
+
+這跟舊版 apps-script「排程佇列」能夠「不管哪個分頁、哪台裝置觸發的都
+看得到目前狀態」的原因是同一件事——那邊的狀態存在 Script Properties
+（伺服器端），不是存在瀏覽器分頁的記憶體裡，前端只是定期輪詢讀而已。
+
+**修正**：`functions/index.js` 新增 `writeJobStatus_(jobKey, patch)`，
+`merge: true` 寫進 `jobs/{jobKey}`（`firestore.rules` 已經開放
+`owner` 讀取，Phase 2 就寫好了，只是一直沒有任何函式真的在用）。
+`exports.runHistoryBackfill` 在開始執行前寫入
+`{status:'running', startedAt, params}`，執行完成（成功/部分成功/失敗）
+再寫入最終狀態跟結果，整段包進 try/catch 確保任何未預期的例外也會讓
+狀態正確收斂成 `'failed'`，不會卡在 `'running'` 回不去。
+
+前端 `AdminView.vue` 改用 `onSnapshot(doc(db,'jobs','historyBackfill'))`
+即時監聽這份文件來畫狀態卡片，`runBackfillNow()` 呼叫 `callFn` 本身的
+回傳值不再被拿來畫面——只有「送出就失敗」的錯誤（`invalid-argument`／
+`failed-precondition`／`permission-denied`，代表後端根本沒開始執行）
+才顯示在 `backfillStartError`；`deadline-exceeded`／`unavailable`
+這類連線層級的錯誤完全忽略，因為它們不代表後端真的失敗，真正的狀態
+一律看 `jobs/historyBackfill` 監聽到的內容。這樣不管是連線中斷還是
+元件被砍掉重建，重新打開頁面／重新掛載都能立刻拿到當下真正的執行
+狀態，不受瀏覽器分頁生命週期影響。
+
+**刻意沒做**：沒有把同一套 `jobs/{jobKey}` 機制套用到
+`runManualHistoryFetch`（單日抓取，實測數秒等級完成，風險低很多）或
+AI 診斷三支 onCall（`runAiDiagnosis`／`runPortfolioHoldDiagnosis`／
+`runAiTopPicks`）——後者理論上有同一類風險（Goodinfo 爬蟲+LLM 呼叫
+經常跑超過一分鐘），但牽涉的呼叫端分散在 `StockDetailView.vue`／
+`Top3PicksCard.vue` 兩個檔案，範圍比這次單一檔案的修正大，先只處理
+使用者實際回報、重現得出來的這一個，模式確立之後要擴大套用不難，
+等使用者確認要不要做再動。

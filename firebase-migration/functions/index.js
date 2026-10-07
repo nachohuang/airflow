@@ -439,6 +439,34 @@ async function logRun_(category, status, message, durationMs) {
 }
 
 /**
+ * 寫入 `jobs/{jobKey}` 的目前狀態（`status: 'running'|'succeeded'|'partial'|
+ * 'failed'`），搭配前端對同一份文件的 `onSnapshot` 監聽，取代「前端等這次
+ * onCall 呼叫本身回傳結果」的做法——2026-10-07 使用者實際回報：手動按「開始
+ * 補抓」之後把 App 切到背景（或在 SPA 內切到別的分頁再切回來），畫面看不到
+ * 補抓進度，跟舊版 apps-script「排程佇列」可以隨時回來看目前狀態的體驗不
+ * 一樣。根因是 Firebase callable SDK 的這次呼叫（連同它的 client 端連線）
+ * 本來就跟瀏覽器分頁/連線的生命週期綁在一起——手機瀏覽器切到背景很容易
+ * 直接把連線中斷掉，但後端 Cloud Function 本身不受影響，还是會繼續跑完
+ * （純粹是「這次呼叫的 HTTP 回應送不回原本那個已經斷線的瀏覽器」，不是
+ * 「後端被中止」）；而 Vue 元件一旦被切走重新掛載，原本存在元件內的
+ * `ref`（例如 `backfillRunning`）也會被整個砍掉重建，不管連線有沒有斷都一樣
+ * 會「忘記」有工作正在執行。改成在開始執行、執行完成這兩個時間點都把狀態
+ * 寫進 Firestore 的 `jobs/{jobKey}`（`firestore.rules` 已經開放 owner 讀取），
+ * 前端用 `onSnapshot` 監聽這份文件來畫面，不管是不是同一次連線、同一個
+ * 元件實例收到結果，重新打開頁面／重新掛載元件都能拿到當下最新狀態。
+ * 刻意吞掉寫入失敗（跟 `logRun_` 同一個理由：這只是狀態顯示用的旁支資訊，
+ * 寫失敗不該讓背景工作本身失敗）。
+ */
+async function writeJobStatus_(jobKey, patch) {
+  try {
+    await admin.firestore().collection('jobs').doc(jobKey).set(
+      Object.assign({ updatedAt: Date.now() }, patch),
+      { merge: true }
+    );
+  } catch (e) { /* 見上方說明 */ }
+}
+
+/**
  * 每 5 分鐘被 Cloud Scheduler 叫醒一次（不是「每個交易日固定時間」一次），叫醒
  * 之後用 `scheduleLib.shouldRunDailyReport_` 判斷現在的台北時間是不是落在
  * `config/app` 的 `triggerHour`/`triggerMinute` 設定的目標區間、有沒有跳過
@@ -614,24 +642,45 @@ exports.runHistoryBackfill = onCall(
     }
 
     const startTime = Date.now();
-    const succeeded = [];
-    const failed = [];
-    for (const dateStr of dates) {
-      const result = await fetchOneDayAndWrite_(appConfig.bigQuery, dateStr);
-      if (result.kind === 'succeeded') succeeded.push(result.date); else failed.push(result);
+    await writeJobStatus_('historyBackfill', {
+      status: 'running',
+      startedAt: startTime,
+      params: { startDate: data.startDate, endDate: data.endDate, skipWeekends: !!data.skipWeekends },
+      result: null,
+      error: null
+    });
+
+    try {
+      const succeeded = [];
+      const failed = [];
+      for (const dateStr of dates) {
+        const result = await fetchOneDayAndWrite_(appConfig.bigQuery, dateStr);
+        if (result.kind === 'succeeded') succeeded.push(result.date); else failed.push(result);
+      }
+      const resultPayload = {
+        attempted: dates,
+        succeeded: succeeded,
+        failed: failed,
+        truncated: dates.length >= BACKFILL_MAX_RANGE_DAYS
+      };
+      await logRun_(
+        '補抓區間',
+        failed.length ? '部分成功' : '成功',
+        data.startDate + ' ~ ' + data.endDate + '：成功 ' + succeeded.length + ' 天' + (failed.length ? '，失敗 ' + failed.length + ' 天' : ''),
+        Date.now() - startTime
+      );
+      await writeJobStatus_('historyBackfill', {
+        status: failed.length ? 'partial' : 'succeeded',
+        finishedAt: Date.now(),
+        result: resultPayload,
+        error: null
+      });
+      return resultPayload;
+    } catch (e) {
+      await logRun_('補抓區間', '失敗', String(e.message || e), Date.now() - startTime);
+      await writeJobStatus_('historyBackfill', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+      throw e;
     }
-    await logRun_(
-      '補抓區間',
-      failed.length ? '部分成功' : '成功',
-      data.startDate + ' ~ ' + data.endDate + '：成功 ' + succeeded.length + ' 天' + (failed.length ? '，失敗 ' + failed.length + ' 天' : ''),
-      Date.now() - startTime
-    );
-    return {
-      attempted: dates,
-      succeeded: succeeded,
-      failed: failed,
-      truncated: dates.length >= BACKFILL_MAX_RANGE_DAYS
-    };
   }
 );
 
