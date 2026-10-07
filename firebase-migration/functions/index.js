@@ -713,9 +713,18 @@ exports.runFullScheduleNow = onCall(
  * AI 診斷——對應 apps-script 版「重新計算戰報」這顆獨立按鈕（只跑其中一
  * 步，不是跑完整排程），跟上面 `runFullSchedulePipeline_`／
  * `runFullScheduleNow`（三步都跑）是兩個不同粒度的手動觸發，使用者可以
- * 選只要哪一種。 */
+ * 選只要哪一種。
+ *
+ * 用 `jobs/reportRecompute` 追蹤狀態，跟 `jobs/historyBackfill`／
+ * `jobs/fullSchedule` 同一個模式——2026-10-07 使用者直接點名：這顆按鈕
+ * 原本只有本地 `ref` 狀態，沒有跟「補抓區間」「執行完整排程」一樣接上
+ * `jobs/{jobKey}`，畫面切走一樣會「忘記」還在計算中，要求所有手動操作
+ * 都要有一致的體驗，不是只有部分操作做了這個保護。這支雖然通常幾秒內
+ * 就會完成（不碰 TWSE／AI），風險比補抓區間低很多，但為了一致性還是
+ * 套用同一套模式，不留這個特例。 */
 async function runManualReportRecomputeCore_() {
   const startTime = Date.now();
+  await writeJobStatus_('reportRecompute', { status: 'running', startedAt: startTime, error: null });
   try {
     const result = await runDailyAnalysis_();
     await logRun_(
@@ -724,9 +733,19 @@ async function runManualReportRecomputeCore_() {
       result.strategyError || (result.latestDate ? ('戰報日期 ' + result.latestDate + '，' + result.reportDocs.length + ' 檔訊號') : '沒有可用的歷史資料'),
       Date.now() - startTime
     );
+    await writeJobStatus_('reportRecompute', {
+      status: result.strategyError ? 'failed' : 'succeeded',
+      finishedAt: Date.now(),
+      result: {
+        latestDate: result.latestDate || null,
+        reportCount: result.reportDocs ? result.reportDocs.length : 0
+      },
+      error: result.strategyError || null
+    });
     return result;
   } catch (e) {
     await logRun_('手動重新計算戰報', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('reportRecompute', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
     throw e;
   }
 }

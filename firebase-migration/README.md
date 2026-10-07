@@ -2193,3 +2193,20 @@ Chrome UA 字串＋`Accept`／`Accept-Language`／`Referer: https://www.twse.com
 卡片。
 
 **驗證**：`npm test`（後端）、`npm run build`（前端）都通過。
+
+## 一致性修正：「重新計算戰報」也補上 jobs/{jobKey} 追蹤（2026-10-07）
+
+**背景**：「手動測試工具」區塊新增的兩顆按鈕，一開始只有「執行完整
+排程」套用了 `jobs/{jobKey}` 追蹤模式，「重新計算戰報」當時的理由是
+「這支很快，通常數秒內完成，不碰 TWSE／AI，風險比補抓區間低很多」，
+繼續用純本地 `ref` 狀態。使用者看了畫面後直接指出：這樣不一致——所有
+手動操作都應該要「畫面切走也看得到執行進度」，不應該只有部分操作有
+這個保護、其他的是例外。
+
+**修正**：`runManualReportRecomputeCore_` 比照 `runHistoryBackfill`／
+`runFullScheduleNow` 的模式，在開始/結束時寫入 `jobs/reportRecompute`；
+前端新增對應的 `onSnapshot` 監聽跟狀態卡片，按鈕不再被鎖住（跟其他
+兩顆同一個理由：單人工具不需要防並發）。這支本身風險雖然低，但一致的
+使用者體驗本身就是值得做的理由，不需要等到「這支也真的卡住過」才補。
+
+**驗證**：`npm test`（後端）、`npm run build`（前端）都通過。

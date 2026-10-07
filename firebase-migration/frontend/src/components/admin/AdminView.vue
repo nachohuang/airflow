@@ -391,22 +391,44 @@ async function runBackfillNow() {
 // ---- 手動重新計算戰報（只跑「重新計算戰報」這一步）----
 // 2026-10-07：使用者發現 Admin 頁面完全沒有地方可以手動觸發這個動作——
 // `generateDailyReport`（onRequest）原本只能用 curl 打，前端沒有接線。
-// 這支很快（通常數秒到十幾秒，不碰 TWSE／BigQuery 寫入），不需要像補抓
-// 區間那樣另外用 jobs/{jobKey} 追蹤狀態，用一般的 callFn 等結果就夠。
-const reportRecomputeRunning = ref(false);
-const reportRecomputeResult = ref(null);
-const reportRecomputeError = ref('');
+// 第一版只用本地 ref 狀態（理由：這支很快，通常數秒到十幾秒，不碰
+// TWSE／BigQuery 寫入，風險比補抓區間低很多）——使用者後續直接點名：
+// 畫面切走一樣會「忘記」還在計算中，要求所有手動操作都要有一致的體驗，
+// 不要只有這顆按鈕是例外。改成跟「補抓區間」「執行完整排程」同一套
+// jobs/reportRecompute 監聽模式（見 index.js runManualReportRecomputeCore_
+// 的說明），不再是特例。
+const reportRecomputeStarting = ref(false);
+const reportRecomputeStartError = ref('');
+const reportRecomputeJob = ref(null);
+let unsubscribeReportRecomputeJob = null;
+
+onMounted(function () {
+  unsubscribeReportRecomputeJob = onSnapshot(doc(db, 'jobs', 'reportRecompute'), function (snap) {
+    reportRecomputeJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeReportRecomputeJob) unsubscribeReportRecomputeJob();
+});
+
+const reportRecomputeJobStatusLabel = computed(function () {
+  if (!reportRecomputeJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[reportRecomputeJob.value.status] || reportRecomputeJob.value.status;
+});
 
 async function runReportRecomputeNow() {
-  reportRecomputeRunning.value = true;
-  reportRecomputeError.value = '';
-  reportRecomputeResult.value = null;
+  reportRecomputeStarting.value = true;
+  reportRecomputeStartError.value = '';
   try {
-    reportRecomputeResult.value = await callFn('runManualReportRecompute', {});
+    await callFn('runManualReportRecompute', {});
   } catch (e) {
-    reportRecomputeError.value = e.message || String(e);
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      reportRecomputeStartError.value = e.message || String(e);
+    }
   } finally {
-    reportRecomputeRunning.value = false;
+    reportRecomputeStarting.value = false;
   }
 }
 
@@ -798,18 +820,27 @@ const runLogLatestByCategory = computed(function () {
           邏輯，差別只在不管現在是不是排定的執行時間，按下去就跑。
         </p>
         <div class="form-actions">
-          <button type="button" :disabled="reportRecomputeRunning" @click="runReportRecomputeNow">
-            {{ reportRecomputeRunning ? '計算中...' : '重新計算戰報' }}
+          <button type="button" :disabled="reportRecomputeStarting" @click="runReportRecomputeNow">
+            {{ reportRecomputeStarting ? '送出中...' : '重新計算戰報' }}
           </button>
           <button type="button" :disabled="fullScheduleStarting" @click="runFullScheduleNow">
             {{ fullScheduleStarting ? '送出中...' : '執行完整排程' }}
           </button>
         </div>
-        <p v-if="reportRecomputeError" class="error-box">{{ reportRecomputeError }}</p>
-        <p v-if="reportRecomputeResult" class="hint">
-          {{ reportRecomputeResult.strategyError ? reportRecomputeResult.strategyError :
-            ('戰報日期 ' + reportRecomputeResult.latestDate + '，' + reportRecomputeResult.reportCount + ' 檔訊號') }}
-        </p>
+        <p v-if="reportRecomputeStartError" class="error-box">{{ reportRecomputeStartError }}</p>
+        <div v-if="reportRecomputeJob" class="run-log-status-card" style="margin-top:8px;">
+          <div class="run-log-status-card-top">
+            <span>重新計算戰報執行狀態</span>
+            <span class="signal-badge" :style="{ color: runLogStatusColor(reportRecomputeJobStatusLabel) }">{{ reportRecomputeJobStatusLabel }}</span>
+          </div>
+          <div class="hint">
+            <template v-if="reportRecomputeJob.status === 'running'">還在執行中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+            <template v-else-if="reportRecomputeJob.result">
+              戰報日期 {{ reportRecomputeJob.result.latestDate || '-' }}，{{ reportRecomputeJob.result.reportCount }} 檔訊號
+            </template>
+            <template v-else-if="reportRecomputeJob.error">{{ reportRecomputeJob.error }}</template>
+          </div>
+        </div>
         <p v-if="fullScheduleStartError" class="error-box">{{ fullScheduleStartError }}</p>
         <div v-if="fullScheduleJob" class="run-log-status-card" style="margin-top:8px;">
           <div class="run-log-status-card-top">
