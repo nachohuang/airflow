@@ -1168,9 +1168,21 @@ Secret Manager 存 API 金鑰，獨立列為下一步，見下面「還沒做的
 
 ⚠️ 跟其他 Cloud Function 一樣，`getStockDetail`／`searchStockCodes`
 本身沒辦法在這個開發環境驗證——`lib/stockDetail.js` 的純邏輯已經靠單元
-測試驗證過，`fetchSignalHistoryForCode_` 重用的複合索引理論上該夠用
-（Firestore 的複合索引可以服務「只用到索引欄位前綴」的查詢，`(code,
-date)` 這組索引本來就能服務「只篩 code」的查詢），但沒有實際部署驗證過
-這個假設——如果部署後這支查詢噴 `FAILED_PRECONDITION` 要求額外索引，
-把錯誤訊息附的索引加進 `firestore.indexes.json`，別用那個連結在 Console
-手動建（跟前面幾次索引坑的處理原則一樣）。
+測試驗證過，但「接線接得對不對」只能部署後才知道。
+
+**實際部署驗證時，`fetchSignalHistoryForCode_` 確實踩到坑了**：原本的假設
+「`(code ASC, date DESC)` 這組既有複合索引可以服務『只篩 code』的查詢」
+是錯的——`getStockDetail` 第一次上線就在前端看到 `INTERNAL` 錯誤（Cloud
+Functions 把真正的錯誤訊息藏起來不回傳給瀏覽器，要從 `gcloud functions
+logs read getStockDetail --region=us-central1 --gen2` 或
+`gcloud logging read` 才看得到），實際內容是 `FAILED_PRECONDITION: The
+query requires a COLLECTION_GROUP_ASC index for collection signals and
+field code`——跟 Dashboard 那次「只查 `date`」的坑是同一個模式：Firestore
+對 collection group 的單欄查詢比想像中更嚴格，既有的複合索引不會自動當成
+其他查詢形狀的前綴使用。**修法**：幫 `fetchSignalHistoryForCode_` 的查詢
+加上 `.orderBy('date', 'desc')`，這樣查詢形狀就完全對上既有的 `(code ASC,
+date DESC)` 索引，不用再多部署一個索引——而且「戰報燈號歷史新到舊排序」
+本來就是想要的順序，一舉兩得。教訓：**Firestore collection group 查詢的
+索引需求，與其每次都猜測既有索引夠不夠用，不如直接部署驗證一次**，這份
+README 已經連續在好幾個地方踩過這個坑，之後新增任何 collection group
+查詢都要抱持「先假設需要新索引，部署驗證過才算數」的心態。

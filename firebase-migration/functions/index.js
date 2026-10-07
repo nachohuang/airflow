@@ -477,12 +477,17 @@ async function fetchStockHistoryRows_(bigQueryConfig, code) {
   return rows.map(bigquery.mapBqRowToHistoryRow_).filter(function (r) { return r !== null; });
 }
 
-/** `reports/{date}/signals` 裡某一檔代號的全部文件（collectionGroup 查詢，
- *  需要前面「需要的 Firestore 複合索引」那組 (code ASC, date DESC) 索引，
- *  跟 fetchLatestSignalsByCode_ 共用同一個）。 */
+/** `reports/{date}/signals` 裡某一檔代號的全部文件（collectionGroup 查詢）。
+ *  一定要帶 `.orderBy('date', 'desc')`——實際部署驗證過，只有
+ *  `.where('code','==',code)` 不夠：Firestore 對 collection group 的要求比
+ *  「composite index 可以當作其他查詢的前綴使用」想像中更嚴格，單純等號查詢
+ *  被要求要另外一個 `COLLECTION_GROUP_ASC` 的 `code` 單欄索引。加這個
+ *  `orderBy` 剛好完全對上既有的 `(code ASC, date DESC)` 複合索引（前面「需要
+ *  的 Firestore 複合索引」那組，跟 fetchLatestSignalsByCode_ 共用），不用再
+ *  多部署一個索引——而且「戰報燈號歷史新到舊排序」本來就是要的順序。 */
 async function fetchSignalHistoryForCode_(code) {
   const db = admin.firestore();
-  const snap = await db.collectionGroup('signals').where('code', '==', code).get();
+  const snap = await db.collectionGroup('signals').where('code', '==', code).orderBy('date', 'desc').get();
   return snap.docs.map(function (d) { return d.data(); });
 }
 
