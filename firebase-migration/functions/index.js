@@ -849,3 +849,22 @@ exports.runAiDiagnosis = onCall(
     return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
   }
 );
+
+/**
+ * 給 Admin 頁面「AI 設定」卡片顯示用：只回傳「有沒有設定」，絕不回傳金鑰本身
+ * ——跟 apps-script 版 getAiSettings() 的 hasClaudeKey/hasGeminiKey 同一個
+ * 設計。要檢查 `process.env.ANTHROPIC_API_KEY`／`GEMINI_API_KEY` 有沒有值，
+ * 一樣要宣告 `secrets` 選項，不然 Secret Manager 的值不會被注入這支函式的
+ * 執行環境（跟 runAiDiagnosis 是分開的兩支函式，各自獨立宣告，即使共用同兩個
+ * 密鑰名稱）。
+ */
+exports.getAiKeyStatus = onCall(
+  Object.assign({ secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY'] }, RUNTIME_OPTS_),
+  async function (request) {
+    assertOwnerAuth_(request);
+    return {
+      hasClaudeKey: !!process.env.ANTHROPIC_API_KEY,
+      hasGeminiKey: !!process.env.GEMINI_API_KEY
+    };
+  }
+);

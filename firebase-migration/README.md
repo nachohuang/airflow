@@ -1303,3 +1303,30 @@ firebase functions:secrets:set GEMINI_API_KEY
 測試驗證過組 prompt/抽結論的正確性，但「真的打 API 拿到診斷結果、寫進
 `ai_diagnosis` collection、前端正確顯示」需要部署後、建立好 Secret
 Manager 密鑰才能驗證。
+
+## AI 設定 UI（2026-10-07）
+
+Admin 頁面新增「AI 設定」卡片，把 AI 診斷相關、而且**後端真的有在讀**的
+`config/app` 欄位開放編輯——跟「每日排程」那節的教訓一樣，這裡刻意只開放
+後端已經接線的欄位，不是把 schema 裡能看到的欄位全部開放：
+
+- **深度診斷使用的供應商**（`aiProvider`：Claude／Gemini）——下拉選單，
+  跟其他下拉選單（篩選策略／BigQuery 來源模式）同一個「一改就存」模式，
+  `runAiDiagnosis` 已經會讀這個欄位分派 provider。
+- **API 金鑰狀態**——新增 `exports.getAiKeyStatus`（`onCall`，一樣宣告
+  `secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']` 才能讀到
+  `process.env`）只回傳「有沒有設定」，絕不回傳金鑰本身，頁面打開時查一次。
+  金鑰要設定／更新都只能用終端機
+  `firebase functions:secrets:set ANTHROPIC_API_KEY`／`GEMINI_API_KEY`，
+  這裡只顯示狀態，不提供輸入框——輸入框會把金鑰明文留在瀏覽器表單狀態／
+  network log 裡，沒有必要承擔這個風險換取一點點方便。
+- **Claude／Gemini 價格單位**（`pricing.*`）——`calcCost_` 算「預估費用」
+  真的會讀這幾個數字，跟「每日排程」的數字輸入框同一個「本機草稿 + 套用
+  按鈕」模式（避免打字過程每個字元都存一次）。
+
+**刻意不開放的欄位**：`aiDailyEnabled`／`aiDailyTopN`——這兩個是「每日
+自動 AI 診斷」（排程算完戰報後，自動對候選名單跑 AI 診斷）用的設定，但
+`generateDailyReportScheduled` 目前完全沒有這段邏輯（AI 診斷只有股票
+詳情頁手動觸發這一條路徑），開放這兩個欄位編輯會變成跟 `skip_dates` 一樣
+的「畫面上看起來能調、後端完全不理」的陷阱，所以先不開放，等「每日自動 AI
+診斷」這個功能真的要做的時候再一起加 UI。

@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { collection, doc, onSnapshot, updateDoc, setDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { callFn } from '../../composables/useCallable';
 
 /** 跟 functions/lib/analysis.js 的 SCREENING_STRATEGIES 是同一份清單（key／label）
  *  ——那邊是純運算邏輯用的 Node 模組，這裡是獨立的前端套件，不方便直接 import，
@@ -19,6 +20,11 @@ const SOURCE_MODES = [
   { key: 'materialized', label: '自動整理進 BigQuery（materialized，推薦）' }
 ];
 
+const AI_PROVIDERS = [
+  { key: 'claude', label: 'Claude' },
+  { key: 'gemini', label: 'Gemini' }
+];
+
 const config = ref(null);
 const loading = ref(true);
 const error = ref('');
@@ -34,6 +40,7 @@ onMounted(function () {
       config.value = snap.exists() ? snap.data() : null;
       loading.value = false;
       if (!scheduleFormTouched.value) resetScheduleForm();
+      if (!pricingFormTouched.value) resetPricingForm();
     },
     function (e) {
       error.value = e.message || String(e);
@@ -150,6 +157,55 @@ async function removeSkipDate(date) {
     error.value = e.message || String(e);
   }
 }
+
+// ---- AI 設定（provider／金鑰狀態／價格單位） ----
+// 金鑰狀態要打 getAiKeyStatus 這支 onCall 才能知道（絕不把金鑰本身放進
+// Firestore，見 README「AI 診斷」那節）——跟 config.value 的其他欄位不同，
+// 不是 onSnapshot 即時監聽來的，只在頁面打開時查一次。
+const keyStatus = ref(null);
+const keyStatusError = ref('');
+
+onMounted(async function () {
+  try {
+    keyStatus.value = await callFn('getAiKeyStatus', {});
+  } catch (e) {
+    keyStatusError.value = e.message || String(e);
+  }
+});
+
+// pricing 四個數字輸入框，跟「每日排程」的 scheduleForm 同一個理由用草稿 +
+// 「套用」按鈕（打字過程每個字元都會觸發 @input，不適合像下拉選單那樣
+// 一改就存）。
+const pricingForm = ref({ claudeInputPerM: 3, claudeOutputPerM: 15, geminiInputPerM: 0.3, geminiOutputPerM: 2.5 });
+const pricingFormTouched = ref(false);
+const pricingSaving = ref(false);
+const pricingSavedAt = ref('');
+
+function resetPricingForm() {
+  if (!config.value || !config.value.pricing) return;
+  pricingForm.value = Object.assign({}, pricingForm.value, config.value.pricing);
+}
+
+async function savePricing() {
+  pricingSaving.value = true;
+  error.value = '';
+  try {
+    await updateDoc(doc(db, 'config', 'app'), {
+      pricing: {
+        claudeInputPerM: Math.max(0, Number(pricingForm.value.claudeInputPerM) || 0),
+        claudeOutputPerM: Math.max(0, Number(pricingForm.value.claudeOutputPerM) || 0),
+        geminiInputPerM: Math.max(0, Number(pricingForm.value.geminiInputPerM) || 0),
+        geminiOutputPerM: Math.max(0, Number(pricingForm.value.geminiOutputPerM) || 0)
+      }
+    });
+    pricingSavedAt.value = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+    pricingFormTouched.value = false;
+  } catch (e) {
+    error.value = e.message || String(e);
+  } finally {
+    pricingSaving.value = false;
+  }
+}
 </script>
 
 <template>
@@ -226,6 +282,69 @@ async function removeSkipDate(date) {
       </div>
 
       <div class="form-card">
+        <h3>AI 設定</h3>
+        <label>深度診斷使用的供應商
+          <select :value="config.aiProvider" :disabled="saving"
+            @change="saveField('aiProvider', $event.target.value)">
+            <option v-for="p in AI_PROVIDERS" :key="p.key" :value="p.key">{{ p.label }}</option>
+          </select>
+        </label>
+
+        <p class="hint">
+          API 金鑰狀態：
+          <template v-if="keyStatusError">查詢失敗（{{ keyStatusError }}）</template>
+          <template v-else-if="!keyStatus">查詢中...</template>
+          <template v-else>
+            Claude {{ keyStatus.hasClaudeKey ? '已設定 ✓' : '未設定' }}，
+            Gemini {{ keyStatus.hasGeminiKey ? '已設定 ✓' : '未設定' }}
+          </template>
+        </p>
+        <p class="hint">
+          金鑰本身不會存在 Firestore 或任何前端看得到的地方，只能用終端機設定：
+          <code>firebase functions:secrets:set ANTHROPIC_API_KEY</code> /
+          <code>GEMINI_API_KEY</code>，設定後要重新部署一次才會生效。
+        </p>
+
+        <label>Claude 單價（USD／每百萬 tokens）</label>
+        <div class="schedule-time-inputs">
+          <input
+            v-model.number="pricingForm.claudeInputPerM" type="number" min="0" step="0.01"
+            @input="pricingFormTouched = true"
+          >
+          <span>輸入</span>
+          <input
+            v-model.number="pricingForm.claudeOutputPerM" type="number" min="0" step="0.01"
+            @input="pricingFormTouched = true"
+          >
+          <span>輸出</span>
+        </div>
+        <label>Gemini 單價（USD／每百萬 tokens）</label>
+        <div class="schedule-time-inputs">
+          <input
+            v-model.number="pricingForm.geminiInputPerM" type="number" min="0" step="0.01"
+            @input="pricingFormTouched = true"
+          >
+          <span>輸入</span>
+          <input
+            v-model.number="pricingForm.geminiOutputPerM" type="number" min="0" step="0.01"
+            @input="pricingFormTouched = true"
+          >
+          <span>輸出</span>
+        </div>
+        <div class="form-actions">
+          <button type="button" :disabled="pricingSaving" @click="savePricing">
+            {{ pricingSaving ? '套用中...' : '套用價格單位' }}
+          </button>
+        </div>
+        <p v-if="pricingSavedAt" class="hint">已套用（{{ pricingSavedAt }}）</p>
+        <p class="hint">
+          只影響診斷結果顯示的「預估費用」計算，不是真正的計費依據——真實費用
+          以 Anthropic／Google 帳單為準，單價抓錯這裡只會讓預估數字不準，不影響
+          實際扣款。
+        </p>
+      </div>
+
+      <div class="form-card">
         <h3>BigQuery 設定</h3>
         <label>資料來源模式
           <select :value="config.bigQuery?.sourceMode" :disabled="saving"
@@ -246,9 +365,8 @@ async function removeSkipDate(date) {
     </template>
 
     <p class="hint dashboard-note">
-      AI 深度診斷已經可以在股票詳情頁跑了（跑新的深度診斷按鈕）。AI 供應商/金鑰
-      設定、用量統計、History 補抓/整理工具還沒遷移到這裡，需要這些功能請先用
-      舊版網頁應用程式。
+      每日自動 AI 診斷（候選名單橫向比較後自動跑診斷）、用量統計、History
+      補抓/整理工具還沒遷移到這裡，需要這些功能請先用舊版網頁應用程式。
     </p>
   </section>
 </template>
