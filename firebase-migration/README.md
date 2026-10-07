@@ -1478,3 +1478,71 @@ Admin 頁面新增「AI 設定」卡片，把 AI 診斷相關、而且**後端�
 的純邏輯（`holding` 參數渲染、8 選 1 的 `extractVerdict_`）已經靠單元
 測試驗證過，但「真的對一筆持股跑出完整續抱評估、寫進 Firestore、前端
 正確顯示」需要部署後實際測試。
+
+## 每日自動 AI 診斷 + TOP3 橫向推薦（2026-10-07）
+
+從 `apps-script/src/AiDiagnosis.gs` 的
+`runDailyAiDiagnosisForTopPicks`／`runAiTopPicks`／`runAiShortlist_`
+搬過來。跟深度診斷／續抱診斷是不同量級的任務——這兩個**都不查
+Goodinfo／TWSE 財報**，只用戰報本身已經算好的量化欄位（Armor_Score／
+操作策略／Trend_Score／法人參與密度排名／下跌接手率排名／實相解讀）
+讓 AI 做橫向比較，維持低成本：
+
+- **Top3 橫向推薦**（`diagnosisType='top3'`）：對最新一次戰報全部候選
+  做一次橫向比較，選出最值得優先投入的前三檔並說明取捨（含「分數亮眼
+  但暫不推薦」跟「這只是初篩、沒查財報」的提醒）。`code` 固定存常數
+  `'TOP3'`，文件 ID 是 `TOP3_{date}_top3`，同一天重跑會覆蓋同一筆。
+- **候選名單橫向比較 + 逐檔深度診斷**：先用 AI 橫向比較（不查財報）從
+  當天全部候選裡篩出一份大小為 `aiDailyTopN`（3~10，`setAiDailySettings`
+  的驗證邏輯搬到 Admin 頁面的輸入框）的候選名單，再把這份名單「全部」
+  送進深度診斷（會另外抓 Goodinfo／證交所財報做完整查核）。刻意不做
+  「橫向比較選幾檔、深度診斷再驗證同一批」這種兩階段都各自拍板的
+  設計——橫向比較分數再高的候選，基本面查核仍有可能不合格，「值不值得
+  投入」完全交給深度診斷的最終建議決定。
+
+**實作**：
+- `lib/aiDiagnosis.js` 新增 `AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE`／
+  `AI_TOP_PICKS_SYSTEM_PROMPT`（system prompt 逐字照搬）、
+  `buildShortlistPrompt_`／`buildTopPicksPrompt_`（候選列逐檔列出來，
+  欄位存取改成 Firestore 英文欄名）、`extractShortlistCodes_`（從
+  「N. 代號 名稱 - 理由」的編號清單抓代號，容忍 LLM 偶爾不聽話的格式
+  落差——Markdown 強調符號、全形句點、括號——逐字照搬 apps-script 版的
+  正規表示式）。
+- `functions/index.js`：
+  - `runDeepDiagnosisForCode_`——把原本塞在 `exports.runAiDiagnosis`
+    裡的單檔深度診斷邏輯抽成共用核心，股票詳情頁的互動式按鈕跟每日自動
+    診斷的候選名單批次處理共用同一份實作，不重複寫「查戰報列→抓財報→
+    組 prompt→呼叫 LLM→算費用→寫入 Firestore」這一整段。
+  - `fetchLatestReportCandidates_`——讀「最新一次戰報全部候選，依
+    Armor_Score 高到低排序」，Top3／候選名單橫向比較共用同一次讀取。
+  - `exports.runAiTopPicks`（`onCall`）——手動「重新掃描 Top3」按鈕。
+  - `runShortlistAndDeepDiagnosis_`／`runDailyAiDiagnosisForTopPicks_`
+    ——每日排程用，Top3／候選名單橫向比較兩件事各自包 try/catch、互不
+    影響（跟 apps-script 版同一個設計：Top3 只有一次 LLM 呼叫、耗時固定
+    且短，優先跑完；候選名單橫向比較+逐檔深度診斷耗時隨 `aiDailyTopN`
+    增加，放在後面）。
+  - `exports.generateDailyReportScheduled` 寫完戰報之後，如果
+    `config/app.aiDailyEnabled` 開著就接著跑這兩件事；`timeoutSeconds`
+    從 180 調高到 540（9 分鐘）——候選數上限 10 檔的情況下這個逾時留了
+    充足餘裕，**不需要像 apps-script 版那樣另外維護一套 `budgetDeadline`
+    提早跳過剩餘代號的機制**，那是 Apps Script 6 分鐘硬性執行上限逼出來
+    的設計，Cloud Functions 的逾時是這支函式自己宣告的，直接給夠就好。
+- **Admin 頁面**「每日自動 AI 診斷」卡片：開關 + 候選名單大小（3~10）
+  輸入框，跟「每日排程」同一個草稿+套用按鈕模式——這兩個欄位
+  （`aiDailyEnabled`／`aiDailyTopN`）Phase 2 遷移時就存在 Firestore，
+  但後端一直沒有消費它們，先前的「AI 設定 UI」那節刻意沒開放編輯
+  （怕變成跟 `skip_dates` 一樣「畫面能調、後端不理」的陷阱），現在後端
+  真的接線了，才把 UI 補上。
+- **Dashboard 頁面**新增 `Top3PicksCard.vue`，戰報清單最上方一個可收合
+  卡片，直接用 Firestore client SDK 的 `onSnapshot` 監聽
+  `ai_diagnosis` 的 `code == 'TOP3'` 文件（跟 `StockDetailView` 讀某
+  檔股票 AI 診斷歷史同一個理由，只用單欄等號查詢、不加 `orderBy`，不
+  需要額外的複合索引，排序交給前端在記憶體裡做），裡面有「重新掃描
+  Top3」按鈕（呼叫 `runAiTopPicks`，成功後不用自己刷新顯示——
+  `onSnapshot` 本來就在監聽，寫入 Firestore 後自動收到新文件）。
+
+⚠️ 沒辦法在這個開發環境實際驗證——`lib/aiDiagnosis.js` 的純邏輯（prompt
+組裝、`extractShortlistCodes_` 的格式容忍度）已經靠單元測試驗證過，但
+「排程真的在戰報算完後接著跑 Top3／候選名單橫向比較」「540 秒的逾時
+在 `aiDailyTopN=10` 時夠不夠用」這兩件事需要部署後、開啟「每日自動 AI
+診斷」實際跑過一次排程才能確認。

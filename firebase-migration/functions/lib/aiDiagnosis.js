@@ -8,12 +8,19 @@
  * **2026-10-07 補上「持股續抱診斷」（'hold'，決策基準改成體質變化而不是進場）**——跟
  * 「深度診斷」('deep') 共用同一套 Goodinfo／TWSE 財報抓取、Claude/Gemini 呼叫、費用估算
  * 邏輯，差別只在 system prompt 跟 `buildDiagnosisPrompt_` 多塞一段持股背景資訊。
- * 「TOP3橫向推薦」（'top3'，全候選名單比較，不查財報）**仍刻意不搬**，見 README「AI 診斷」
- * 那節的說明。
+ *
+ * **同一天再補上「每日自動 AI 診斷」用的候選名單橫向比較 + TOP3 橫向推薦**
+ * （`buildShortlistPrompt_`／`buildTopPicksPrompt_`／`extractShortlistCodes_`，對應
+ * apps-script 版 `runAiShortlist_`／`runAiTopPicks`／`extractShortlistCodes_`）——這兩個
+ * 都**不查 Goodinfo／TWSE 財報**，只用戰報本身已經算好的量化欄位讓 AI 做橫向比較，跟
+ * 深度診斷／續抱診斷（會另外抓財報資料逐檔查核）是不同量級的任務，維持低成本。候選列的
+ * 欄位存取同樣從 Sheets 版的中文欄名改成 Firestore 版的英文欄名
+ * （`reports/{date}/signals/{code}`，見 firestore/schema.md §3）。
  *
  * I/O（打 Goodinfo／TWSE OpenAPI／Claude／Gemini 這幾個外部 HTTP 端點，讀寫 Firestore）
  * 留給 index.js，這裡只管「資料到手之後怎麼組 prompt、怎麼從回應抽取結論」。
  */
+var utils = require('./utils');
 
 var AI_DIAGNOSIS_SYSTEM_PROMPT = `# Role & Expertise
 你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師。你同時精通三個流派：【價值護城河大師（專攻財報與競爭壁壘）】、【籌碼追蹤專家（專攻法人與主力大戶動向）】、【技術型態首席（專攻動能與波段拐點）】。你的任務是客觀、嚴厲且極度精準地協助我，針對我提供的「台股量化選股策略 (v17.0) 趨勢共鳴戰報」資料與指定的個股進行「第二層思考」診斷。
@@ -263,11 +270,172 @@ function calcCost_(provider, inputTokens, outputTokens, cacheTokens, pricing) {
     (cacheCreationTokens / 1e6) * inRate * 1.25 + (cacheReadTokens / 1e6) * inRate * 0.1;
 }
 
+// ---------------- 每日自動 AI 診斷：候選名單橫向比較 + TOP3 橫向推薦 ----------------
+
+/**
+ * 橫向比較用的候選名單 prompt：跟 AI_TOP_PICKS_SYSTEM_PROMPT（Top3 推薦）是類似的初篩
+ * 邏輯，但這裡輸出的是一份「全部都要送進深度診斷」的候選名單，不是最終建議，所以不用
+ * 獎牌排名的敘事格式，改成固定行數的編號清單，方便程式解析，名單大小由 __COUNT__
+ * 控制（對應 `config/app.aiDailyTopN`）。跟 apps-script 版
+ * AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE 逐字一致。
+ */
+var AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE = `# Role & Expertise
+你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師，同時精通【價值護城河大師】、
+【籌碼追蹤專家】、【技術型態首席】三個流派。
+
+# 本次任務
+我會給你「台股量化選股策略 (v17.0) 趨勢共鳴戰報」這次篩選出來的**全部候選股票清單**
+（每檔都附上 Armor_Score 與各項量化因子排名，沒有個別的財報/Goodinfo 原始資料）。
+請你橫向比較這整份清單，挑出你認為最值得優先送進「AI 深度診斷」（會另外查核個別財報與
+即時籌碼）的 __COUNT__ 檔候選名單。這份名單只是複查對象、不是最終投資建議，真正
+「值不值得投入」要等深度診斷查完基本面才拍板。
+
+# 決策原則
+1. 不是單純照 Armor_Score 高低取前幾名——分數只是量化因子的加權結果，你要在候選之間
+   做橫向比較，找出「因子純度最高、訊號最一致」的組合。
+2. 如果分數最高的幾檔彼此高度相關（同產業/同族群齊漲），要主動用產業分散的角度調整
+   名單，避免整份名單都集中在同一個籃子裡、放大集中度風險。
+3. 這是初篩層級的橫向比較，沒有個股財報與即時籌碼細節佐證，絕對不要假裝有查證過財報，
+   只能根據提供的量化欄位做判斷。
+4. 語氣口吻：使用繁體中文，字字精煉。
+
+# Output Format（請嚴格使用以下結構，正好 __COUNT__ 行，不要多也不要少，不要加其他文字，
+不要用 Markdown 粗體/斜體/程式碼區塊包住編號或代號，每行開頭一定是純數字加半形句點）
+1. 代號 名稱 - 入選理由（一句話）
+2. 代號 名稱 - 入選理由（一句話）
+（依此類推，共 __COUNT__ 行）`;
+
+/**
+ * 候選列：`reports/{date}/signals` 的文件形狀（英文欄名），跟 `buildDiagnosisPrompt_` 的
+ * row 同一套欄位來源，但這裡是一整份清單（候選名單橫向比較跟 Top3 推薦都要看到「所有
+ * 候選排在一起互相比較」，不是單一個股）。
+ */
+function buildShortlistPrompt_(candidates, timestampLabel, count) {
+  var lines = [];
+  lines.push('比較基準時間戳記：' + timestampLabel);
+  lines.push('');
+  lines.push('【本次戰報全部候選清單，共 ' + candidates.length + ' 檔，依 Armor_Score 高到低排序】');
+  candidates.forEach(function (r, i) {
+    lines.push(
+      (i + 1) + '. ' + r.code + ' ' + r.name +
+      '｜Armor_Score=' + r.armorScore +
+      '｜操作策略=' + r.strategy +
+      '｜Trend_Score=' + r.trendScore +
+      '｜法人參與密度排名=' + r.instPartRank +
+      '｜下跌接手率排名=' + r.ibf20dRank +
+      '｜實相解讀=' + r.interpretation
+    );
+  });
+  lines.push('');
+  lines.push('請依照系統設定的規則與輸出格式，從這份清單挑出 ' + count + ' 檔送進深度診斷的候選名單。');
+  return lines.join('\n');
+}
+
+/**
+ * 從 `AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE` 規定的編號清單格式（「N. 代號 名稱 - 理由」）
+ * 取出股票代號。prompt 已經明確要求「純數字加半形句點」開頭、不要用 Markdown 格式，但
+ * LLM 偶爾還是會不聽話（例如把編號包成 **1.**、改用全形句點「、」或括號「1)」）——這裡
+ * 先把每行常見的 Markdown 強調符號（*_`）拿掉，並放寬編號後面的分隔符號（. 、 )）都算
+ * 合法，降低因為這種小格式落差就整批解析失敗、害這次候選名單完全沒東西可以送進深度診斷
+ * 的機率。真的完全解析不出任何一行時，回傳空陣列，呼叫端決定要怎麼處理（通常是把原始
+ * 文字片段一起記進錯誤訊息）。跟 apps-script 版 extractShortlistCodes_ 逐字一致。
+ */
+function extractShortlistCodes_(text, maxCount) {
+  if (!text) return [];
+  var re = /^\d+[.、)]\s*(\d{3,6})/;
+  var codes = [];
+  String(text).split('\n').forEach(function (line) {
+    var cleaned = line.trim().replace(/[*_`]/g, '');
+    var m = re.exec(cleaned);
+    if (m) codes.push(utils.zfill4(m[1]));
+  });
+  return maxCount ? codes.slice(0, maxCount) : codes;
+}
+
+/**
+ * 跟 AI_DIAGNOSIS_SYSTEM_PROMPT（單檔深度診斷）是不同量級的任務：這裡不對每一檔候選都
+ * 額外抓 Goodinfo/查 5 年財報，只用戰報本身已經算好的量化欄位，讓模型在整份候選名單裡
+ * 做「橫向比較」，選出最值得優先投入的前三檔並說明取捨——這是初篩層級的比較，選出來
+ * 之後還是要對這幾檔分別執行「AI 深度診斷」做完整的財報/籌碼查核。跟 apps-script 版
+ * AI_TOP_PICKS_SYSTEM_PROMPT 逐字一致。
+ */
+var AI_TOP_PICKS_SYSTEM_PROMPT = `# Role & Expertise
+你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師，同時精通【價值護城河大師】、
+【籌碼追蹤專家】、【技術型態首席】三個流派。
+
+# 本次任務
+我會給你「台股量化選股策略 (v17.0) 趨勢共鳴戰報」這次篩選出來的**全部候選股票清單**
+（每檔都附上 Armor_Score 與各項量化因子排名，沒有個別的財報/Goodinfo 原始資料）。
+請你橫向比較這整份清單，挑出你認為現在最值得優先投入的前三檔，並清楚說明取捨理由。
+
+# 決策原則
+1. 不是單純照 Armor_Score 高低取前三——分數只是量化因子的加權結果，你要在候選之間做
+   橫向比較，找出「因子純度最高、訊號最一致、風險最小」的組合。
+2. 如果分數最高的幾檔彼此高度相關（同產業/同族群齊漲），要提醒集中度風險，
+   並考慮是否該用產業分散的角度調整入選名單。
+3. 明確指出「為什麼不選」：至少對 1-2 檔看起來分數很高、但你認為不該優先選入的候選，
+   說明原因。
+4. 這是初篩層級的橫向比較，沒有個股財報與即時籌碼細節佐證，絕對不要假裝有查證過財報，
+   只能根據提供的量化欄位做判斷。
+5. 語氣口吻：使用繁體中文，語氣需如同寫給機構法人的投資報告，字字精煉，直擊重點。
+
+# Output Format (請嚴格使用以下結構，避免冗長文字牆)
+
+---
+## 🏆 戰報候選橫向比較：Top 3 推薦
+> **候選檔數：** [N] 檔　**比較基準時間：** [填入提供的時間戳記]
+
+### 🥇 [代號 名稱]（Armor_Score: xx）
+- **入選理由：**
+- **相對其他候選的優勢：**
+
+### 🥈 [代號 名稱]（Armor_Score: xx）
+- **入選理由：**
+- **相對其他候選的優勢：**
+
+### 🥉 [代號 名稱]（Armor_Score: xx）
+- **入選理由：**
+- **相對其他候選的優勢：**
+
+### 👀 分數亮眼但暫不推薦
+（挑 1-2 檔分數不低、但你認為暫時不該優先選入的候選，簡短說明為什麼）
+
+### ⚠️ 重要提醒
+這份排名只根據戰報裡已經算好的量化因子做橫向比較，**沒有查核這幾檔的個別財報與即時籌碼細節**。
+請對這三檔分別執行「AI 深度診斷」完成完整查核後，再決定是否進場。
+---`;
+
+function buildTopPicksPrompt_(candidates, timestampLabel) {
+  var lines = [];
+  lines.push('比較基準時間戳記：' + timestampLabel);
+  lines.push('');
+  lines.push('【本次戰報全部候選清單，共 ' + candidates.length + ' 檔，依 Armor_Score 高到低排序】');
+  candidates.forEach(function (r, i) {
+    lines.push(
+      (i + 1) + '. ' + r.code + ' ' + r.name +
+      '｜Armor_Score=' + r.armorScore +
+      '｜操作策略=' + r.strategy +
+      '｜Trend_Score=' + r.trendScore +
+      '｜法人參與密度排名=' + r.instPartRank +
+      '｜下跌接手率排名=' + r.ibf20dRank +
+      '｜實相解讀=' + r.interpretation
+    );
+  });
+  lines.push('');
+  lines.push('請依照系統設定的規則與輸出格式，從這份清單挑出最值得優先投入的前三檔。');
+  return lines.join('\n');
+}
+
 module.exports = {
   AI_DIAGNOSIS_SYSTEM_PROMPT: AI_DIAGNOSIS_SYSTEM_PROMPT,
   AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT: AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT,
+  AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE: AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE,
+  AI_TOP_PICKS_SYSTEM_PROMPT: AI_TOP_PICKS_SYSTEM_PROMPT,
   buildTwseOfficialFinancialsTextForCode_: buildTwseOfficialFinancialsTextForCode_,
   buildDiagnosisPrompt_: buildDiagnosisPrompt_,
+  buildShortlistPrompt_: buildShortlistPrompt_,
+  buildTopPicksPrompt_: buildTopPicksPrompt_,
+  extractShortlistCodes_: extractShortlistCodes_,
   extractVerdict_: extractVerdict_,
   extractCoreReason_: extractCoreReason_,
   calcCost_: calcCost_

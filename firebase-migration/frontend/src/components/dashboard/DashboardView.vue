@@ -5,6 +5,7 @@ import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
 import { strategyColor } from '../../utils/strategyColor';
 import StockDetailView from './StockDetailView.vue';
+import Top3PicksCard from './Top3PicksCard.vue';
 
 const loading = ref(true);
 const error = ref('');
@@ -118,6 +119,8 @@ onUnmounted(function () {
   <StockDetailView v-if="selectedCode" :code="selectedCode" @close="selectedCode = null" />
 
   <section v-else class="dashboard-view">
+    <Top3PicksCard />
+
     <div class="search-bar">
       <input v-model="searchText" placeholder="輸入股票代號或名稱搜尋（例如 2330 或 台積電）" @input="scheduleStockSearch">
     </div>

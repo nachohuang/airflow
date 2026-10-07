@@ -290,9 +290,23 @@ async function fetchSkipDates_() {
  * 解析度——對「每天收盤後算一次戰報」這種用途完全足夠，不需要精準到那一分鐘。
  * 絕大多數的 tick 只做兩次 Firestore 讀取就直接 return，成本可以忽略（一天
  * 288 次 tick，遠低於 Cloud Functions 免費額度）。
+ *
+ * `timeoutSeconds: 540`（蓋掉 `RUNTIME_OPTS_` 的 180，見下面 `Object.assign`
+ * 的參數順序——後面的物件屬性覆蓋前面的，所以客製化選項要放在 `RUNTIME_OPTS_`
+ * 後面，不是像其他呼叫端那樣放前面）：真正算戰報那一次 tick，寫完戰報之後如果
+ * `config/app.aiDailyEnabled` 開著，還要接著跑 Top3 橫向比較＋候選名單橫向
+ * 比較＋逐檔深度診斷（見 `runDailyAiDiagnosisForTopPicks_`），候選數上限 10
+ * 檔（`setAiDailySettings` 的驗證邏輯搬到 Admin 頁面的輸入框也一樣夾在
+ * 3~10），180 秒不夠用；540 秒（9 分鐘）在這個上限下留了充足餘裕，不需要像
+ * apps-script 版那樣另外維護一套 `budgetDeadline` 提早跳過剩餘代號的機制
+ * ——那是 Apps Script 6 分鐘硬性執行上限逼出來的設計，Cloud Functions 的逾時
+ * 是這支函式自己宣告的，直接給夠就不會撞到。需要 `secrets: ['GEMINI_API_KEY']`
+ * ——這支函式現在也會直接呼叫 Gemini，不是只靠 `runDailyAiDiagnosisForTopPicks_`
+ * 內部呼叫的其他函式各自宣告就會生效（每支 Cloud Function 的 `secrets` 要
+ * 各自獨立宣告，見 `runAiDiagnosis`/`getAiKeyStatus` 的說明）。
  */
 exports.generateDailyReportScheduled = onSchedule(
-  Object.assign({ schedule: '*/5 * * * *' }, RUNTIME_OPTS_),
+  Object.assign({}, RUNTIME_OPTS_, { schedule: '*/5 * * * *', timeoutSeconds: 540, secrets: ['GEMINI_API_KEY'] }),
   async function () {
     const appConfig = await fetchAppConfig_();
     const skipDates = await fetchSkipDates_();
@@ -304,6 +318,14 @@ exports.generateDailyReportScheduled = onSchedule(
     });
     if (!should) return;
     await runDailyAnalysis_();
+    if (appConfig.aiDailyEnabled) {
+      // runDailyAiDiagnosisForTopPicks_ 內部已經把 Top3／候選名單這兩段各自包了
+      // try/catch，這裡再包一層純粹是防禦性的最後一道防線——AI 診斷失敗不該讓
+      // 這次 tick 被記成失敗、也不該讓已經成功寫入的戰報被当成沒跑完。
+      try {
+        await runDailyAiDiagnosisForTopPicks_(appConfig);
+      } catch (e) { /* 見上方說明：不該發生，失敗也不影響已經寫入的戰報 */ }
+    }
   }
 );
 
@@ -804,6 +826,63 @@ async function callLlm_(systemPrompt, userPrompt, provider, apiKeys) {
 }
 
 /**
+ * 單一股票代號跑一次 AI 深度診斷的核心邏輯，不含 onCall 的 auth／參數驗證——
+ * `exports.runAiDiagnosis`（股票詳情頁單檔觸發）跟
+ * `runShortlistAndDeepDiagnosis_`（每日自動診斷，對候選名單裡每一檔各呼叫一次）
+ * 共用同一份實作，不要兩個呼叫路徑各自重複寫一次「查戰報列→抓財報→組
+ * prompt→呼叫 LLM→算費用→寫入 Firestore」。appConfig 由呼叫端傳入（兩條路徑
+ * 都已經在外層讀過一次，不用每檔股票各自重讀一次 `config/app`）。
+ *
+ * **不寫入 AiUsage 歷史費用記錄**（apps-script 版寫進 Sheets 的 AiUsage 分頁）
+ * ——這版只計算並回傳這一次呼叫的費用給前端顯示，不持久化成歷史記錄，見
+ * README「AI 診斷」那節的說明；之後要做歷史費用統計，需要先決定要不要新增
+ * 一個 BigQuery 表或 Firestore collection 存這份歷史。
+ */
+async function runDeepDiagnosisForCode_(appConfig, code) {
+  const signalDocs = await fetchSignalHistoryForCode_(code);
+  const row = signalDocs[0];
+  if (!row) {
+    throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
+  }
+
+  const timestampLabel = utilsLib.timestampLabelTaipei_();
+  const [goodinfoText, twseDatasets] = await Promise.all([
+    fetchGoodinfoText_(code),
+    fetchTwseOfficialFinancialsDatasets_()
+  ]);
+  const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
+  const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel);
+
+  const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
+  const llmResult = await callLlm_(aiDiagnosisLib.AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
+    claude: process.env.ANTHROPIC_API_KEY,
+    gemini: process.env.GEMINI_API_KEY
+  });
+
+  const diagnosisText = llmResult.text;
+  const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
+  const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
+    cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
+    cacheReadInputTokens: llmResult.cacheReadInputTokens
+  }, appConfig.pricing);
+
+  const record = {
+    date: row.date,
+    code: code,
+    name: row.name || '',
+    armorScore: row.armorScore,
+    strategy: row.strategy,
+    verdict: verdict,
+    diagnosisType: 'deep',
+    content: diagnosisText,
+    timestamp: timestampLabel
+  };
+  await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
+
+  return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
+}
+
+/**
  * data: {code}。對單一股票代號跑一次 AI 深度診斷（會真正呼叫 Claude／Gemini
  * API，消耗額度）——跟 apps-script 版 runAiDiagnosis 一次對一批代號跑的設計不同，
  * 這裡是前端「股票詳情頁」單檔觸發用的互動式按鈕，一次只診斷使用者正在看的這
@@ -826,11 +905,6 @@ async function callLlm_(systemPrompt, userPrompt, provider, apiKeys) {
  * 會拋出跟原來一樣清楚的 `failed-precondition`「尚未設定 Anthropic API 金鑰」
  * ——之後真的要用 Claude，把 `'ANTHROPIC_API_KEY'` 加回這個陣列、建好密鑰、
  * 重新部署即可，不用改其他程式碼。
- *
- * **不寫入 AiUsage 歷史費用記錄**（apps-script 版寫進 Sheets 的 AiUsage 分頁）
- * ——這版只計算並回傳這一次呼叫的費用給前端顯示，不持久化成歷史記錄，見
- * README「AI 診斷」那節的說明；之後要做歷史費用統計，需要先決定要不要新增
- * 一個 BigQuery 表或 Firestore collection 存這份歷史。
  */
 exports.runAiDiagnosis = onCall(
   Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
@@ -839,51 +913,169 @@ exports.runAiDiagnosis = onCall(
     const data = request.data || {};
     if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
     const code = utilsLib.zfill4(String(data.code).trim());
-
     const appConfig = await fetchAppConfig_();
-    const signalDocs = await fetchSignalHistoryForCode_(code);
-    const row = signalDocs[0];
-    if (!row) {
-      throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
-    }
-
-    const timestampLabel = utilsLib.timestampLabelTaipei_();
-    const [goodinfoText, twseDatasets] = await Promise.all([
-      fetchGoodinfoText_(code),
-      fetchTwseOfficialFinancialsDatasets_()
-    ]);
-    const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
-    const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel);
-
-    const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
-    const llmResult = await callLlm_(aiDiagnosisLib.AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
-      claude: process.env.ANTHROPIC_API_KEY,
-      gemini: process.env.GEMINI_API_KEY
-    });
-
-    const diagnosisText = llmResult.text;
-    const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
-    const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
-      cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
-      cacheReadInputTokens: llmResult.cacheReadInputTokens
-    }, appConfig.pricing);
-
-    const record = {
-      date: row.date,
-      code: code,
-      name: row.name || '',
-      armorScore: row.armorScore,
-      strategy: row.strategy,
-      verdict: verdict,
-      diagnosisType: 'deep',
-      content: diagnosisText,
-      timestamp: timestampLabel
-    };
-    await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
-
-    return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
+    return runDeepDiagnosisForCode_(appConfig, code);
   }
 );
+
+/**
+ * 以下是「每日自動 AI 診斷」（Top3 橫向推薦 + 候選名單橫向比較後逐檔深度診斷）
+ * 的 I/O，從 apps-script/src/AiDiagnosis.gs 的
+ * `getLatestReportCandidates_`／`runAiTopPicks`／`runAiShortlist_`／
+ * `runDailyAiDiagnosisForTopPicks` 搬過來。跟上面單檔深度診斷／續抱診斷不同，
+ * 這兩個都不查 Goodinfo／TWSE 財報，只用戰報本身已經算好的量化欄位做橫向比較
+ * （見 lib/aiDiagnosis.js 的 `buildShortlistPrompt_`／`buildTopPicksPrompt_`
+ * 開頭說明），維持低成本。
+ */
+
+/** `runAiTopPicks`／每日候選名單橫向比較都需要「最新一次戰報全部候選，依
+ *  Armor_Score 高到低排序」這份清單——跟 apps-script 版 getLatestReportCandidates_
+ *  同一個邏輯，先用 collectionGroup 查詢找出「最新是哪一天」（跟
+ *  fetchLatestSignalsByCode_／Dashboard 共用同一組 collectionGroup 索引），
+ *  再用一般的 collection 查詢（不是 collectionGroup）把那一天的全部訊號依
+ *  armorScore 排序讀出來——COLLECTION（不是 COLLECTION_GROUP）scope 的單欄
+ *  orderBy 是 Firestore 自動索引涵蓋的範圍，不需要額外部署索引。 */
+async function fetchLatestReportCandidates_() {
+  const db = admin.firestore();
+  const latestSnap = await db.collectionGroup('signals').orderBy('date', 'desc').limit(1).get();
+  if (latestSnap.empty) {
+    throw new HttpsError('failed-precondition', '目前沒有任何戰報資料，請先產生一次戰報。');
+  }
+  const latestDate = latestSnap.docs[0].data().date;
+  const snap = await db.collection('reports').doc(latestDate).collection('signals').orderBy('armorScore', 'desc').get();
+  const candidates = snap.docs.map(function (d) { return d.data(); });
+  if (candidates.length === 0) {
+    throw new HttpsError('failed-precondition', '最新一次戰報沒有任何候選股票可以比較。');
+  }
+  return { latestDate: latestDate, candidates: candidates };
+}
+
+/** Top3 橫向推薦的核心邏輯（不含 onCall 的 auth 驗證）——`exports.runAiTopPicks`
+ *  （手動「重新掃描 Top3」按鈕）跟 `runDailyAiDiagnosisForTopPicks_`（每日排程）
+ *  共用。跟單檔深度診斷不同，`diagnosisType: 'top3'` 這筆文件的
+ *  `armorScore`/`strategy`/`verdict` 都是空值——這是「全市場橫向比較」的單一
+ *  結論，不是某一檔股票的診斷，`code` 固定存常數 `'TOP3'`，文件 ID 用日期
+ *  區分（同一天重跑會覆蓋同一筆，不同天各自留一筆歷史）。 */
+async function runTopPicksCore_(appConfig, candidatesResult) {
+  const timestampLabel = utilsLib.timestampLabelTaipei_();
+  const userPrompt = aiDiagnosisLib.buildTopPicksPrompt_(candidatesResult.candidates, timestampLabel);
+  const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
+  const llmResult = await callLlm_(aiDiagnosisLib.AI_TOP_PICKS_SYSTEM_PROMPT, userPrompt, provider, {
+    claude: process.env.ANTHROPIC_API_KEY,
+    gemini: process.env.GEMINI_API_KEY
+  });
+  const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
+    cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
+    cacheReadInputTokens: llmResult.cacheReadInputTokens
+  }, appConfig.pricing);
+
+  const record = {
+    date: candidatesResult.latestDate,
+    code: 'TOP3',
+    name: '（全市場橫向比較）',
+    armorScore: null,
+    strategy: '',
+    verdict: '',
+    diagnosisType: 'top3',
+    content: llmResult.text,
+    timestamp: timestampLabel
+  };
+  await admin.firestore().collection('ai_diagnosis').doc('TOP3_' + candidatesResult.latestDate + '_top3').set(record);
+
+  return Object.assign({}, record, {
+    cost: utilsLib.round_(cost, 4),
+    candidateCount: candidatesResult.candidates.length,
+    groundingDisabled: !!llmResult.groundingDisabled
+  });
+}
+
+/** 前端「重新掃描 Top3」按鈕：對最新一次戰報的全部候選做一次橫向比較，回傳
+ *  結果（前端也可以直接用 Firestore client SDK 讀 `ai_diagnosis` 的快取結果，
+ *  不用每次打開頁面就呼叫這支——見 Dashboard 的 Top3PicksCard.vue）。 */
+exports.runAiTopPicks = onCall(
+  Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
+  async function (request) {
+    assertOwnerAuth_(request);
+    const appConfig = await fetchAppConfig_();
+    const candidatesResult = await fetchLatestReportCandidates_();
+    return runTopPicksCore_(appConfig, candidatesResult);
+  }
+);
+
+/** 每日排程用：先用 AI 橫向比較（不查財報）從候選清單篩出一份大小為 topN 的
+ *  名單，取出代號後，把這份名單「全部」送進 `runDeepDiagnosisForCode_` 做完整
+ *  深度診斷——跟 apps-script 版 runAiShortlist_ + extractShortlistCodes_ +
+ *  runAiDiagnosis(codes) 同一套三段邏輯。單一股票深度診斷失敗（例如 Goodinfo
+ *  抓取逾時）不影響名單裡其他股票，逐檔包 try/catch，跟 apps-script 版
+ *  runAiDiagnosis 內部迴圈的錯誤隔離粒度一致。 */
+async function runShortlistAndDeepDiagnosis_(appConfig, candidatesResult, topN) {
+  const timestampLabel = utilsLib.timestampLabelTaipei_();
+  const systemPrompt = aiDiagnosisLib.AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE.replace(/__COUNT__/g, String(topN));
+  const userPrompt = aiDiagnosisLib.buildShortlistPrompt_(candidatesResult.candidates, timestampLabel, topN);
+  const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
+  const llmResult = await callLlm_(systemPrompt, userPrompt, provider, {
+    claude: process.env.ANTHROPIC_API_KEY,
+    gemini: process.env.GEMINI_API_KEY
+  });
+
+  const codes = aiDiagnosisLib.extractShortlistCodes_(llmResult.text, topN);
+  if (codes.length === 0) {
+    throw new Error('無法從 AI 候選名單中取出股票代號，原始回應開頭：「' +
+      String(llmResult.text || '').slice(0, 150).replace(/\n/g, ' ') + '」');
+  }
+
+  const results = [];
+  for (const code of codes) {
+    try {
+      results.push(await runDeepDiagnosisForCode_(appConfig, code));
+    } catch (e) {
+      results.push({ ok: false, code: code, error: String(e.message || e) });
+    }
+  }
+  return { shortlistText: llmResult.text, codes: codes, results: results };
+}
+
+/**
+ * 每日排程呼叫（`generateDailyReportScheduled` 寫完戰報之後，如果
+ * `config/app.aiDailyEnabled` 開著）：Top3 橫向推薦跟候選名單橫向比較+逐檔深度
+ * 診斷是兩件各自獨立、互不影響的事，各自包 try/catch，一邊失敗不影響另一邊——
+ * 跟 apps-script 版 runDailyAiDiagnosisForTopPicks 同一個設計。Top3 只有一次
+ * LLM 呼叫、耗時固定且短，優先跑完；候選名單橫向比較+逐檔深度診斷耗時隨
+ * `aiDailyTopN` 增加，放在後面。兩邊共用同一次 `fetchLatestReportCandidates_`
+ * 讀取結果，不用各自重讀重排一次 Reports。
+ *
+ * 跟 apps-script 版的差異：不帶 `budgetDeadline` 到處檢查提早跳過剩餘代號——
+ * 那是 Apps Script 6 分鐘硬性執行上限逼出來的設計，這裡的逾時上限是
+ * `generateDailyReportScheduled` 自己宣告的 540 秒，topN 夾在 3~10 的情況下
+ * 不會真的撞到，不需要那套複雜度。
+ */
+async function runDailyAiDiagnosisForTopPicks_(appConfig) {
+  let candidatesResult = null;
+  try {
+    candidatesResult = await fetchLatestReportCandidates_();
+  } catch (e) { /* 留給下面兩段各自重讀一次、各自記錄自己的錯誤訊息 */ }
+
+  const topPicks = { ok: false, error: null };
+  try {
+    const cr = candidatesResult || await fetchLatestReportCandidates_();
+    topPicks.ok = true;
+    topPicks.result = await runTopPicksCore_(appConfig, cr);
+  } catch (e) {
+    topPicks.error = String(e.message || e);
+  }
+
+  const shortlist = { ok: false, error: null };
+  try {
+    const cr = candidatesResult || await fetchLatestReportCandidates_();
+    const topN = Math.max(3, Math.min(10, appConfig.aiDailyTopN || 5));
+    shortlist.ok = true;
+    shortlist.result = await runShortlistAndDeepDiagnosis_(appConfig, cr, topN);
+  } catch (e) {
+    shortlist.error = String(e.message || e);
+  }
+
+  return { topPicks: topPicks, shortlist: shortlist };
+}
 
 /**
  * data: {code}。對「目前持有中」的一檔股票跑一次持股續抱診斷（diagnosisType='hold'）

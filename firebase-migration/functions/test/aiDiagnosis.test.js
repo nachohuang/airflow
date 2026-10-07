@@ -2,8 +2,13 @@ const assert = require('assert');
 const {
   AI_DIAGNOSIS_SYSTEM_PROMPT,
   AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT,
+  AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE,
+  AI_TOP_PICKS_SYSTEM_PROMPT,
   buildTwseOfficialFinancialsTextForCode_,
   buildDiagnosisPrompt_,
+  buildShortlistPrompt_,
+  buildTopPicksPrompt_,
+  extractShortlistCodes_,
   extractVerdict_,
   extractCoreReason_,
   calcCost_
@@ -160,6 +165,52 @@ const {
   assert.strictEqual(calcCost_('claude', 0, 0, null, undefined), 0);
   assert.strictEqual(calcCost_('claude', 1000, 1000, undefined, {}), 0);
   console.log('Test 5 (calcCost_ picks the right rate and cache multipliers) passed.');
+}
+
+// --- 6. buildShortlistPrompt_／buildTopPicksPrompt_：候選名單逐檔列出來，count 出現在
+//    buildShortlistPrompt_ 的結尾文案 ---
+{
+  const candidates = [
+    { code: '2330', name: '台積電', armorScore: 90, strategy: '🚀 趨勢啟動', trendScore: 2, instPartRank: 0.95, ibf20dRank: 0.8, interpretation: '法人積極買進' },
+    { code: '2317', name: '鴻海', armorScore: 75, strategy: '🔥 趨勢領航', trendScore: 1, instPartRank: 0.6, ibf20dRank: 0.5, interpretation: '多頭排列' }
+  ];
+  const shortlistPrompt = buildShortlistPrompt_(candidates, '2026-10-07 23:00', 5);
+  assert.ok(shortlistPrompt.indexOf('共 2 檔') !== -1);
+  assert.ok(shortlistPrompt.indexOf('1. 2330 台積電') !== -1);
+  assert.ok(shortlistPrompt.indexOf('Armor_Score=90') !== -1);
+  assert.ok(shortlistPrompt.indexOf('2. 2317 鴻海') !== -1);
+  assert.ok(shortlistPrompt.indexOf('挑出 5 檔') !== -1);
+
+  const topPicksPrompt = buildTopPicksPrompt_(candidates, '2026-10-07 23:00');
+  assert.ok(topPicksPrompt.indexOf('共 2 檔') !== -1);
+  assert.ok(topPicksPrompt.indexOf('前三檔') !== -1);
+  console.log('Test 6 (buildShortlistPrompt_/buildTopPicksPrompt_ list every candidate) passed.');
+}
+
+// --- 7. extractShortlistCodes_：正常清單、Markdown 強調符號、全形/括號分隔符、
+//    maxCount 截斷、解析不出任何一行時回傳空陣列 ---
+{
+  const normal = '1. 2330 台積電 - 法人買超\n2. 0050 元大台灣50 - 分散風險\n3. 2317 鴻海 - 轉強';
+  assert.deepStrictEqual(extractShortlistCodes_(normal), ['2330', '0050', '2317']);
+
+  const markdownWrapped = '**1.** 2330 台積電 - 理由\n**2.** 2317 鴻海 - 理由';
+  assert.deepStrictEqual(extractShortlistCodes_(markdownWrapped), ['2330', '2317']);
+
+  const altPunctuation = '1、2330 台積電 - 理由\n2) 2317 鴻海 - 理由';
+  assert.deepStrictEqual(extractShortlistCodes_(altPunctuation), ['2330', '2317']);
+
+  assert.deepStrictEqual(extractShortlistCodes_(normal, 2), ['2330', '0050'], 'maxCount 要截斷');
+  assert.deepStrictEqual(extractShortlistCodes_('完全不是清單格式的一段話'), []);
+  assert.deepStrictEqual(extractShortlistCodes_(''), []);
+  assert.deepStrictEqual(extractShortlistCodes_(null), []);
+  console.log('Test 7 (extractShortlistCodes_ parses the numbered list, tolerating common format drift) passed.');
+}
+
+// --- 8. 候選名單橫向比較／Top3 的兩份 system prompt 都存在、非空 ---
+{
+  assert.ok(AI_SHORTLIST_SYSTEM_PROMPT_TEMPLATE.indexOf('__COUNT__') !== -1, '候選名單模板要帶 __COUNT__ 佔位字元');
+  assert.ok(AI_TOP_PICKS_SYSTEM_PROMPT.indexOf('🥇') !== -1);
+  console.log('Test 8 (shortlist/top-picks system prompts exist and carry their expected markers) passed.');
 }
 
 console.log('All aiDiagnosis.js tests passed.');

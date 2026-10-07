@@ -41,6 +41,7 @@ onMounted(function () {
       loading.value = false;
       if (!scheduleFormTouched.value) resetScheduleForm();
       if (!pricingFormTouched.value) resetPricingForm();
+      if (!dailyAiFormTouched.value) resetDailyAiForm();
     },
     function (e) {
       error.value = e.message || String(e);
@@ -206,6 +207,46 @@ async function savePricing() {
     pricingSaving.value = false;
   }
 }
+
+// ---- 每日自動 AI 診斷（aiDailyEnabled／aiDailyTopN） ----
+// 跟排程/價格單位同一個草稿 + 套用按鈕模式——topN 是數字輸入框，不適合一改就存。
+// aiDailyEnabled 這顆 checkbox 理論上可以跟其他下拉選單一樣「一改就存」，但跟
+// topN 放在同一張卡片、同一個「套用」按鈕一起送出，使用者比較容易理解這兩個
+// 設定是綁在一起的（開關 + 開了之後要掃幾檔），不用分開套用兩次。
+const dailyAiForm = ref({ aiDailyEnabled: false, aiDailyTopN: 5 });
+const dailyAiFormTouched = ref(false);
+const dailyAiSaving = ref(false);
+const dailyAiSavedAt = ref('');
+
+function resetDailyAiForm() {
+  if (!config.value) return;
+  dailyAiForm.value = {
+    aiDailyEnabled: !!config.value.aiDailyEnabled,
+    aiDailyTopN: config.value.aiDailyTopN != null ? config.value.aiDailyTopN : 5
+  };
+}
+
+async function saveDailyAiSettings() {
+  dailyAiSaving.value = true;
+  error.value = '';
+  try {
+    // 跟 apps-script 版 setAiDailySettings 同一個夾限範圍（3~10）——候選名單
+    // 太窄失去「先擴大候選、再讓基本面篩選」的意義，太寬則逐檔深度診斷的時間
+    // /費用會線性增加。
+    const topN = Math.max(3, Math.min(10, Number(dailyAiForm.value.aiDailyTopN) || 5));
+    await updateDoc(doc(db, 'config', 'app'), {
+      aiDailyEnabled: !!dailyAiForm.value.aiDailyEnabled,
+      aiDailyTopN: topN
+    });
+    dailyAiSavedAt.value = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+    dailyAiFormTouched.value = false;
+  } catch (e) {
+    error.value = e.message || String(e);
+  } finally {
+    dailyAiSaving.value = false;
+  }
+}
+
 </script>
 
 <template>
@@ -345,6 +386,37 @@ async function savePricing() {
       </div>
 
       <div class="form-card">
+        <h3>每日自動 AI 診斷</h3>
+        <label class="checkbox-label">
+          <input
+            v-model="dailyAiForm.aiDailyEnabled" type="checkbox"
+            @change="dailyAiFormTouched = true"
+          >
+          排程算完戰報後，自動跑 Top3 橫向推薦 + 候選名單橫向比較深度診斷
+        </label>
+        <label>候選名單大小（3~10 檔，橫向比較後全部送進深度診斷）
+          <input
+            v-model.number="dailyAiForm.aiDailyTopN" type="number" min="3" max="10"
+            @input="dailyAiFormTouched = true"
+          >
+        </label>
+        <div class="form-actions">
+          <button type="button" :disabled="dailyAiSaving" @click="saveDailyAiSettings">
+            {{ dailyAiSaving ? '套用中...' : '套用設定' }}
+          </button>
+        </div>
+        <p v-if="dailyAiSavedAt" class="hint">已套用（{{ dailyAiSavedAt }}）</p>
+        <p class="hint">
+          開啟後，每天戰報算完（見上面「每日排程」）會多花一次 Top3 橫向推薦 +
+          候選名單橫向比較的 LLM 呼叫（不查財報，成本低），橫向比較選出的候選
+          名單會「全部」送進深度診斷（會查 Goodinfo／證交所財報，逐檔花費跟
+          單檔手動跑「跑新的深度診斷」一樣）——候選名單愈大，當天的 AI 花費跟
+          耗時愈高。手動重新掃描的按鈕在戰報頁面最上方的「AI Top3 推薦」卡片，
+          不是這裡。
+        </p>
+      </div>
+
+      <div class="form-card">
         <h3>BigQuery 設定</h3>
         <label>資料來源模式
           <select :value="config.bigQuery?.sourceMode" :disabled="saving"
@@ -365,8 +437,8 @@ async function savePricing() {
     </template>
 
     <p class="hint dashboard-note">
-      每日自動 AI 診斷（候選名單橫向比較後自動跑診斷）、用量統計、History
-      補抓/整理工具還沒遷移到這裡，需要這些功能請先用舊版網頁應用程式。
+      AI 用量統計歷史、History 補抓/整理工具還沒遷移到這裡，需要這些功能
+      請先用舊版網頁應用程式。
     </p>
   </section>
 </template>
