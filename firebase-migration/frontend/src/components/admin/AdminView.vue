@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { collection, doc, onSnapshot, updateDoc, setDoc, deleteDoc, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
@@ -371,6 +371,29 @@ function runLogStatusColor(status) {
   if (status === '失敗') return 'var(--red)';
   return 'var(--amber)'; // 略過／部分成功等中間狀態
 }
+
+// ---- 最近執行狀態（按項目分組，各自取最新一筆）----
+// 2026-10-07：使用者看了舊版 apps-script 的「排程佇列」卡片之後，想要的其實
+// 不是那一整套「背景 job 卡住可以重新啟動」的機制（那是 Apps Script 6 分鐘
+// 執行上限逼出來的設計，Firebase 版每個操作都是一次呼叫同步跑完，沒有
+// 「執行中卡住」這個狀態需要處理，見 README「每日股價資料抓取」架構決定
+// #3 的說明），而是「一眼看出每個項目最近一次有沒有成功」。這個不需要
+// 另外查 Firestore——runLogEntries 已經是依時間新到舊排序好的最近 50 筆，
+// 純前端分組、取每個 category 第一次出現（也就是最新一筆）即可。
+// 注意：如果某個項目很少跑（例如持股續抱診斷），它最近一次執行有可能
+// 已經不在這最近 50 筆之內，這裡只會顯示「尚無最近紀錄」，不代表它
+// 從來沒有成功過。
+const runLogLatestByCategory = computed(function () {
+  const seen = {};
+  const result = [];
+  runLogEntries.value.forEach(function (entry) {
+    if (seen[entry.category]) return;
+    seen[entry.category] = true;
+    result.push(entry);
+  });
+  result.sort(function (a, b) { return a.category < b.category ? -1 : 1; });
+  return result;
+});
 </script>
 
 <template>
@@ -663,24 +686,42 @@ function runLogStatusColor(status) {
         <h3>執行紀錄</h3>
         <p v-if="runLogError" class="error-box">{{ runLogError }}</p>
         <p v-if="runLogLoading" class="hint">載入中...</p>
-        <div v-else-if="runLogEntries.length" class="table-wrap">
-          <table class="history-table run-log-table">
-            <thead>
-              <tr><th>時間</th><th>項目</th><th>狀態</th><th>說明</th><th>耗時</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="(entry, i) in runLogEntries" :key="entry.timestampMs + '-' + i">
-                <td>{{ entry.timestamp }}</td>
-                <td>{{ entry.category }}</td>
-                <td>
-                  <span class="signal-badge" :style="{ color: runLogStatusColor(entry.status) }">{{ entry.status }}</span>
-                </td>
-                <td class="run-log-message">{{ entry.message }}</td>
-                <td>{{ (entry.durationMs / 1000).toFixed(1) }}s</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <template v-else-if="runLogLatestByCategory.length">
+          <h3 style="margin-top:0;">最近執行狀態</h3>
+          <div class="run-log-status-grid">
+            <div v-for="entry in runLogLatestByCategory" :key="entry.category" class="run-log-status-card">
+              <div class="run-log-status-card-top">
+                <span>{{ entry.category }}</span>
+                <span class="signal-badge" :style="{ color: runLogStatusColor(entry.status) }">{{ entry.status }}</span>
+              </div>
+              <div class="hint">{{ entry.timestamp }}</div>
+            </div>
+          </div>
+          <p class="hint">
+            每個項目只取最近 50 筆紀錄裡最新的一筆，很少執行的項目（例如持股
+            續抱診斷）如果最近一次已經超出 50 筆範圍，這裡會看不到，不代表
+            從來沒成功過，往下捲完整清單可以找更久以前的紀錄。
+          </p>
+          <h3>完整紀錄（最近 50 筆）</h3>
+          <div class="table-wrap">
+            <table class="history-table run-log-table">
+              <thead>
+                <tr><th>時間</th><th>項目</th><th>狀態</th><th>說明</th><th>耗時</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(entry, i) in runLogEntries" :key="entry.timestampMs + '-' + i">
+                  <td>{{ entry.timestamp }}</td>
+                  <td>{{ entry.category }}</td>
+                  <td>
+                    <span class="signal-badge" :style="{ color: runLogStatusColor(entry.status) }">{{ entry.status }}</span>
+                  </td>
+                  <td class="run-log-message">{{ entry.message }}</td>
+                  <td>{{ (entry.durationMs / 1000).toFixed(1) }}s</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
         <p v-else class="hint">目前沒有任何執行紀錄。</p>
         <p class="hint">
           每日排程、手動抓取/補抓、AI 診斷等背景工作執行後都會各自記一筆成功/
@@ -710,5 +751,30 @@ function runLogStatusColor(status) {
   white-space: normal;
   text-align: left;
   min-width: 220px;
+}
+
+/* 「最近執行狀態」卡片網格——手機上一欄，螢幕夠寬時自動多欄，跟舊版
+   apps-script「排程佇列」一排卡片的呈現方式類似，但這裡純粹是顯示用，
+   沒有重新啟動/刪除按鈕（見 script 區塊的說明：Firebase 版每個操作都是
+   一次呼叫同步跑完，沒有「卡住的背景 job」這個狀態）。 */
+.run-log-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.run-log-status-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.run-log-status-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
 }
 </style>
