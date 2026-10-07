@@ -291,11 +291,47 @@ async function runDailyAnalysis_() {
  *  `Response.text()` 只會用 UTF-8 解碼，中文字（股票名稱）會變成亂碼——用
  *  `iconv-lite` 手動解碼，對應 apps-script 版 `fetchCsvText_` 的
  *  `resp.getContentText('Big5')`。 */
+/**
+ * **2026-10-07 修正**：使用者實際補抓時，全部 9 天都失敗，錯誤是
+ * `HTTP 307 - https://...`——`resp.status` 直接停在 307（重新導向本身的
+ * 狀態碼），不是重新導向之後最終目的地的狀態碼，代表 Node 原生 `fetch`
+ * 預設的自動跟隨重新導向（`redirect: 'follow'`）在這個情況下沒有真的
+ * 跟過去（最常見的原因：TWSE 這個 307 回應沒有附 `Location` header，或
+ * `Location` 是相對路徑/格式讓底層實作判斷不出來要跳去哪，就直接把這個
+ * 307 回應原樣交回來，不是真的壞掉）。改成自己控制重新導向：
+ * `redirect: 'manual'`，收到 3xx 就自己讀 `Location` header、解析成絕對
+ * URL 再發一次請求（最多 5 次，避免無窮迴圈），不依賴底層實作「猜」要不要
+ * 跟。如果最後還是失敗，錯誤訊息裡會帶上「有沒有 Location header」跟
+ * 最終停在哪個 URL/狀態碼——這個開發環境連不到 twse.com.tw（見其他地方
+ * 反覆提到的網路政策限制），没辦法直接重現/驗證 TWSE 到底為什麼回
+ * 307，這裡能做的是讓下一次失敗時的錯誤訊息帶有足夠診斷資訊，不是盲猜
+ * 一次就能保證修好；同時補上比單純 `User-Agent: Mozilla/5.0` 更完整的瀏覽器
+ * header 組合（`Accept`／`Accept-Language`／`Referer`），降低被當成明顯
+ * 的自動化流量擋下來的機率。
+ */
 async function fetchTwseCsvText_(url) {
-  const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' - ' + url);
-  const buf = Buffer.from(await resp.arrayBuffer());
-  return iconv.decode(buf, 'big5');
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/csv,text/plain,*/*',
+    'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+    'Referer': 'https://www.twse.com.tw/'
+  };
+  let currentUrl = url;
+  for (let hop = 0; hop < 5; hop++) {
+    const resp = await fetch(currentUrl, { headers: headers, redirect: 'manual' });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get('location');
+      if (!location) {
+        throw new Error('HTTP ' + resp.status + '（重新導向但沒有 Location header）- ' + currentUrl);
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' - ' + currentUrl);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return iconv.decode(buf, 'big5');
+  }
+  throw new Error('重新導向次數過多（超過 5 次）- 原始網址：' + url + '，最後停在：' + currentUrl);
 }
 
 /** 抓單一交易日的三個 TWSE 端點、合併成 `history_raw` 要的列格式（中文欄名）。

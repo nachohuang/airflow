@@ -938,6 +938,11 @@ const runLogLatestByCategory = computed(function () {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px;
+  /* 2026-10-07：補抓失敗訊息裡常常帶原始 TWSE 網址（整串沒有空白可以
+     斷行的字），不設 overflow-wrap 的話這種長字串會直接撐破卡片邊框、
+     超出手機螢幕寬度，使用者實際遇到過。 */
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .run-log-status-card-top {
