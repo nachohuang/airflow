@@ -2031,3 +2031,47 @@ chunk 連同 DELETE 包進上一節的 atomic transaction（失敗會 rollback�
 切成幾個 chunk 沒辦法在這個開發環境驗證（同樣是網路政策限制），但
 70 萬字元的預算本身已經是直接從使用者實測的 3.2MB~3.8MB 回推出來的
 保守數字，不是憑空估計。
+
+## 部署偶發 Cloud Run CPU quota 超額（2026-10-07）
+
+**症狀**：這次遷移過程中，`部署 Firebase` 這個 GitHub Actions workflow
+多次偶發性失敗，錯誤是
+`Could not create or update Cloud Run service xxx, Container
+Healthcheck failed. Quota exceeded for total allowable CPU per
+project per region.`——通常重跑失敗的 job（`rerun_failed_jobs`）就會
+成功，不是程式碼問題，是部署當下的資源競爭。使用者實際到 GCP Console
+查詢（Cloud Run Admin API 的 `Total CPU allocation, in milli vCPU, per
+project per region`，`us-central1`）確認目前上限卡在 **20,000 milli
+vCPU（20 顆）**，而且畫面顯示「依據服務使用情形，您目前無法申請提高
+配額」——自助式調高配額這條路暫時走不通。
+
+**根本原因**：Cloud Functions (2nd gen) 預設給每支函式 `cpu: 1`（1 顆
+完整 vCPU，`memory <= 2GiB` 都一樣，調低 `memory` 不會連帶調低這個
+預設值）。這個 App 目前 20 幾支函式幾乎全部共用同一份
+`RUNTIME_OPTS_`，包括單純讀寫一兩筆 Firestore 文件的 CRUD 函式（例如
+`getWatchlist`）——這些函式跟真的需要算力的函式（算戰報、查
+BigQuery、抓 TWSE、跑 AI 診斷）吃一樣的 1 vCPU。部署時 Cloud Run 的
+rolling update 會讓舊／新 revision 短暫並存，疊加起來很容易在批次更新
+一堆函式時撞到 20 vCPU 的硬上限——這不只是巧合的瞬間尖峰，是這個
+App 的函式數量/資源設定組合本來就逼近這個上限。
+
+**修正**：新增 `LIGHT_RUNTIME_OPTS_`（`Object.assign({}, RUNTIME_OPTS_,
+{ cpu: 0.25, concurrency: 1 })`），套用在純粹讀寫 Firestore、不碰
+BigQuery／外部 API／LLM 的 10 支函式上：`getWatchlist`／
+`addToWatchlist`／`removeFromWatchlist`／`getPortfolio`／
+`savePortfolioItem`／`deletePortfolioLot`／`closePortfolioPosition`／
+`getClosedPortfolioHistory`／`getAiKeyStatus`／`getAiUsageSummary`。
+`concurrency: 1` 是 SDK 的硬性要求（`cpu < 1` 時 concurrency 只能是
+1）——這個 App 全程只有擁有者一人使用，這些函式本來就不會有真正的
+並發請求，這個限制不會造成任何實際影響。算戰報、BigQuery 查詢／寫入、
+AI 診斷這些真的需要算力/逾時餘裕的函式維持用預設的 `RUNTIME_OPTS_`，
+沒有動。
+
+**這不是完全的根治**：降低這 10 支函式的 CPU 用量只是讓部署時的瞬間
+總需求降低，減少撞到 20 vCPU 上限的機率，不代表以後完全不會再遇到。
+如果之後函式數量繼續增加，或使用者的自助配額申請恢復可用，應該優先
+考慮申請調高這個 quota（或減少 GitHub Actions 每次 push 都重新部署
+「全部」函式的做法，改成只部署真的改過的——目前沒有這麼做，單人工具
+部署頻率不高，這個改動的複雜度先不值得）。遇到這個錯誤的標準處理方式
+維持不變：讀 job logs 確認是這個 quota 訊息，`rerun_failed_jobs` 重跑
+即可，不是真正的程式碼錯誤。

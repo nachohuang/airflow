@@ -417,6 +417,34 @@ async function runDailyCatchupFetch_(appConfig, skipDates) {
  *  微幅成長。 */
 var RUNTIME_OPTS_ = { memory: '1GiB', timeoutSeconds: 180 };
 
+/**
+ * 2026-10-07：Cloud Functions (2nd gen) 預設給每支函式 `cpu: 1`（1 顆完整
+ * vCPU，只要 `memory <= 2GiB` 都一樣，不會因為 memory 設低一點就自動跟著
+ * 降低）。這個 App 大多數函式都共用 `RUNTIME_OPTS_`，包括單純讀寫一兩筆
+ * Firestore 文件的 CRUD 函式（例如 `getWatchlist`／`addToWatchlist`）——
+ * 這些函式跟真的需要算力的函式（算戰報、查 BigQuery、跑 AI 診斷）吃一樣
+ * 的 1 vCPU，完全是殺雞用牛刀，而且部署時每支函式的 CPU 配額會疊加：
+ * 這個專案的 Cloud Run CPU 配額（us-central1，`Total CPU allocation, per
+ * project per region`）卡在 20,000 milli vCPU（20 顆）的硬上限，使用者
+ * 實測在 GCP Console 想申請提高也顯示「依據服務使用情形，目前無法申請
+ * 提高配額」——這個專案目前有 20 幾支函式，大半是這種單純 CRUD，全部吃
+ * 滿 1 vCPU 疊加起來很容易在部署時（新舊 revision 短暫並存，CPU 用量
+ * 會瞬間加倍）超過這個硬上限，這正是這次部署反覆遇到
+ * 「Quota exceeded for total allowable CPU per project per region」的
+ * 根本原因，不只是巧合的瞬間尖峰。
+ *
+ * 給這些單純的 Firestore CRUD 函式明確調低 `cpu`（連帶把 `concurrency`
+ * 設成 1——SDK 規定 `cpu < 1` 時 concurrency 只能是 1，見
+ * `firebase-functions` 的 `GlobalOptions.concurrency` 說明）：這個 App
+ * 全程只有擁有者一人使用，這些函式本來就不會有真正的並發請求，
+ * concurrency=1 不會造成任何實際影響，純粹是把一直閒置的 CPU 配額讓出來
+ * 給部署時其他函式用，降低撞到這個硬上限的機率。只套用在真的單純讀寫
+ * Firestore、不碰 BigQuery／外部 API／LLM 的函式上——算戰報、抓
+ * TWSE／BigQuery、AI 診斷這些真的需要算力/逾時餘裕的函式維持用預設的
+ * `RUNTIME_OPTS_`，不動它們的資源設定。
+ */
+var LIGHT_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { cpu: 0.25, concurrency: 1 });
+
 /** `skip_dates` collection 的文件 ID（就是日期字串 `yyyy-MM-dd`，見
  *  firestore/schema.md §5），組成 Set 給 `scheduleLib.shouldRunDailyReport_`
  *  用——collection 很小（偶爾才加一筆臨時停跑日），直接整個撈回來，不用查詢。 */
@@ -747,14 +775,14 @@ function assertOwnerAuth_(request) {
   }
 }
 
-exports.getWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getWatchlist = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   return await buildWatchlistResult_();
 });
 
 /** data: {code, name?, note?}。code 必填；已經是持有中的股票會被擋掉（見
  *  lib/watchlist.js assertNotHolding_ 的說明）；同一檔股票重複加入視為更新。 */
-exports.addToWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+exports.addToWatchlist = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
@@ -776,7 +804,7 @@ exports.addToWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
 });
 
 /** data: {code}。 */
-exports.removeFromWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
+exports.removeFromWatchlist = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
@@ -785,7 +813,7 @@ exports.removeFromWatchlist = onCall(RUNTIME_OPTS_, async function (request) {
   return await buildWatchlistResult_();
 });
 
-exports.getPortfolio = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getPortfolio = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   return await buildPortfolioResult_();
 });
@@ -796,7 +824,7 @@ exports.getPortfolio = onCall(RUNTIME_OPTS_, async function (request) {
  * 從觀察清單移除（對應 apps-script 版 removeFromWatchlistSilently_，同步失敗
  * 不該擋住真正的買進紀錄，見 catch 區塊的說明）；帶 lotId 代表編輯既有的一筆。
  */
-exports.savePortfolioItem = onCall(RUNTIME_OPTS_, async function (request) {
+exports.savePortfolioItem = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const item = request.data || {};
   if (!item.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
@@ -843,7 +871,7 @@ exports.savePortfolioItem = onCall(RUNTIME_OPTS_, async function (request) {
 });
 
 /** data: {lotId}。依交易ID刪除單一一筆買進紀錄（不是依股票代號——同一檔可能有好幾筆）。 */
-exports.deletePortfolioLot = onCall(RUNTIME_OPTS_, async function (request) {
+exports.deletePortfolioLot = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const lotId = request.data && request.data.lotId;
   if (!lotId) throw new HttpsError('invalid-argument', '缺少交易ID');
@@ -854,7 +882,7 @@ exports.deletePortfolioLot = onCall(RUNTIME_OPTS_, async function (request) {
 /** data: {code, sellDate, sellPrice}。把某檔股票目前所有「持有中」的紀錄一次性
  *  標記為已賣出（用同一個賣出日期/價格），不支援部分賣出（對應 apps-script 版
  *  closePortfolioPosition 的說明）。 */
-exports.closePortfolioPosition = onCall(RUNTIME_OPTS_, async function (request) {
+exports.closePortfolioPosition = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   const code = utilsLib.zfill4(String(data.code || '').trim());
@@ -874,7 +902,7 @@ exports.closePortfolioPosition = onCall(RUNTIME_OPTS_, async function (request) 
   return await buildPortfolioResult_();
 });
 
-exports.getClosedPortfolioHistory = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getClosedPortfolioHistory = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const lotDocs = await fetchPortfolioLots_();
   return portfolioOpsLib.buildClosedHistory_(lotDocs);
@@ -1599,7 +1627,7 @@ exports.runPortfolioHoldDiagnosis = onCall(
  * `'ANTHROPIC_API_KEY'` 加回兩支函式的 `secrets` 陣列重新部署）。
  */
 exports.getAiKeyStatus = onCall(
-  Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
+  Object.assign({ secrets: ['GEMINI_API_KEY'] }, LIGHT_RUNTIME_OPTS_),
   async function (request) {
     assertOwnerAuth_(request);
     return {
@@ -1617,7 +1645,7 @@ exports.getAiKeyStatus = onCall(
  * `aiUsageLib.buildAiUsageSummary_` 在記憶體裡做）——COLLECTION scope 的
  * 單欄不等式查詢是 Firestore 自動索引涵蓋的範圍，不需要額外部署索引。
  */
-exports.getAiUsageSummary = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getAiUsageSummary = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   const days = data.days || 30;
