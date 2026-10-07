@@ -1117,7 +1117,42 @@ repository variable 都設定完成**，這次 commit 就是設定完後的第�
 內）push 上去，`.github/workflows/deploy-firebase.yml` 應該就會自動
 跑起來。
 
-## 股票詳情（Stock Detail，2026-10-06）
+**坑：2026-10-07，`github-deploy` 這組角色清單缺 Secret Manager 相關權限**。
+`runAiDiagnosis`／`getAiKeyStatus` 這兩支函式加上
+`secrets: ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY']` 之後，自動部署直接在
+`firebase deploy` 這一步失敗：
+
+```
+Error: Permissions denied enabling secretmanager.googleapis.com.
+Please ask a project owner to visit the following URL to enable this service:
+https://console.cloud.google.com/apis/library/secretmanager.googleapis.com?project=...
+```
+
+上面「2. 授權」那組角色清單（`firebase.admin`／`cloudfunctions.developer`／
+`run.admin`／`iam.serviceAccountUser`／`artifactregistry.admin`／
+`cloudbuild.builds.editor`／`cloudscheduler.admin`）在設計時這個專案還沒有
+任何函式用到 Secret Manager，自然沒包含相關角色——不是漏設，是這次才第一次
+需要。需要用專案 owner 身份（不是 `github-deploy` 這個部署用服務帳戶，它
+自己就是被授權的對象）在 Cloud Shell 補兩件事：
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+DEPLOY_SA="github-deploy@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# 1. 啟用 Secret Manager API（一次性，跟部署服務帳戶的權限無關，所以錯誤訊息
+#    才會說「請專案 owner 去開」——github-deploy 沒有啟用 API 的權限，不代表
+#    它事後也不能操作已經啟用的 API）
+gcloud services enable secretmanager.googleapis.com --project="$PROJECT_ID"
+
+# 2. 讓 github-deploy 能管理 Secret Manager 的 IAM 繫結——firebase deploy
+#    遇到函式宣告 secrets 選項時，需要自動把該函式的執行身分加進對應密鑰的
+#    accessor 清單，這一步需要 secretmanager.admin，原本那組角色都沒有
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DEPLOY_SA}" --role="roles/secretmanager.admin" --quiet
+```
+
+做完之後到 GitHub repo 的 Actions 分頁找失敗的 workflow run，點
+「Re-run all jobs」即可，不用重新 push 一次 commit。
 
 戰報卡片點進去看的頁面：走勢圖（收盤價 + MA5/20/60）、戰報燈號歷史、AI
 診斷紀錄快取，從 `apps-script/src/StockAnalysis.gs` 搬過來。**刻意沒搬**
