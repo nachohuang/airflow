@@ -1801,3 +1801,34 @@ Big5 解碼正不正確、BigQuery DML 寫入能不能成功」都需要部署�
    版目前就是單純顯示最近 50 筆全部類型，筆數不多（每天正常情況下個位數
    到十幾筆），用「項目」欄位用眼睛掃一下也看得出來，先不做額外的篩選
    UI；如果之後紀錄密度變高（例如 AI 診斷量很大）再考慮加。
+
+## Bug 修正：callFn 的 client 端逾時寫死 30 秒（2026-10-07）
+
+**症狀**：部署完「每日股價資料抓取」跟「執行紀錄」之後，使用者實際在
+Admin 頁面測試「補抓區間」，按下「開始補抓」後畫面直接顯示
+`deadline-exceeded` 錯誤。
+
+**根本原因**：`frontend/src/composables/useCallable.js` 的 `callFn`
+呼叫 Firebase callable SDK 時，`timeout` 選項寫死 `30000`（30 秒）——
+這是「client 端等後端回應等多久就放棄」的設定，跟後端 Cloud Function
+自己宣告的 `timeoutSeconds`（`functions/index.js` 的 `RUNTIME_OPTS_`）
+是兩個完全獨立的數字。`exports.runHistoryBackfill` 後端宣告
+`timeoutSeconds: 540`（540 秒），其餘大多數 onCall function（包含
+`runAiDiagnosis`／`runPortfolioHoldDiagnosis`／`runAiTopPicks` 這些要
+查 Goodinfo／呼叫 LLM、經常跑超過 30 秒的函式）也是 `RUNTIME_OPTS_`
+預設的 180 秒。client 端 30 秒的逾時比這些後端預算短了 6~18 倍——
+後端可能根本還在正常執行、甚至已經成功寫完資料，前端卻早就自己放棄、
+顯示逾時錯誤，讓使用者誤以為操作失敗。
+
+**修正**：`callFn(name, data, timeoutMs)` 新增第三個參數，預設值從
+`30000` 改成 `180000`（對齊 `RUNTIME_OPTS_` 的 180 秒），呼叫
+`runHistoryBackfill` 的地方（`AdminView.vue` 的 `runBackfillNow`）
+額外傳入 `540000` 對齊後端 540 秒的宣告。這個預設值調整同時也修正了
+AI 診斷（`StockDetailView.vue` 的 `runDiagnosis`）原本可能受同一個
+30 秒 client 逾時影響、只是還沒被使用者回報出來的潛在問題——Goodinfo
+爬蟲加上 LLM 呼叫很容易超過 30 秒。
+
+**驗證**：`npm run build` 通過；這是純 client 端設定值調整，沒有新增
+依賴或改變後端行為，沒有對應的單元測試可以寫（`httpsCallable` 的
+`timeout` 選項是 SDK 內部行為，純邏輯層的 `functions/lib/*.js` 完全
+沒碰到）。

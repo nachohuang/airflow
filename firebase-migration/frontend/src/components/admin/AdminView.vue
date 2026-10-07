@@ -326,7 +326,7 @@ async function runBackfillNow() {
       startDate: backfillForm.value.startDate,
       endDate: backfillForm.value.endDate,
       skipWeekends: !!backfillForm.value.skipWeekends
-    });
+    }, 540000); // 跟後端 exports.runHistoryBackfill 宣告的 timeoutSeconds: 540 對齊
     await loadHistoryOverview();
   } catch (e) {
     backfillError.value = e.message || String(e);
