@@ -219,6 +219,37 @@ function buildInsertRowsSql_(tableRef, rows) {
   return 'INSERT INTO `' + tableRef + '` (' + bqColumnNames_().join(', ') + ')\nVALUES\n' + valuesSql;
 }
 
+/**
+ * 把「刪除這些日期既有資料」跟「插入新資料」包成一個 BigQuery multi-statement
+ * script，當一個 query job 送出——**2026-10-07 修正一個真的發生過的資料遺失
+ * bug**：原本 `writeHistoryRowsToBigQuery_`（index.js）是兩次獨立的
+ * `client.query()` 呼叫，先 DELETE 再 INSERT。使用者實際補抓時，如果 INSERT
+ * 那一步失敗（TWSE 資料不完整、BigQuery 暫時性錯誤、網路中斷…），DELETE
+ * 已經先成功執行完了——那一天「原本已經存在」的資料就這樣被刪掉、沒有新
+ * 資料補回去，從「沒抓到新的」變成「連舊的都不見了」。`getHistoryOverview`
+ * 的 `maxDate`／`tradingDays` 实際出现过從 2026-10-02／179 天倒退回
+ * 2026-09-30／178 天，就是這個 bug 造成的。
+ *
+ * 改成 `BEGIN TRANSACTION; DELETE ...; INSERT ...; COMMIT TRANSACTION;`
+ * 包在一個 `BEGIN ... EXCEPTION WHEN ERROR THEN ROLLBACK TRANSACTION; RAISE
+ * ... END;` 區塊裡，當一個 query job 送出：INSERT 失敗時交易會先
+ * ROLLBACK（撤銷 DELETE 的效果，那天原本的資料完整保留），再用 RAISE 把
+ * 錯誤往外丟，呼叫端（`fetchOneDayAndWrite_`）原本的 try/catch 照常把這天
+ * 記成 `failed`——行為上「這天失敗了」沒有變，差別只在「失敗的時候不會
+ * 順便把原本好好的資料也弄丟」。
+ */
+function buildDeleteAndInsertTransactionSql_(tableRef, dateStrs, rows) {
+  return 'BEGIN\n' +
+    '  BEGIN TRANSACTION;\n' +
+    '  ' + buildDeleteDatesSql_(tableRef, dateStrs) + ';\n' +
+    '  ' + buildInsertRowsSql_(tableRef, rows) + ';\n' +
+    '  COMMIT TRANSACTION;\n' +
+    'EXCEPTION WHEN ERROR THEN\n' +
+    '  ROLLBACK TRANSACTION;\n' +
+    '  RAISE USING MESSAGE = @@error.message;\n' +
+    'END;';
+}
+
 /** `history_raw` 目前最新的 `date_str`——每日排程／補抓用這個決定要從哪一天
  *  開始補（下一天）。查無任何資料時回傳 null（全新安裝，或這張表還是空的），
  *  呼叫端自行決定 fallback（通常是從今天開始抓）。 */
@@ -248,6 +279,7 @@ module.exports = {
   mapBqRowToHistoryRow_: mapBqRowToHistoryRow_,
   buildDeleteDatesSql_: buildDeleteDatesSql_,
   buildInsertRowsSql_: buildInsertRowsSql_,
+  buildDeleteAndInsertTransactionSql_: buildDeleteAndInsertTransactionSql_,
   buildMaxDateSql_: buildMaxDateSql_,
   buildDateBoundsSql_: buildDateBoundsSql_
 };

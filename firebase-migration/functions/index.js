@@ -318,16 +318,19 @@ async function fetchAndMergeOneDay_(dateStr) {
   return twseFetchLib.mergeDayRows_(t86Rows, miRows, bwRows, dateStr);
 }
 
-/** 把合併好的一天（或多天）資料寫進 BigQuery `history_raw`：先刪除這些日期
- *  的既有資料，再用 INSERT DML 寫入新資料（見 lib/bigquery.js
- *  `buildInsertRowsSql_` 的架構決定說明：DML 不是 load job）。 */
+/** 把合併好的一天（或多天）資料寫進 BigQuery `history_raw`：刪除這些日期的
+ *  既有資料、插入新資料，包成一個 BigQuery transaction 當一個 query job
+ *  送出（見 lib/bigquery.js `buildDeleteAndInsertTransactionSql_` 的完整
+ *  說明）——**2026-10-07 修正**：原本是兩次獨立的 `client.query()` 呼叫，
+ *  INSERT 那次如果失敗，DELETE 已經成功的部分不會自動復原，等於把那一天
+ *  原本就有的資料弄丟了（實際發生過，不是假設）。改成單一 transaction
+ *  之後，失敗時 DELETE 的效果會被 ROLLBACK，原本的資料不受影響。 */
 async function writeHistoryRowsToBigQuery_(bigQueryConfig, rows) {
   if (!rows || rows.length === 0) return;
   const client = new BigQuery({ projectId: bigQueryConfig.projectId });
   const tableRef = bigquery.rawTableRef_(bigQueryConfig);
   const dates = Array.from(new Set(rows.map(function (r) { return r['日期']; })));
-  await client.query({ query: bigquery.buildDeleteDatesSql_(tableRef, dates) });
-  await client.query({ query: bigquery.buildInsertRowsSql_(tableRef, rows) });
+  await client.query({ query: bigquery.buildDeleteAndInsertTransactionSql_(tableRef, dates, rows) });
 }
 
 /** `history_raw` 目前最新的 date_str，查無資料回傳 null（全新安裝，或這張表

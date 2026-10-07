@@ -165,6 +165,22 @@ const bq = require('../lib/bigquery');
   console.log('Test buildInsertRowsSql_ (column order matches BQ_COLUMN_MAP, escapes quotes) passed.');
 }
 
+// --- buildDeleteAndInsertTransactionSql_：DELETE+INSERT 包成一個 transaction，
+//     失敗時要 ROLLBACK，不能讓 DELETE 的效果留下來、INSERT 卻沒補回去 ---
+{
+  const rows = [{ 日期: '2026-10-07', 證券代號: '2330', 證券名稱: '台積電' }];
+  const sql = bq.buildDeleteAndInsertTransactionSql_('proj.ds.history_raw', ['2026-10-07'], rows);
+  assert.ok(sql.indexOf('BEGIN TRANSACTION;') !== -1, '要包在 transaction 裡');
+  assert.ok(sql.indexOf('DELETE FROM `proj.ds.history_raw`') !== -1, 'transaction 裡要有 DELETE');
+  assert.ok(sql.indexOf('INSERT INTO `proj.ds.history_raw`') !== -1, 'transaction 裡要有 INSERT');
+  assert.ok(sql.indexOf('COMMIT TRANSACTION;') !== -1, '要有 COMMIT');
+  assert.ok(sql.indexOf('ROLLBACK TRANSACTION;') !== -1, '失敗要有 ROLLBACK，不能把 DELETE 的效果留下來');
+  // DELETE 必須排在 INSERT 之前，順序錯了會先把新資料插進去又被接下來的
+  // DELETE 誤刪（雖然目前 WHERE 條件只會刪同一批日期，順序對了才安全）。
+  assert.ok(sql.indexOf('DELETE FROM') < sql.indexOf('INSERT INTO'), 'DELETE 要在 INSERT 之前執行');
+  console.log('Test buildDeleteAndInsertTransactionSql_ (wraps DELETE+INSERT in one rollback-safe transaction) passed.');
+}
+
 // --- buildMaxDateSql_ ---
 {
   const sql = bq.buildMaxDateSql_('proj.ds.history_raw');

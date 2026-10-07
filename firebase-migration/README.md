@@ -1933,3 +1933,58 @@ AI 診斷三支 onCall 則已經在下一節擴大套用了（使用者確認要
   真正的狀態一律看 `jobs/{jobKey}` 監聽到的內容。
 
 **驗證**：`npm test`（後端）、`npm run build`（前端）都通過。
+
+## Bug 修正：DELETE+INSERT 不是 atomic，INSERT 失敗會把原本的資料也弄丟（2026-10-07）
+
+**症狀**：使用者實際跑了一次「補抓區間」之後，`getHistoryOverview` 顯示的
+`maxDate`／`tradingDays` 不是變多，是**倒退**了（從 `2026-10-02`／179 天
+變成 `2026-09-30`／178 天）——不是「沒抓到新資料」這種無害的失敗，是
+「原本已經存在的資料不見了」。
+
+**根本原因**：`writeHistoryRowsToBigQuery_`（`functions/index.js`）原本是
+兩次獨立的 `client.query()` 呼叫：先 `DELETE FROM history_raw WHERE
+date_str IN (...)`，再 `INSERT INTO history_raw VALUES (...)`。這兩個
+query 不是同一個 transaction，中間完全沒有保護——如果 INSERT 那一步失敗
+（TWSE 那天的資料不完整、BigQuery 暫時性錯誤、網路中斷…），DELETE 已經
+成功執行完了，那一天「原本已經存在」的資料就這樣被刪掉、沒有新資料補
+回去。`fetchOneDayAndWrite_` 外層的 try/catch 把這整件事吞成一個普通的
+`{kind:'failed'}`，呼叫端只會看到「這天補抓失敗」，完全不知道其實連
+原本的舊資料都一起沒了。
+
+補抓/手動抓取/每日排程補抓這三條路徑都共用同一個 `fetchOneDayAndWrite_`
+→ `writeHistoryRowsToBigQuery_`，所以不管哪一條路徑觸發，只要 INSERT
+那一步在 DELETE 之後失敗，都會踩到這個坑——這次是使用者手動補抓區間時
+踩到，但理論上每日自動排程補抓一樣有風險。
+
+**修正**：新增 `lib/bigquery.js` 的 `buildDeleteAndInsertTransactionSql_`，
+把 DELETE 跟 INSERT 包成一個 BigQuery multi-statement script，當**一個**
+query job 送出：
+```sql
+BEGIN
+  BEGIN TRANSACTION;
+  DELETE FROM `history_raw` WHERE date_str IN (...);
+  INSERT INTO `history_raw` (...) VALUES (...);
+  COMMIT TRANSACTION;
+EXCEPTION WHEN ERROR THEN
+  ROLLBACK TRANSACTION;
+  RAISE USING MESSAGE = @@error.message;
+END;
+```
+INSERT 失敗時會先 `ROLLBACK TRANSACTION`（撤銷 DELETE 的效果，那天原本
+的資料完整保留），再用 `RAISE` 把錯誤往外丟，呼叫端原本的 try/catch
+行為不變（照常把這天記成 `failed`）——差別只在「失敗的時候不會順便把
+原本好好的資料也弄丟」。`writeHistoryRowsToBigQuery_` 從兩次 `query()`
+呼叫改成一次。
+
+**資料復原**：這個修正防止的是「以後」再發生同樣的事，**不會自動救回
+已經被刪掉的那幾天**——這次遺失的日期需要重新跑一次「補抓區間」（涵蓋
+受影響的日期範圍）才會補回來，TWSE 的端點對過去的交易日期一樣查得到
+資料，重新抓一次就能恢復。
+
+**驗證**：`test/bigquery.test.js` 新增測試確認組出來的 SQL 有
+`BEGIN TRANSACTION`／`DELETE`／`INSERT`／`COMMIT`／`ROLLBACK`，而且
+DELETE 排在 INSERT 之前；`npm test` 全部通過。多 statement script 在真的
+BigQuery 環境下的 transaction/rollback 行為沒辦法在這個開發環境實際驗證
+（跟這次遷移其他碰 BigQuery API 的程式碼一樣，見「每日股價資料抓取」
+那節的驗證說明），這是 BigQuery 官方文件記載的標準 transaction 語法，
+不是沒有依據的猜測。
