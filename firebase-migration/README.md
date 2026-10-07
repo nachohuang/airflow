@@ -2056,8 +2056,8 @@ rolling update 會讓舊／新 revision 短暫並存，疊加起來很容易在�
 App 的函式數量/資源設定組合本來就逼近這個上限。
 
 **修正**：新增 `LIGHT_RUNTIME_OPTS_`（`Object.assign({}, RUNTIME_OPTS_,
-{ cpu: 0.25, concurrency: 1 })`），套用在純粹讀寫 Firestore、不碰
-BigQuery／外部 API／LLM 的 10 支函式上：`getWatchlist`／
+{ memory: '512MiB', cpu: 0.25, concurrency: 1 })`），套用在純粹讀寫
+Firestore、不碰 BigQuery／外部 API／LLM 的 10 支函式上：`getWatchlist`／
 `addToWatchlist`／`removeFromWatchlist`／`getPortfolio`／
 `savePortfolioItem`／`deletePortfolioLot`／`closePortfolioPosition`／
 `getClosedPortfolioHistory`／`getAiKeyStatus`／`getAiUsageSummary`。
@@ -2075,3 +2075,17 @@ AI 診斷這些真的需要算力/逾時餘裕的函式維持用預設的 `RUNTI
 部署頻率不高，這個改動的複雜度先不值得）。遇到這個錯誤的標準處理方式
 維持不變：讀 job logs 確認是這個 quota 訊息，`rerun_failed_jobs` 重跑
 即可，不是真正的程式碼錯誤。
+
+**部署驗證抓到的第二個錯誤（第一版只改 `cpu`，沒動 `memory`）**：
+Firebase CLI 直接拒絕部署，訊息是「The functions ... have too little
+CPU for their memory allocation. A minimum of 0.5 CPU is needed to
+set a memory limit greater than 512MiB」——Cloud Run 的 memory/CPU
+組合是有硬性規則的，memory 超過 512MiB 就不能把 cpu 設在 0.5 以下。
+這 10 支函式沿用 `RUNTIME_OPTS_` 的 `1GiB` 跟新設的 `cpu: 0.25` 互相
+衝突。改成 `LIGHT_RUNTIME_OPTS_` 自己覆寫 `memory: '512MiB'`（沒有
+進一步砍到更低的 `256MiB`——雖然這些函式本身單純讀寫一兩筆 Firestore
+文件，不需要太多記憶體，但跟其他函式共用同一個 `index.js`，module
+層級載入的重依賴（BigQuery client／cheerio 之類）每個函式冷啟動都要
+付一次代價，不是只有真的用到那個依賴的函式才付；這個開發環境沒辦法
+實際部署驗證冷啟動會不會 OOM，保守選一個比較安全的數字，不賭激進的
+`256MiB`）。

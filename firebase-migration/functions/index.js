@@ -442,8 +442,22 @@ var RUNTIME_OPTS_ = { memory: '1GiB', timeoutSeconds: 180 };
  * Firestore、不碰 BigQuery／外部 API／LLM 的函式上——算戰報、抓
  * TWSE／BigQuery、AI 診斷這些真的需要算力/逾時餘裕的函式維持用預設的
  * `RUNTIME_OPTS_`，不動它們的資源設定。
+ *
+ * **部署驗證抓到的錯誤**：第一次只蓋掉 `cpu`、沒動 `memory`（繼續沿用
+ * `RUNTIME_OPTS_` 的 `1GiB`），部署直接被 Firebase CLI 拒絕：
+ * 「The functions ... have too little CPU for their memory allocation.
+ * A minimum of 0.5 CPU is needed to set a memory limit greater than
+ * 512MiB」——Cloud Run 的 memory/CPU 組合有硬性規則，memory 超過
+ * 512MiB 就不能把 cpu 設在 0.5 以下。這些函式本身單純讀寫一兩筆
+ * Firestore 文件，但跟其他函式共用同一個 `index.js`，module 層級的
+ * `require()`（BigQuery client／cheerio 之類的重依賴）每個函式冷啟動都
+ * 要付一次代價，不是只有真的用到那個依賴的函式才付——保守起見選
+ * `512MiB`（Cloud Run 這個級距仍然允許 `cpu` 低於 0.5），沒有進一步砍到
+ * `256MiB` 那麼極端：這個開發環境沒辦法實際部署驗證冷啟動會不會 OOM
+ * （見 README 其他地方反覆提到的網路政策限制），没把握的情況下不賭
+ * 激進的數字。
  */
-var LIGHT_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { cpu: 0.25, concurrency: 1 });
+var LIGHT_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '512MiB', cpu: 0.25, concurrency: 1 });
 
 /** `skip_dates` collection 的文件 ID（就是日期字串 `yyyy-MM-dd`，見
  *  firestore/schema.md §5），組成 Set 給 `scheduleLib.shouldRunDailyReport_`
