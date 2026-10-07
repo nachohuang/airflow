@@ -1381,3 +1381,57 @@ Admin 頁面新增「AI 設定」卡片，把 AI 診斷相關、而且**後端�
 詳情頁手動觸發這一條路徑），開放這兩個欄位編輯會變成跟 `skip_dates` 一樣
 的「畫面上看起來能調、後端完全不理」的陷阱，所以先不開放，等「每日自動 AI
 診斷」這個功能真的要做的時候再一起加 UI。
+
+## 評分結果 UI 優化（2026-10-07）
+
+使用者實際用過「跑新的深度診斷」之後回饋：新版把 AI 回應的 Markdown 原文
+整段當純文字 dump 出來，比舊版（apps-script/src/JavaScript.html）讀起來
+差很多——舊版有把 Markdown 解析成真正的 HTML（結論橫幅、可收合小節、表格
+轉成卡片），新版完全沒做這件事。另外戰報卡片本身（Armor Score／操作策略）
+的視覺層級也不如舊版清楚。這次對照舊版的做法做一次整體優化：
+
+- **新增 `frontend/src/utils/markdownLite.js`**（純函式，不碰 DOM）——
+  跟舊版 `renderMarkdownLite`／`splitMarkdownSections_`／
+  `pickSectionIcon_` 同一個精神重新寫一份（不是逐字搬運，因為舊版是
+  dependency-free 的 vanilla JS，這版用 ES module 寫，但轉換規則/涵蓋
+  範圍保持一致）：
+  - `splitMarkdownSections`／`sectionsExcludingFinalDecision`：把
+    AI 回應依標題切成 intro（含風險評級的引言段）+ 各小節，「最終操作
+    決策」那一節被排除（已經在結論橫幅顯示過一次）。
+  - `renderMarkdownLite`：標題/引用/清單/`**粗體**`轉成真正的 HTML
+    標籤；表格**刻意不轉成 `<table>`**（手機螢幕窄，欄位一多會被壓縮
+    到看不清楚，這正是舊版改用卡片呈現的理由）——改成每一列資料變成
+    一張 `.md-table-card`，欄位名稱＋值變成 `.kv-row`。
+  - 所有文字內容都先用 `escapeHtml` 跳脫過，只有這支檔案自己產生的
+    標籤會被當成真正的 HTML 插入，`v-html` 可以放心使用。
+  - `verdictDirection`／`extractCoreReason`：結論上色（買=綠／賣=紅／
+    觀望=黃）跟核心理由抽取，跟 `functions/lib/aiDiagnosis.js` 的
+    `extractCoreReason_` 同一條正規表示式，前端重複一份而不是跨前後端
+    共用（單一正規表示式，不值得為了共用建一個套件）。
+- **新增 `frontend/src/utils/strategyColor.js`**——跟舊版
+  `STRATEGY_HINT` 同一份「操作策略文字 → 顏色」對照表（紅＝止盈/止損、
+  綠＝持股守護、藍＝趨勢啟動、黃＝趨勢領航），套用在戰報卡片／持股卡片／
+  觀察清單卡片／戰報燈號歷史表格的策略文字上，讓人掃過一排卡片就能用
+  顏色分辨「這是止損警示還是加碼訊號」。
+- **`DashboardView.vue` 戰報卡片重排版**：代號＋名稱放左邊、Armor Score
+  放右邊同一行（夠大夠粗），策略＋建議動作合併一行用上面的顏色對照表
+  上色，對齊舊版 `.stock-card` 的視覺層級。
+- **`StockDetailView.vue` 的 AI 診斷結果重做**：拿掉整段純文字 dump，
+  改成「結論橫幅（買/賣/觀望上色 + 核心理由）＋ intro（風險評級引言）＋
+  各小節收合清單（每節一個 emoji，表格變成卡片）」，第一筆（最新一筆）
+  診斷預設展開，其餘預設收合。
+- **`style.css` 新增** `--green`／`--red`／`--amber` 三個顏色 token
+  （`--green`/`--red` 直接沿用既有的 `--positive`/`--negative`，
+  `--amber` 是新增的第三種），以及 `.stock-card-*`／`.ai-report`／
+  `.ai-verdict-banner(.up/.down/.neutral)`／`.md-table-cards`／
+  `.kv-row` 這組新的 class。`.signal-badge` 的底色改成
+  `color-mix(in srgb, currentColor 12%, transparent)`，套用
+  `strategyColor()` 時只需要覆寫 `color`，底色會自動跟著換，不用
+  額外算第二個顏色值。
+
+⚠️ Markdown 解析邏輯用一支手寫腳本（`/tmp/.../scratchpad/test-md.mjs`，
+不在 repo 裡）對照 `AI_DIAGNOSIS_SYSTEM_PROMPT` 的輸出格式範本手動測過一次
+（intro／表格轉卡片／排除最終決策小節／核心理由抽取／結論上色都符合預期），
+沒有寫進 `npm test`——跟 `functions/lib/` 的慣例不同，這是純前端展示邏輯，
+目前這個專案沒有前端單元測試基礎設施，之後如果要加，這支是第一個值得補
+測試的候選。

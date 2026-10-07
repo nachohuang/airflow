@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { collectionGroup, collection, query, orderBy, limit, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
+import { strategyColor } from '../../utils/strategyColor';
 import StockDetailView from './StockDetailView.vue';
 
 const loading = ref(true);
@@ -141,23 +142,25 @@ onUnmounted(function () {
     </div>
 
     <div class="card-list">
-      <article v-for="s in filteredSignals" :key="s.code" class="card">
-        <header class="card-open" @click="openDetail(s.code)">
-          <strong>{{ s.code }} {{ s.name }}</strong>
-          <span class="signal-badge">{{ s.strategy }}</span>
-        </header>
-        <div class="card-body">
-          <div>Armor Score：{{ s.armorScore != null ? s.armorScore.toFixed(1) : '-' }}</div>
-          <div>{{ s.action }}</div>
-          <div v-if="s.interpretation">{{ s.interpretation }}</div>
-          <div v-if="s.predictedReturn1m != null || s.predictedDownsideResistance != null">
-            因子模型預測：
-            <template v-if="s.predictedReturn1m != null">1個月 {{ fmtPct(s.predictedReturn1m, 1) }}</template>
-            <template v-if="s.predictedDownsideResistance != null">　抗跌力 {{ fmtPct(s.predictedDownsideResistance, 2) }}</template>
-          </div>
-          <div v-if="s.monitorUrl">
-            <a :href="s.monitorUrl" target="_blank" rel="noopener" @click.stop>監控連結 ↗</a>
-          </div>
+      <article v-for="s in filteredSignals" :key="s.code" class="card card-open" @click="openDetail(s.code)">
+        <div class="stock-card-head">
+          <span>
+            <span class="stock-card-code">{{ s.code }}</span>
+            <span class="stock-card-name">{{ s.name }}</span>
+          </span>
+          <span class="stock-card-score">{{ s.armorScore != null ? s.armorScore.toFixed(1) : '-' }}</span>
+        </div>
+        <div class="stock-card-strategy" :style="{ color: strategyColor(s.strategy) }">
+          {{ s.strategy }}　{{ s.action }}
+        </div>
+        <div v-if="s.interpretation" class="stock-card-note">{{ s.interpretation }}</div>
+        <div v-if="s.predictedReturn1m != null || s.predictedDownsideResistance != null" class="stock-card-note dim">
+          因子模型預測：
+          <template v-if="s.predictedReturn1m != null">1個月 {{ fmtPct(s.predictedReturn1m, 1) }}</template>
+          <template v-if="s.predictedDownsideResistance != null">　抗跌力 {{ fmtPct(s.predictedDownsideResistance, 2) }}</template>
+        </div>
+        <div v-if="s.monitorUrl" class="stock-card-note">
+          <a :href="s.monitorUrl" target="_blank" rel="noopener" @click.stop>監控連結 ↗</a>
         </div>
       </article>
       <p v-if="!loading && latestDate && filteredSignals.length === 0" class="hint">
@@ -169,8 +172,9 @@ onUnmounted(function () {
     </div>
 
     <p class="hint dashboard-note">
-      點卡片可以看股票詳情（走勢圖、戰報燈號歷史、AI 診斷紀錄）。即時報價、
-      跑新的 AI 診斷還沒遷移，需要這些功能請先用舊版網頁應用程式。
+      點卡片可以看股票詳情（走勢圖、戰報燈號歷史、AI 診斷紀錄，也可以在
+      那裡跑新的深度診斷）。即時報價還沒遷移，需要這個功能請先用舊版網頁
+      應用程式。
     </p>
   </section>
 </template>

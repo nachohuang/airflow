@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import { callFn } from '../../composables/useCallable';
+import { strategyColor } from '../../utils/strategyColor';
 
 const items = ref([]);
 const loading = ref(false);
@@ -153,7 +154,7 @@ onMounted(load);
       <article v-for="card in items" :key="card.code" class="card">
         <header>
           <strong>{{ card.code }} {{ card.name }}</strong>
-          <span v-if="card.signal" class="signal-badge">{{ card.signal.strategy }}</span>
+          <span v-if="card.signal" class="signal-badge" :style="{ color: strategyColor(card.signal.strategy) }">{{ card.signal.strategy }}</span>
         </header>
         <div class="card-body">
           <div>加權平均成本：{{ card.cost }}</div>

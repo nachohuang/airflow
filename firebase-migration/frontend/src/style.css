@@ -10,6 +10,12 @@
   --danger-bg: rgba(220, 38, 38, 0.08);
   --positive: #16a34a;
   --negative: #dc2626;
+  /* 跟舊版 apps-script/src/Stylesheet.html 的 STRATEGY_HINT 顏色對應一致
+     （見 utils/strategyColor.js）；green/red 直接沿用既有的 positive/
+     negative token，amber 是新增的第三種（趨勢領航用）。 */
+  --green: var(--positive);
+  --red: var(--negative);
+  --amber: #d97706;
 
   font: 16px/1.5 system-ui, 'Segoe UI', 'Noto Sans TC', Roboto, sans-serif;
   color-scheme: light dark;
@@ -31,6 +37,7 @@
     --danger-bg: rgba(248, 113, 113, 0.12);
     --positive: #4ade80;
     --negative: #f87171;
+    --amber: #fbbf24;
   }
 }
 
@@ -376,18 +383,201 @@ label {
   margin-bottom: 20px;
 }
 
-.ai-diagnosis-content {
-  margin: 10px 0 0;
+/* ---------- 戰報卡片（Dashboard）：代號/名稱跟 Armor Score 同一行，
+   分數靠右、夠大夠粗，策略文字依 utils/strategyColor.js 上色——讓人一瞥
+   卡片就能分辨「這是加碼訊號還是止損警示」，不用逐字讀策略名稱，對照舊版
+   apps-script/src/Stylesheet.html 的 .stock-card 系列。 ---------- */
+.stock-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.stock-card-code {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text-h);
+}
+
+.stock-card-name {
+  color: var(--text);
+  opacity: 0.75;
+  font-size: 13px;
+  margin-left: 6px;
+}
+
+.stock-card-score {
+  font-weight: 700;
+  font-size: 17px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.stock-card-strategy {
+  margin-top: 6px;
   font-size: 14px;
-  white-space: pre-wrap;
+  font-weight: 600;
+}
+
+.stock-card-note {
+  font-size: 13px;
+  margin-top: 4px;
+  color: var(--text);
+}
+
+.stock-card-note.dim {
+  opacity: 0.75;
+}
+
+/* ---------- AI 診斷結果：結論橫幅 + 可收合小節，取代把整段 Markdown
+   原文直接 dump 成一大塊純文字——這是舊版（apps-script/src/
+   JavaScript.html 的 renderAiDiagnosisReport_ 系列）讀起來比新版好懂的
+   主要原因，見 utils/markdownLite.js 的完整說明。 ---------- */
+.ai-report {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.ai-report p {
+  margin: 6px 0;
+}
+
+.ai-report blockquote {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  border-radius: 0 6px 6px 0;
+}
+
+.ai-report hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 10px 0;
+}
+
+.ai-report .md-li {
+  margin: 4px 0;
+}
+
+.ai-verdict-banner {
+  background: var(--bg);
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+.ai-verdict-banner.up {
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, var(--bg-card));
+}
+
+.ai-verdict-banner.down {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, var(--bg-card));
+}
+
+.ai-verdict-banner.neutral {
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 10%, var(--bg-card));
+}
+
+.ai-verdict-banner-label {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.ai-verdict-banner-value {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 4px 0;
+}
+
+.ai-verdict-banner.up .ai-verdict-banner-value {
+  color: var(--green);
+}
+
+.ai-verdict-banner.down .ai-verdict-banner-value {
+  color: var(--red);
+}
+
+.ai-verdict-banner.neutral .ai-verdict-banner-value {
+  color: var(--amber);
+}
+
+.ai-verdict-banner-reason {
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.ai-report details.ai-section {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.ai-report details.ai-section summary {
+  color: var(--text-h);
+}
+
+.md-table-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.md-table-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.md-table-card-title {
+  margin-bottom: 4px;
+}
+
+.kv-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.kv-row:last-child {
+  border-bottom: none;
+}
+
+.kv-key {
+  color: var(--text);
+  opacity: 0.75;
+  flex: none;
+}
+
+.kv-value {
+  text-align: right;
 }
 
 .signal-badge {
   font-size: 13px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--accent-bg);
   color: var(--accent);
+  /* 背景跟著 color 自動算一個淡色底（12% 不透明度），所以套用
+     utils/strategyColor.js 上色時（:style="{ color: strategyColor(...) }"）
+     只需要覆寫 color，背景會自動跟著換成對應的淡紅/淡綠/淡黃，不用額外
+     算第二個顏色值。 */
+  background: color-mix(in srgb, currentColor 12%, transparent);
 }
 
 .card-body {

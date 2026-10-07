@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import { callFn } from '../../composables/useCallable';
+import { strategyColor } from '../../utils/strategyColor';
 
 const items = ref([]);
 const loading = ref(false);
@@ -73,7 +74,7 @@ onMounted(load);
       <article v-for="item in items" :key="item.code" class="card">
         <header>
           <strong>{{ item.code }} {{ item.name }}</strong>
-          <span v-if="item.signal" class="signal-badge">{{ item.signal.strategy }}</span>
+          <span v-if="item.signal" class="signal-badge" :style="{ color: strategyColor(item.signal.strategy) }">{{ item.signal.strategy }}</span>
         </header>
         <div class="card-body">
           <div>加入日期：{{ item.addedDate }}</div>

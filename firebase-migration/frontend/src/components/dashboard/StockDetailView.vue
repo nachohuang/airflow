@@ -2,6 +2,15 @@
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
 import Chart from 'chart.js/auto';
 import { callFn } from '../../composables/useCallable';
+import { strategyColor } from '../../utils/strategyColor';
+import {
+  renderMarkdownLite,
+  splitMarkdownSections,
+  sectionsExcludingFinalDecision,
+  pickSectionIcon,
+  extractCoreReason,
+  verdictDirection
+} from '../../utils/markdownLite';
 
 const props = defineProps({ code: { type: String, required: true } });
 const emit = defineEmits(['close']);
@@ -78,6 +87,18 @@ async function runDiagnosis() {
   }
 }
 
+/** AI 診斷卡片要用到的三段衍生內容（結論橫幅文字、intro HTML、各小節
+ *  HTML），都是對 d.content 這段固定文字做的純運算，直接在 template 裡
+ *  呼叫這幾支小函式即可，不需要為每一筆診斷另外存一份衍生狀態。 */
+function introHtml(content) {
+  return renderMarkdownLite(splitMarkdownSections(content).intro);
+}
+function sectionsOf(content) {
+  return sectionsExcludingFinalDecision(content).map(function (s) {
+    return { title: s.title, icon: pickSectionIcon(s.title), html: renderMarkdownLite(s.body) };
+  });
+}
+
 watch(function () { return props.code; }, load);
 onMounted(load);
 onBeforeUnmount(function () {
@@ -114,7 +135,7 @@ onBeforeUnmount(function () {
             <tr v-for="s in detail.scoreHistory" :key="s.date">
               <td>{{ s.date }}</td>
               <td>{{ s.armorScore != null ? s.armorScore.toFixed(1) : '-' }}</td>
-              <td>{{ s.strategy }}</td>
+              <td :style="{ color: strategyColor(s.strategy) }">{{ s.strategy }}</td>
               <td>{{ s.action }}</td>
             </tr>
           </tbody>
@@ -130,11 +151,24 @@ onBeforeUnmount(function () {
       </div>
       <p v-if="diagnosisError" class="error-box">{{ diagnosisError }}</p>
       <div v-if="detail.aiDiagnoses.length" class="card-list">
-        <details v-for="d in detail.aiDiagnoses" :key="d.timestamp" class="form-card">
+        <details v-for="(d, idx) in detail.aiDiagnoses" :key="d.timestamp" class="form-card" :open="idx === 0">
           <summary>
             {{ d.date }}　{{ DIAGNOSIS_TYPE_LABEL[d.diagnosisType] || d.diagnosisType }}　{{ d.verdict }}
           </summary>
-          <p class="ai-diagnosis-content">{{ d.content }}</p>
+          <div class="ai-report">
+            <div class="ai-verdict-banner" :class="verdictDirection(d.verdict)">
+              <div class="ai-verdict-banner-label">最終操作決策</div>
+              <div class="ai-verdict-banner-value">{{ d.verdict }}</div>
+              <div v-if="extractCoreReason(d.content)" class="ai-verdict-banner-reason">
+                {{ extractCoreReason(d.content) }}
+              </div>
+            </div>
+            <div v-html="introHtml(d.content)"></div>
+            <details v-for="(sec, secIdx) in sectionsOf(d.content)" :key="secIdx" class="ai-section">
+              <summary>{{ sec.icon }} {{ sec.title }}</summary>
+              <div class="info-body" v-html="sec.html"></div>
+            </details>
+          </div>
         </details>
       </div>
       <p v-else class="hint">這檔股票還沒有 AI 診斷紀錄。</p>
