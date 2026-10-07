@@ -208,15 +208,67 @@ function buildDeleteDatesSql_(tableRef, dateStrs) {
  *      「先刪除當天舊資料再寫入」這個 idempotent 寫法會在緩衝區未清空前
  *      失敗，load job／一般 DML 都沒有這個限制，才是正確選擇。
  */
+/** 單一欄位值轉成 SQL 字串字面值——`buildInsertRowsSql_`／`chunkRowsBySize_`
+ *  共用，避免兩處各自重複寫一次跳脫邏輯。 */
+function escapeVal_(v) {
+  return "'" + String(v === undefined || v === null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+}
+
 function buildInsertRowsSql_(tableRef, rows) {
   var cols = BQ_COLUMN_MAP;
-  function escapeVal_(v) {
-    return "'" + String(v === undefined || v === null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
-  }
   var valuesSql = rows.map(function (row) {
     return '(' + cols.map(function (m) { return escapeVal_(row[m.cn]); }).join(', ') + ')';
   }).join(',\n');
   return 'INSERT INTO `' + tableRef + '` (' + bqColumnNames_().join(', ') + ')\nVALUES\n' + valuesSql;
+}
+
+/**
+ * **2026-10-07 修正一個讓補抓整個失效的 bug**：原本的架構假設「一天的資料量
+ * 很小（通常一千多列），組成一條 INSERT 敘述完全不會超過 BigQuery 查詢文字
+ * 1MB 的上限」——使用者實際補抓時發現這個假設是錯的，TWSE 一天的資料遠不止
+ * 「一千多列」這個估計（MI_INDEX／T86 實際涵蓋的證券數量比想像中多很多），
+ * 組出來的 INSERT 敘述實測落在 3.2MB~3.8MB，是 1MB 上限的 3 倍以上，補抓
+ * 七天「全部」都因為 `The query is too large` 失敗，一天都抓不進來。
+ *
+ * 修正：把一天的 rows 依組出來的 SQL 字面值長度切成多個 chunk，每個 chunk
+ * 控制在 `maxChars`（預設 700,000，比 1,048,576 的上限留了接近 350K 的
+ * 安全邊界，給 DELETE 敘述／transaction 包裝文字／估算誤差留空間）以內，
+ * 每個 chunk 各自是一次獨立的 INSERT，不會讓單一 query 文字超過上限。
+ *
+ * 回傳「列陣列的陣列」（不是組好的 SQL 字串），因為呼叫端（index.js
+ * `writeHistoryRowsToBigQuery_`）要對「第一個 chunk」用
+ * `buildDeleteAndInsertTransactionSql_` 包進交易（DELETE+第一批 INSERT
+ * 綁在一起，失敗會整個 rollback，不會重演「DELETE 成功但這天資料完全
+ * 插不進去」那個資料遺失的 bug），「其餘 chunk」才各自用單純的
+ * `buildInsertRowsSql_`（DELETE 已經在第一個 chunk 的交易裡做過一次，
+ * 不用也不該再做第二次）。
+ *
+ * 這個設計的已知取捨：如果第一個 chunk 的交易成功，但「後面」某個 chunk
+ * 失敗，這一天會停在「只插入了前幾個 chunk」的不完整狀態，不是這次修正
+ * 之前「整天資料完全消失」那麼糟，但也不是完全沒有風險。因為這整條管線
+ * 本來就是「先刪除這個日期的既有資料、再整批寫入」的 idempotent 設計，
+ * 重新補抓同一天會先清掉這個不完整的殘留、重新寫一次完整的資料，使用者
+ * 只要照正常流程對失敗的日期重試一次就會自我修復，不需要額外的復原工具。
+ */
+function chunkRowsBySize_(rows, maxChars) {
+  maxChars = maxChars || 700000;
+  var chunks = [];
+  var current = [];
+  var currentLen = 0;
+  rows.forEach(function (row) {
+    var rowSql = '(' + BQ_COLUMN_MAP.map(function (m) { return escapeVal_(row[m.cn]); }).join(', ') + ')';
+    var addLen = rowSql.length + (current.length > 0 ? 2 : 0); // ',\n' 分隔符號
+    if (current.length > 0 && currentLen + addLen > maxChars) {
+      chunks.push(current);
+      current = [row];
+      currentLen = rowSql.length;
+    } else {
+      current.push(row);
+      currentLen += addLen;
+    }
+  });
+  if (current.length > 0) chunks.push(current);
+  return chunks;
 }
 
 /**
@@ -280,6 +332,7 @@ module.exports = {
   buildDeleteDatesSql_: buildDeleteDatesSql_,
   buildInsertRowsSql_: buildInsertRowsSql_,
   buildDeleteAndInsertTransactionSql_: buildDeleteAndInsertTransactionSql_,
+  chunkRowsBySize_: chunkRowsBySize_,
   buildMaxDateSql_: buildMaxDateSql_,
   buildDateBoundsSql_: buildDateBoundsSql_
 };

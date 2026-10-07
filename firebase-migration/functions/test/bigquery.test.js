@@ -181,6 +181,33 @@ const bq = require('../lib/bigquery');
   console.log('Test buildDeleteAndInsertTransactionSql_ (wraps DELETE+INSERT in one rollback-safe transaction) passed.');
 }
 
+// --- chunkRowsBySize_：依字面值長度切 chunk，每個 chunk 不超過預算 ---
+{
+  // 用一個字串長度固定、算得出來的假欄位，避免測試依賴真實 BQ_COLUMN_MAP
+  // 全部 24 欄的精確組字邏輯——只關心「切出來的每個 chunk 加總長度有沒有
+  // 超過預算」跟「所有列都有被分到某個 chunk，不多不少」這兩件事。
+  const makeRow = function (i) {
+    return { 日期: '2026-10-07', 證券代號: String(1000 + i), 證券名稱: 'X'.repeat(50) };
+  };
+  const rows = Array.from({ length: 500 }, function (_, i) { return makeRow(i); });
+  const maxChars = 5000; // 刻意設小一點，逼出好幾個 chunk 方便驗證
+  const chunks = bq.chunkRowsBySize_(rows, maxChars);
+  assert.ok(chunks.length > 1, '500 列、每列字面值不小，預算 5000 字元應該會切成好幾個 chunk');
+  const totalRows = chunks.reduce(function (sum, c) { return sum + c.length; }, 0);
+  assert.strictEqual(totalRows, 500, '所有列都要被分到某個 chunk，不能遺漏或重複');
+  chunks.forEach(function (chunk) {
+    const sql = bq.buildInsertRowsSql_('proj.ds.history_raw', chunk);
+    assert.ok(sql.length <= maxChars + 2000, '每個 chunk 組出來的 INSERT 長度不該大幅超過預算（+2000 容忍 INSERT 固定前綴）');
+  });
+  // 單一一列超大（超過 maxChars 本身）的邊界情況：至少要能單獨成一個 chunk，
+  // 不能因為「放不進任何 chunk」就被整個丟掉。
+  const hugeRow = { 日期: '2026-10-07', 證券代號: '9999', 證券名稱: 'Y'.repeat(10000) };
+  const chunksWithHuge = bq.chunkRowsBySize_([hugeRow].concat(rows.slice(0, 5)), maxChars);
+  const totalWithHuge = chunksWithHuge.reduce(function (sum, c) { return sum + c.length; }, 0);
+  assert.strictEqual(totalWithHuge, 6, '超過預算的單一列也要被保留，自己佔一個 chunk，不能遺漏');
+  console.log('Test chunkRowsBySize_ (splits rows into size-bounded chunks, keeps every row) passed.');
+}
+
 // --- buildMaxDateSql_ ---
 {
   const sql = bq.buildMaxDateSql_('proj.ds.history_raw');

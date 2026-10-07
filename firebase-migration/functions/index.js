@@ -319,18 +319,28 @@ async function fetchAndMergeOneDay_(dateStr) {
 }
 
 /** 把合併好的一天（或多天）資料寫進 BigQuery `history_raw`：刪除這些日期的
- *  既有資料、插入新資料，包成一個 BigQuery transaction 當一個 query job
- *  送出（見 lib/bigquery.js `buildDeleteAndInsertTransactionSql_` 的完整
- *  說明）——**2026-10-07 修正**：原本是兩次獨立的 `client.query()` 呼叫，
- *  INSERT 那次如果失敗，DELETE 已經成功的部分不會自動復原，等於把那一天
- *  原本就有的資料弄丟了（實際發生過，不是假設）。改成單一 transaction
- *  之後，失敗時 DELETE 的效果會被 ROLLBACK，原本的資料不受影響。 */
+ *  既有資料、插入新資料。**2026-10-07 兩次修正**：
+ *  (1) 原本 DELETE／INSERT 是兩次獨立的 `client.query()` 呼叫，INSERT 失敗時
+ *  DELETE 已經成功的部分不會自動復原，等於把那天原本就有的資料弄丟（實際
+ *  發生過）；改成第一批資料的 DELETE+INSERT 包進單一 transaction，失敗會
+ *  ROLLBACK，原本的資料不受影響（見 `buildDeleteAndInsertTransactionSql_`）。
+ *  (2) 原本假設一天的資料「组成一條 INSERT 完全不會超過 1MB」是錯的，實測
+ *  一天份的資料可以到 3MB 以上，整個 INSERT 直接被 BigQuery 拒絕、补抓
+ *  100% 失敗；改成依大小切成多個 chunk（見 `chunkRowsBySize_`），第一個
+ *  chunk 連同 DELETE 包進交易，其餘 chunk 各自用一般 INSERT 補上——已知
+ *  取捨（第一個 chunk 之後若有 chunk 失敗，這天會停在不完整狀態，不是
+ *  整天的資料消失）寫在 `chunkRowsBySize_` 的說明裡。 */
 async function writeHistoryRowsToBigQuery_(bigQueryConfig, rows) {
   if (!rows || rows.length === 0) return;
   const client = new BigQuery({ projectId: bigQueryConfig.projectId });
   const tableRef = bigquery.rawTableRef_(bigQueryConfig);
   const dates = Array.from(new Set(rows.map(function (r) { return r['日期']; })));
-  await client.query({ query: bigquery.buildDeleteAndInsertTransactionSql_(tableRef, dates, rows) });
+  const chunks = bigquery.chunkRowsBySize_(rows);
+  const [firstChunk, ...restChunks] = chunks;
+  await client.query({ query: bigquery.buildDeleteAndInsertTransactionSql_(tableRef, dates, firstChunk) });
+  for (const chunk of restChunks) {
+    await client.query({ query: bigquery.buildInsertRowsSql_(tableRef, chunk) });
+  }
 }
 
 /** `history_raw` 目前最新的 date_str，查無資料回傳 null（全新安裝，或這張表

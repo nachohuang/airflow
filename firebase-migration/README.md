@@ -1988,3 +1988,46 @@ BigQuery 環境下的 transaction/rollback 行為沒辦法在這個開發環境�
 （跟這次遷移其他碰 BigQuery API 的程式碼一樣，見「每日股價資料抓取」
 那節的驗證說明），這是 BigQuery 官方文件記載的標準 transaction 語法，
 不是沒有依據的猜測。
+
+## Bug 修正：一天的資料遠超過 1MB，INSERT 100% 失敗（2026-10-07）
+
+**症狀**：上面的 transaction 修正部署後，使用者實際跑「補抓區間」
+（2026-09-29 ~ 2026-10-07，7 天），**7 天全部失敗**，錯誤訊息是
+`The query is too large (3171.32K characters, ... characters over the
+limit). The maximum standard SQL query length is 1024.00K characters`
+——每一天都落在 3.2MB~3.8MB，是 BigQuery 單一查詢文字 1MB 上限的
+3 倍以上。
+
+**根本原因**：`buildInsertRowsSql_` 當初的架構假設是「一天的資料量很小
+（通常一千多列），組成一條 INSERT 敘述完全不會超過 1MB」——這個假設
+沒有用真實 TWSE 資料驗證過（見「每日股價資料抓取」那節的驗證說明：
+這個開發環境的網路政策不開放連到 twse.com.tw），實際跑起來才發現
+嚴重低估了：TWSE 一天的 MI_INDEX／T86 涵蓋的證券數量遠不止「一千多
+列」，組出來的 INSERT VALUES 子句直接整條被 BigQuery 拒絕，**不是
+效能問題，是完全送不出去**，上一節剛修好的「不會弄丟資料」的 atomic
+transaction 寫法在這個情況下反而讓問題更明顯——整個 transaction（含
+DELETE）連同過大的 INSERT 一起被拒絕，7 天全軍覆沒。
+
+**修正**：新增 `chunkRowsBySize_`，依組出來的 SQL 字面值實際長度（不是
+猜測的列數）把一天的 rows 切成多個 chunk，每個 chunk 控制在 70 萬字元
+以內（留將近 35 萬字元的安全邊界給 DELETE 敘述／transaction 包裝文字／
+估算誤差）。`writeHistoryRowsToBigQuery_`（`index.js`）改成：第一個
+chunk 連同 DELETE 包進上一節的 atomic transaction（失敗會 rollback，
+不會重演資料遺失），其餘 chunk 各自用一般 INSERT 補上（DELETE 已經在
+第一個 chunk 處理過，不會也不該重複刪除）。
+
+**已知取捨**：如果第一個 chunk 的交易成功，但後面某個 chunk 失敗，這天
+會停在「只寫入前幾個 chunk」的不完整狀態——比修正前「整天資料完全消失」
+好很多，但不是 100% 無風險。這整條管線本來就是「先刪除這個日期的既有
+資料、再整批寫入」的 idempotent 設計，使用者對失敗的日期重新補抓一次，
+系統會先清掉這個不完整的殘留、重新寫一次完整的資料，自我修復，不需要
+額外的復原工具——跟這次遷移其他地方「失敗了就照正常流程重試」的設計
+原則一致，沒有為了處理這個低機率的邊界情況另外做一套復原機制。
+
+**驗證**：`test/bigquery.test.js` 新增測試，確認切出來的 chunk 總列數
+跟輸入一致（不多不少）、每個 chunk 組出來的 SQL 沒有大幅超過預算，
+以及「單一一列本身就超過預算」這個邊界情況會自己佔一個 chunk，不會
+被整個丟掉。`npm test` 全部通過。實際一天份 TWSE 資料在這個預算下會
+切成幾個 chunk 沒辦法在這個開發環境驗證（同樣是網路政策限制），但
+70 萬字元的預算本身已經是直接從使用者實測的 3.2MB~3.8MB 回推出來的
+保守數字，不是憑空估計。
