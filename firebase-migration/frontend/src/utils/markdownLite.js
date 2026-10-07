@@ -196,13 +196,12 @@ export function extractCoreReason(text) {
   return m ? m[1].trim() : '';
 }
 
-/** 結論橫幅要上色成「偏多」還是「偏空」——這一版 AI 診斷只做「深度診斷」
- *  （新進場決策），四個結論選項見 functions/lib/aiDiagnosis.js 的
- *  AI_VERDICT_OPTIONS_，這裡分組對應舊版 AI_VERDICT_UP_/AI_VERDICT_DOWN_
- *  的精神（之後要支援「持股續抱診斷」的另外四個結論選項，在這裡加進對應
- *  分組即可）。 */
-var VERDICT_UP = ['強力買入', '分批布局'];
-var VERDICT_DOWN = ['立刻退出'];
+/** 結論橫幅要上色成「偏多」還是「偏空」——深度診斷／持股續抱診斷各四個結論選項
+ *  （見 functions/lib/aiDiagnosis.js 的 AI_VERDICT_OPTIONS_），分組對應舊版
+ *  AI_VERDICT_UP_/AI_VERDICT_DOWN_ 的精神：「續抱」跟「加碼」都算正向（原本看好
+ *  的理由還成立，或更成立），「減碼」跟「出場」都算負向。 */
+var VERDICT_UP = ['強力買入', '分批布局', '體質轉強，加碼', '體質穩健，續抱'];
+var VERDICT_DOWN = ['立刻退出', '體質轉弱，減碼', '體質惡化，出場'];
 
 export function verdictDirection(verdict) {
   if (VERDICT_UP.indexOf(verdict) !== -1) return 'up';

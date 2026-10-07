@@ -535,10 +535,30 @@ async function fetchAiDiagnosisForCode_(code) {
   return docs;
 }
 
-/** data: {code}。回傳股票詳情頁要的三組資料：價格走勢（含 MA5/20/60）、
- *  戰報燈號歷史、AI 診斷快取歷史。BigQuery／Firestore／collectionGroup 三種
- *  I/O 混在一起，所以用一支 onCall 一次打包回傳，不拆成三支個別呼叫——前端
- *  要顯示的是同一個頁面，沒有理由讓使用者等三次 round trip。 */
+/** 從 portfolioMap 取出某代號的持股背景資訊（加權平均成本／最早買進日／持有天數／
+ *  目前損益%）——getStockDetail（顯示用）跟 runPortfolioHoldDiagnosis（組 AI prompt
+ *  用）共用同一份計算，不要兩個地方各自重複寫一次同一套日期/損益算法。沒有持有這一檔
+ *  時回傳 null。daysHeld 的日期相減刻意都用 'T00:00:00Z'（UTC）解析，避免 Node 把
+ *  'YYYY-MM-DD' 字串當成本機時區午夜解析，兩個時區不一致時算出差一天的天數。 */
+function buildHoldingInfo_(portfolioMap, code, latestClose) {
+  const info = portfolioMap[code];
+  if (!info) return null;
+  const todayStr = utilsLib.todayStrTaipei_();
+  const daysHeld = info.buyDate
+    ? Math.round((new Date(todayStr + 'T00:00:00Z') - new Date(info.buyDate + 'T00:00:00Z')) / 86400000)
+    : null;
+  const profitPct = (info.cost && latestClose !== null && latestClose !== undefined)
+    ? utilsLib.round_((latestClose - info.cost) / info.cost * 100, 2)
+    : null;
+  return { cost: info.cost, buyDate: info.buyDate, daysHeld: daysHeld, profitPct: profitPct };
+}
+
+/** data: {code}。回傳股票詳情頁要的四組資料：價格走勢（含 MA5/20/60）、
+ *  戰報燈號歷史、AI 診斷快取歷史、持股背景資訊（沒有持有這一檔時是 null，
+ *  前端用這個欄位決定要不要顯示「跑新的持股續抱診斷」按鈕）。BigQuery／
+ *  Firestore／collectionGroup 三種 I/O 混在一起，所以用一支 onCall 一次
+ *  打包回傳，不拆成多支個別呼叫——前端要顯示的是同一個頁面，沒有理由讓
+ *  使用者等好幾次 round trip。 */
 exports.getStockDetail = onCall(RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
@@ -546,10 +566,11 @@ exports.getStockDetail = onCall(RUNTIME_OPTS_, async function (request) {
   const code = utilsLib.zfill4(String(data.code).trim());
 
   const appConfig = await fetchAppConfig_();
-  const [historyRows, signalDocs, aiDiagnoses] = await Promise.all([
+  const [historyRows, signalDocs, aiDiagnoses, lotDocs] = await Promise.all([
     fetchStockHistoryRows_(appConfig.bigQuery, code),
     fetchSignalHistoryForCode_(code),
-    fetchAiDiagnosisForCode_(code)
+    fetchAiDiagnosisForCode_(code),
+    fetchPortfolioLots_()
   ]);
 
   if (historyRows.length === 0) {
@@ -559,14 +580,17 @@ exports.getStockDetail = onCall(RUNTIME_OPTS_, async function (request) {
   const series = stockDetailLib.buildPriceSeries_(historyRows);
   const scoreHistory = stockDetailLib.buildScoreHistory_(signalDocs);
   const latest = series[series.length - 1];
+  const latestClose = latest ? latest.close : null;
+  const portfolioMap = portfolio.buildPortfolioMap_(lotDocs);
 
   return {
     code: code,
     name: historyRows[historyRows.length - 1]['證券名稱'] || '',
-    latestClose: latest ? latest.close : null,
+    latestClose: latestClose,
     series: series,
     scoreHistory: scoreHistory,
-    aiDiagnoses: aiDiagnoses
+    aiDiagnoses: aiDiagnoses,
+    holding: buildHoldingInfo_(portfolioMap, code, latestClose)
   };
 });
 
@@ -856,6 +880,81 @@ exports.runAiDiagnosis = onCall(
       timestamp: timestampLabel
     };
     await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
+
+    return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
+  }
+);
+
+/**
+ * data: {code}。對「目前持有中」的一檔股票跑一次持股續抱診斷（diagnosisType='hold'）
+ * ——跟 runAiDiagnosis 共用同一套 Goodinfo／TWSE 財報抓取、Claude/Gemini 呼叫、費用
+ * 估算邏輯，差別只在：(1) system prompt 換成 AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT
+ * （決策基準是體質變化，不是損益），(2) `buildDiagnosisPrompt_` 多帶一個 `holding`
+ * 參數（加權平均成本／持有天數／目前損益%，僅供背景參考），(3) 寫入 Firestore 的文件
+ * ID 後綴是 `_hold` 不是 `_deep`（同一天同一檔可以同時有深度診斷跟續抱診斷兩筆紀錄，
+ * 互不覆蓋，見 firestore/schema.md §4）。
+ *
+ * code 必須是目前「持有中」的股票——沒有持股就沒有成本/損益可以注入，拋
+ * `failed-precondition`，不是模糊的 `INTERNAL`。
+ */
+exports.runPortfolioHoldDiagnosis = onCall(
+  Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
+  async function (request) {
+    assertOwnerAuth_(request);
+    const data = request.data || {};
+    if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
+    const code = utilsLib.zfill4(String(data.code).trim());
+
+    const [appConfig, lotDocs] = await Promise.all([fetchAppConfig_(), fetchPortfolioLots_()]);
+    const portfolioMap = portfolio.buildPortfolioMap_(lotDocs);
+    if (!portfolioMap[code]) {
+      throw new HttpsError('failed-precondition', '目前沒有持有 ' + code + '，請確認「持股庫存」裡有這一筆持有中的紀錄。');
+    }
+
+    const [signalDocs, bqInfo] = await Promise.all([
+      fetchSignalHistoryForCode_(code),
+      fetchBqInfoForCodes_(appConfig.bigQuery, [code])
+    ]);
+    const row = signalDocs[0];
+    if (!row) {
+      throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
+    }
+    const latestClose = bqInfo[code] ? bqInfo[code].close : null;
+    const holding = buildHoldingInfo_(portfolioMap, code, latestClose);
+
+    const timestampLabel = utilsLib.timestampLabelTaipei_();
+    const [goodinfoText, twseDatasets] = await Promise.all([
+      fetchGoodinfoText_(code),
+      fetchTwseOfficialFinancialsDatasets_()
+    ]);
+    const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
+    const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel, holding);
+
+    const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
+    const llmResult = await callLlm_(aiDiagnosisLib.AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
+      claude: process.env.ANTHROPIC_API_KEY,
+      gemini: process.env.GEMINI_API_KEY
+    });
+
+    const diagnosisText = llmResult.text;
+    const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
+    const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
+      cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
+      cacheReadInputTokens: llmResult.cacheReadInputTokens
+    }, appConfig.pricing);
+
+    const record = {
+      date: row.date,
+      code: code,
+      name: row.name || '',
+      armorScore: row.armorScore,
+      strategy: row.strategy,
+      verdict: verdict,
+      diagnosisType: 'hold',
+      content: diagnosisText,
+      timestamp: timestampLabel
+    };
+    await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_hold').set(record);
 
     return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
   }

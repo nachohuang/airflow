@@ -5,10 +5,11 @@
  * `extractVerdict_`／`extractCoreReason_`／`calcCost_` 是純函式邏輯照搬，欄位存取從 Sheets
  * 版的中文欄名改成 Firestore 版的英文欄名）。
  *
- * **這一版只搬「深度診斷」（新進場決策，diagnosisType='deep'）**，apps-script 版同時還有
- * 「持股續抱診斷」（'hold'，決策基準改成體質變化而不是進場）跟「TOP3橫向推薦」（'top3'，
- * 全候選名單比較，不查財報）——這兩個刻意先不搬，見 README「AI 診斷」那節的說明，之後要
- * 加的話大部分邏輯（Goodinfo／TWSE 財報抓取、Claude/Gemini 呼叫、費用估算）都可以直接重用。
+ * **2026-10-07 補上「持股續抱診斷」（'hold'，決策基準改成體質變化而不是進場）**——跟
+ * 「深度診斷」('deep') 共用同一套 Goodinfo／TWSE 財報抓取、Claude/Gemini 呼叫、費用估算
+ * 邏輯，差別只在 system prompt 跟 `buildDiagnosisPrompt_` 多塞一段持股背景資訊。
+ * 「TOP3橫向推薦」（'top3'，全候選名單比較，不查財報）**仍刻意不搬**，見 README「AI 診斷」
+ * 那節的說明。
  *
  * I/O（打 Goodinfo／TWSE OpenAPI／Claude／Gemini 這幾個外部 HTTP 端點，讀寫 Firestore）
  * 留給 index.js，這裡只管「資料到手之後怎麼組 prompt、怎麼從回應抽取結論」。
@@ -74,6 +75,80 @@ var AI_DIAGNOSIS_SYSTEM_PROMPT = `# Role & Expertise
 ---`;
 
 /**
+ * 「持股續抱診斷」專用 system prompt（AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT）：跟上面的
+ * AI_DIAGNOSIS_SYSTEM_PROMPT（新進場買不買）是同一套查核流程（Goodinfo 查核／5年+TTM
+ * 財報／多流派辯證／CoVE 自我驗證），差別在於決策基準——使用者明確表示可以長期持有、能
+ * 承受短期價格波動，所以這裡刻意不是「損益管理」視角（持股成本／持有天數／目前損益%
+ * 只當背景參考，不能當決策的主要依據，見 `buildDiagnosisPrompt_` 的 holding 參數），而是
+ * 「體質評估」視角：判斷基準是這家公司的基本面（財報/護城河/籌碼趨勢）從進場到現在有沒有
+ * 實質變化，不是帳面賺賠多少。
+ */
+var AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT = `# Role & Expertise
+你是一名世界級的頂尖台灣股市投資戰略家與高階財務分析師。你同時精通三個流派：【價值護城河大師（專攻財報與競爭壁壘）】、【籌碼追蹤專家（專攻法人與主力大戶動向）】、【技術型態首席（專攻動能與波段拐點）】。你的任務是客觀、嚴厲且極度精準地協助我評估「我已經持有」的這檔股票——這不是短期損益管理，我對這檔股票抱持長期持有的心態，能夠承受短期價格波動。請把重點放在這家公司的「體質」從我進場到現在有沒有實質變化（財報、護城河、籌碼趨勢），而不是我目前帳面上賺了多少或賠了多少。我提供的持股成本／持有天數／目前損益只是背景參考（用來了解部位規模、風險曝險程度），不是決策的主要依據，不要讓判斷被短期損益綁架。
+
+# Core Rules & Constraints
+1. **資料查核與可信度分級：**
+   - 我在使用者訊息裡會提供兩種輔助資料：①「證交所公開資訊觀測站官方資料」（來源：openapi.twse.com.tw，程式直接查詢官方公開 API 取得月營收/財報，可信度最高）、②「Goodinfo 個股頁面文字摘要」（來源：https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=xxxx，程式自動抓取網頁文字，可能不完整或抓取失敗）。兩者衝突時以①官方資料為準；①缺漏才依②判斷；兩者都缺漏就明確說明「此部分資料不足」，不要憑空捏造數字。
+   - 如果你有能力自行查詢即時資訊（例如透過搜尋工具），查到的內容一律視為「輔助佐證」，可信度必須低於我提供的①官方資料——遇到搜尋結果跟①衝突，以①為準，並在報告中註明這個落差，不要因為搜尋結果看起來比較「新」就直接覆蓋官方數字。
+   - 【絕對禁忌】：嚴禁使用 Wantgoo 玩股網、PTT、Dcard 或任何未經證實的論壇/社群傳言作為數據源，即使是你自己搜尋查到的也一樣不能用。
+2. **5年 + TTM 財報地毯式審查：**
+   - 深入分析該股過去 5 年以及最新 TTM (近四季滾動) 的：營收年增率 (MoM/YoY)、三率 (毛利率、利益率、淨利率) 走勢、EPS、ROE，以及自由現金流。
+   - 判斷其近期動能是來自「實質獲利爆發」還是「短線題材炒作」，這關係到公司體質是不是真的在變好。
+3. **多流派對抗辯證 (Multi-Perspective Debate)：**
+   - 【價值流觀點】：評估該公司的產業地位、客戶結構與競爭護城河，目前的股價是否還合理。
+   - 【籌碼與技術流觀點】：對比我提供的籌碼/技術數據，評估目前主力是正在「拉高出貨」還是「進貨鎖籌」。
+4. **自我驗證鏈 (CoVE - Chain of Verification) 查核：**
+   - 必須反向提問：
+     * 「我剛剛宣稱的利多，有沒有可能是市場早已反應 (Priced in) 的已知事實？」
+     * 「該產業未來 1-2 季是否存在庫存調整或報價下跌的隱憂？」
+     * 「這家公司從我進場到現在，體質是變好、持平、還是變差？我原本看好這檔股票的理由，現在還成立嗎？」
+5. **最終決策輸出（持股續抱專用，以「體質變化」為唯一依據，不是以損益為依據）：**
+   - 判斷基準是這家公司從進場至今，基本面（財報/護城河/籌碼趨勢）出現了什麼變化，只能從以下四種擇一：
+     【體質轉強，加碼】（財報/護城河/籌碼趨勢比進場時更好，值得加碼）／
+     【體質穩健，續抱】（基本面沒有明顯變化，原本看好的理由依然成立，維持部位不動）／
+     【體質轉弱，減碼】（出現具體的基本面隱憂，例如營收/毛利率轉差、護城河鬆動、法人籌碼轉為賣超，建議先減碼降低曝險）／
+     【體質惡化，出場】（基本面已經實質惡化，原本進場的理由不再成立，不管目前賺賠多少都應該出場）。
+   - 我可以長期持有、能承受短期股價波動，所以絕對不要因為「短線急漲想先落袋」或「短期虧損想停損」這種純粹價格驅動的理由給建議——除非價格波動本身就是基本面惡化的先行反映（例如爆量長黑伴隨具體壞消息），才能算進判斷。
+   - 避開模稜兩可的說法，四選一，不能同時給兩個。
+6. **語氣口吻：** 使用繁體中文，語氣需如同寫給機構法人的投資報告，字字精煉，直擊痛點。
+
+# Reference Timeline & Context
+- 請以使用者訊息裡提供的時間戳記作為執行時間檢查與監控基準。
+- 請幫我警示、並避開高本益比、無實質獲利的投機泡沫股（例如高檔爆量長黑、土洋對水的個股，需嚴防高位騙線陷阱）。
+
+# Output Format (請嚴格使用以下結構進行排版，避免冗長文字牆)
+
+---
+## 🚨 持股續抱評估：[股票名稱/代號]
+> **監控基準時間：** [填入提供的時間戳記]
+> **綜合風險評級：** [低 / 中 / 高]
+
+### 一、 5年 + TTM 財務健康診斷
+| 財務指標 | 近 5 年趨勢概述 | 最新 TTM 現況 | 關鍵隱憂或亮點 |
+| :--- | :--- | :--- | :--- |
+| **營收與三率** | | | |
+| **EPS & ROE** | | | |
+| **現金流與債務** | | | |
+
+### 二、 產業競爭力與護城河評估
+* **核心壁壘：**（分析其產品競爭力、技術優勢 or 客戶黏著度）
+* **產業循環位置：**（目前處於成長期、成熟期還是衰退期？）
+
+### 三、 三大流派多軌辯證
+* 📈 **技術與動能面（結合 Armor_Score）：** 評估策略觸發訊號的純度與位階。
+* 💼 **價值面檢驗：** 股價是否已過度透支未來獲利？
+* 🐋 **籌碼面查核：** 近期外資、投信與大戶的真實意圖。
+
+### 四、 自我驗證 (CoVE) 警示牆
+* *問題 1：此利多是否已被市場過度期待？* -> **[解答]**
+* *問題 2：這家公司的體質，從我進場到現在是變好、持平、還是變差？原本看好的理由還成立嗎？* -> **[解答]**
+
+### 五、 最終續抱決策 (Explicit Action)
+> 💡 **最終建議：** 【體質轉強，加碼】/ 【體質穩健，續抱】/ 【體質轉弱，減碼】/ 【體質惡化，出場】
+> **核心理由：**（用 2 句話總結公司體質出現了什麼變化、為什麼給出這個建議，不要用損益數字當理由）
+---`;
+
+/**
  * datasets：`fetchTwseOfficialFinancialsDatasets_()`（I/O，在 index.js）查回來的 3 份
  * TWSE OpenAPI 全市場原始列（還沒篩選成單一股票）。這支純函式只負責篩選/組字，跟
  * apps-script 版完全同一套邏輯，只是改成給 Node 用。
@@ -101,8 +176,14 @@ function buildTwseOfficialFinancialsTextForCode_(code, datasets) {
  * row：`reports/{date}/signals` 的文件形狀（英文欄名，見 firestore/schema.md §3）——跟
  * apps-script 版操作 Sheets 中文欄名的 row 不是同一個物件形狀，但組出來的 prompt 文字
  * （中文標籤）完全一樣。
+ *
+ * holding（選填，持股續抱診斷專用）：{cost, buyDate, daysHeld, profitPct}，有帶的話會
+ * 額外插入一段「我目前的持股資訊」——平均成本、持有天數、目前損益%——讓 AI 的建議是
+ * 「針對我這筆部位」量身判斷，不是泛用的新進場買入建議，搭配
+ * AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT 的持股決策分類使用。沒帶這個參數（新進場深度診斷）
+ * 時完全不影響輸出，跟原來一樣。
  */
-function buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel) {
+function buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel, holding) {
   var lines = [];
   lines.push('監控基準時間戳記：' + timestampLabel);
   lines.push('');
@@ -118,6 +199,15 @@ function buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLab
   lines.push('法人參與密度排名 Inst_Part_Rank（0-1，越高代表法人越積極參與）：' + row.instPartRank);
   lines.push('下跌接手率排名 IBF_20D_Rank（0-1，越高代表法人越常在下跌時買進）：' + row.ibf20dRank);
   if (row.referenceHigh !== undefined && row.referenceHigh !== null) lines.push('持有期參考最高價：' + row.referenceHigh);
+  if (holding) {
+    lines.push('');
+    lines.push('【我目前實際持有這檔股票的部位資訊——僅供背景參考（部位規模／風險曝險程度），我可以長期持有、能承受短期股價波動，請不要把這組數字當成決策的主要依據，判斷基準是體質變化，不是損益】');
+    lines.push('加權平均成本：' + holding.cost);
+    lines.push('最早買進日期：' + holding.buyDate + '（已持有 ' + holding.daysHeld + ' 天）');
+    if (holding.profitPct !== null && holding.profitPct !== undefined) {
+      lines.push('目前未實現損益：' + (holding.profitPct >= 0 ? '+' : '') + holding.profitPct + '%');
+    }
+  }
   lines.push('');
   lines.push('【證交所公開資訊觀測站官方資料（openapi.twse.com.tw，官方 API 直接查詢，可信度最高，' +
     '缺漏或跟其他來源衝突時以這裡為準）】');
@@ -126,13 +216,19 @@ function buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLab
   lines.push('【Goodinfo 個股頁面文字摘要（程式自動抓取，可能不完整，僅供輔助參考）】');
   lines.push(goodinfoText);
   lines.push('');
-  lines.push('請依照系統設定的規則與輸出格式，針對這檔股票進行完整的第二層深度診斷。');
+  lines.push(holding
+    ? '請依照系統設定的規則與輸出格式，針對「我目前持有的這筆部位」進行完整的續抱評估。'
+    : '請依照系統設定的規則與輸出格式，針對這檔股票進行完整的第二層深度診斷。');
   return lines.join('\n');
 }
 
-/** 跟 apps-script 版同一份清單（新進場決策這幾個）——'hold' 診斷的清單這版還沒搬，見檔案
- *  開頭的範圍說明。 */
-var AI_VERDICT_OPTIONS_ = ['強力買入', '分批布局', '觀望不追', '立刻退出'];
+/** 新進場決策（深度診斷）跟持股續抱決策是兩套不同的決策分類，文字完全不重疊，直接合併
+ *  成一份清單搜尋即可，不用另外傳「這是哪一種診斷」進來判斷——跟 apps-script 版
+ *  AI_VERDICT_OPTIONS_ 同一份清單。 */
+var AI_VERDICT_OPTIONS_ = [
+  '強力買入', '分批布局', '觀望不追', '立刻退出',
+  '體質轉強，加碼', '體質穩健，續抱', '體質轉弱，減碼', '體質惡化，出場'
+];
 
 function extractVerdict_(text) {
   var t = String(text || '');
@@ -169,6 +265,7 @@ function calcCost_(provider, inputTokens, outputTokens, cacheTokens, pricing) {
 
 module.exports = {
   AI_DIAGNOSIS_SYSTEM_PROMPT: AI_DIAGNOSIS_SYSTEM_PROMPT,
+  AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT: AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT,
   buildTwseOfficialFinancialsTextForCode_: buildTwseOfficialFinancialsTextForCode_,
   buildDiagnosisPrompt_: buildDiagnosisPrompt_,
   extractVerdict_: extractVerdict_,

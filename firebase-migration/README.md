@@ -1277,13 +1277,14 @@ form-card，一樣直接讀寫 Firestore（不經過 `onCall`）：
 診斷」按鈕觸發，呼叫 Claude 或 Gemini 針對單一股票做「第二層思考」診斷
 （財報查核、籌碼/技術面辯證、CoVE 自我驗證、最終給出明確的買賣建議）。
 
-**這一版刻意只搬「深度診斷」**（新進場決策，`diagnosisType='deep'`），
-apps-script 版同時還有的「持股續抱診斷」（`'hold'`，決策基準改成體質
-變化而不是進場）跟「TOP3橫向推薦」（`'top3'`，全候選名單比較，不查
-財報）**先不搬**——這兩個之後要加的話，Goodinfo／TWSE 財報抓取、
+**這一版（2026-10-07 當天）先搬「深度診斷」**（新進場決策，
+`diagnosisType='deep'`）；同一天稍晚補上「持股續抱診斷」（`'hold'`，
+決策基準改成體質變化而不是進場，見下面「持股續抱診斷」那節）。apps-
+script 版同時還有的「TOP3橫向推薦」（`'top3'`，全候選名單比較，不查
+財報）**仍刻意不搬**——之後要加的話，Goodinfo／TWSE 財報抓取、
 Claude/Gemini 呼叫、費用估算這些 I/O 跟計算邏輯大部分都已經在
 `functions/index.js`／`functions/lib/aiDiagnosis.js` 裡可以直接重用，
-只差 system prompt 文字跟批次/候選名單這一層的邏輯。
+只差 system prompt 文字跟候選名單這一層的邏輯。
 
 **也刻意不搬的部分**：AiUsage 歷史費用記錄——apps-script 版把每次呼叫
 的 tokens/費用寫進 Sheets 的 `AiUsage` 分頁（`logAiUsage_`），`getAiUsageSummary`
@@ -1435,3 +1436,45 @@ Admin 頁面新增「AI 設定」卡片，把 AI 診斷相關、而且**後端�
 沒有寫進 `npm test`——跟 `functions/lib/` 的慣例不同，這是純前端展示邏輯，
 目前這個專案沒有前端單元測試基礎設施，之後如果要加，這支是第一個值得補
 測試的候選。
+
+## 持股續抱診斷（2026-10-07）
+
+從 `apps-script/src/AiDiagnosis.gs` 的 `runPortfolioHoldDiagnosis` 搬過來
+（`diagnosisType='hold'`）——跟「深度診斷」是同一套 Goodinfo／TWSE 財報
+查核流程，差別在決策基準：深度診斷回答「要不要進場」，續抱診斷回答「我
+已經持有這一筆，體質撐不撐得住我繼續抱」，刻意**不是損益管理視角**（見
+`AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT` 的角色設定——使用者明確表示可以長期
+持有、能承受短期價格波動，判斷基準是基本面有沒有實質變化，不是帳面賺賠
+多少）。最終結論也換成四個體質導向的選項：【體質轉強，加碼】／
+【體質穩健，續抱】／【體質轉弱，減碼】／【體質惡化，出場】，跟深度診斷
+的四個選項合併成同一份 `AI_VERDICT_OPTIONS_`（`extractVerdict_` 不用知道
+現在是哪一種診斷，兩套文案完全不重疊，直接合併搜尋）。
+
+**實作上跟深度診斷唯一的差異**：
+- `lib/aiDiagnosis.js` 的 `buildDiagnosisPrompt_` 多一個選填的 `holding`
+  參數（`{cost, buyDate, daysHeld, profitPct}`），帶了的話會在 prompt
+  裡插入一段「我目前實際持有這檔股票的部位資訊——僅供背景參考」，並把
+  結尾的任務說明換成「針對我目前持有的這筆部位進行完整的續抱評估」。
+  沒帶這個參數時（深度診斷呼叫端）行為跟原來完全一樣。
+- `functions/index.js` 的 `exports.runPortfolioHoldDiagnosis`（`onCall`，
+  跟 `runAiDiagnosis` 一樣宣告 `secrets: ['GEMINI_API_KEY']`）多驗證一步：
+  `code` 必須是 `portfolio_lots` 裡目前「持有中」的股票，不是就直接拋
+  `failed-precondition`——沒有持股就沒有成本/損益可以注入 prompt。新增
+  `buildHoldingInfo_(portfolioMap, code, latestClose)` 這支小 helper 算
+  加權平均成本／持有天數／目前損益%，`getStockDetail`（顯示用）跟這支
+  診斷函式共用，不用兩邊各自重複寫一次同一套日期/損益算法。
+- `getStockDetail` 回應多一個 `holding` 欄位（沒有持有這一檔時是
+  `null`），前端用這個欄位決定要不要顯示「跑新的持股續抱診斷」按鈕，
+  並在頁面標頭下方顯示「持有中：成本 ... 已持有 ... 天，未實現損益
+  ...%」這行背景資訊。
+
+**前端**：`StockDetailView.vue` 的 `runDiagnosis()` 改成接受函式名稱
+參數，深度診斷／續抱診斷共用同一組 loading/error 狀態（使用者不會同時
+點兩個按鈕）；`markdownLite.js` 的 `verdictDirection` 分組也補上續抱診斷
+的四個結論（「加碼」「續抱」算正向、「減碼」「出場」算負向），結論橫幅
+上色邏輯不用為續抱診斷另外寫一套。
+
+⚠️ 跟深度診斷一樣，沒辦法在這個開發環境實際驗證——`lib/aiDiagnosis.js`
+的純邏輯（`holding` 參數渲染、8 選 1 的 `extractVerdict_`）已經靠單元
+測試驗證過，但「真的對一筆持股跑出完整續抱評估、寫進 Firestore、前端
+正確顯示」需要部署後實際測試。

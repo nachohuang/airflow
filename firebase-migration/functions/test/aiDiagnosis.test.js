@@ -1,5 +1,7 @@
 const assert = require('assert');
 const {
+  AI_DIAGNOSIS_SYSTEM_PROMPT,
+  AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT,
   buildTwseOfficialFinancialsTextForCode_,
   buildDiagnosisPrompt_,
   extractVerdict_,
@@ -76,16 +78,57 @@ const {
   console.log('Test 2b (buildDiagnosisPrompt_ includes referenceHigh when present) passed.');
 }
 
-// --- 3. extractVerdict_：抓出 4 個明確結論之一，抓不到就回「未明確」 ---
+// --- 2c. buildDiagnosisPrompt_ 帶 holding 參數（持股續抱診斷專用）---
+{
+  const row = {
+    code: '2330', name: '台積電', date: '2026-10-05', armorScore: 87,
+    strategy: '🛡️ 持股守護', action: '繼續持有', interpretation: '法人連續買超',
+    trendScore: 2, instPartRank: 0.91, ibf20dRank: 0.77
+  };
+  const holding = { cost: 580.5, buyDate: '2025-01-10', daysHeld: 270, profitPct: 12.34 };
+  const prompt = buildDiagnosisPrompt_(row, '', '', '2026-10-05 23:00', holding);
+  assert.ok(prompt.indexOf('加權平均成本：580.5') !== -1);
+  assert.ok(prompt.indexOf('最早買進日期：2025-01-10（已持有 270 天）') !== -1);
+  assert.ok(prompt.indexOf('目前未實現損益：+12.34%') !== -1, '正損益要帶正號');
+  assert.ok(prompt.indexOf('續抱評估') !== -1, '帶 holding 時結尾文案要換成續抱評估');
+  assert.ok(prompt.indexOf('深度診斷') === -1, '帶 holding 時不該出現深度診斷的結尾文案');
+  console.log('Test 2c (buildDiagnosisPrompt_ with holding renders position background + swaps closing line) passed.');
+}
+
+// --- 2d. buildDiagnosisPrompt_ 帶 holding 但虧損中（負損益要帶負號，不是雙重負號）---
+{
+  const row = { code: '2330', name: '台積電', date: '2026-10-05', armorScore: 87, strategy: 's', action: 'a', interpretation: 'i', trendScore: 1, instPartRank: 0.5, ibf20dRank: 0.5 };
+  const holding = { cost: 600, buyDate: '2025-01-10', daysHeld: 270, profitPct: -5.5 };
+  const prompt = buildDiagnosisPrompt_(row, '', '', '2026-10-05 23:00', holding);
+  assert.ok(prompt.indexOf('目前未實現損益：-5.5%') !== -1);
+  console.log('Test 2d (buildDiagnosisPrompt_ with holding, negative profitPct) passed.');
+}
+
+// --- 3. extractVerdict_：抓出 8 個明確結論之一（深度診斷 4 個 + 持股續抱診斷 4 個），
+//    抓不到就回「未明確」 ---
 {
   assert.strictEqual(extractVerdict_('報告內容...最終建議：【強力買入】...'), '強力買入');
   assert.strictEqual(extractVerdict_('...【分批布局】...'), '分批布局');
   assert.strictEqual(extractVerdict_('...【觀望不追】...'), '觀望不追');
   assert.strictEqual(extractVerdict_('...【立刻退出】...'), '立刻退出');
+  assert.strictEqual(extractVerdict_('...【體質轉強，加碼】...'), '體質轉強，加碼');
+  assert.strictEqual(extractVerdict_('...【體質穩健，續抱】...'), '體質穩健，續抱');
+  assert.strictEqual(extractVerdict_('...【體質轉弱，減碼】...'), '體質轉弱，減碼');
+  assert.strictEqual(extractVerdict_('...【體質惡化，出場】...'), '體質惡化，出場');
   assert.strictEqual(extractVerdict_('完全沒有提到結論的文字'), '未明確');
   assert.strictEqual(extractVerdict_(''), '未明確');
   assert.strictEqual(extractVerdict_(undefined), '未明確');
-  console.log('Test 3 (extractVerdict_ matches one of the 4 verdicts or falls back) passed.');
+  console.log('Test 3 (extractVerdict_ matches one of the 8 verdicts or falls back) passed.');
+}
+
+// --- 3b. 兩份 system prompt 都存在、非空、且各自帶對應的四選一決策文案 ---
+{
+  assert.ok(typeof AI_DIAGNOSIS_SYSTEM_PROMPT === 'string' && AI_DIAGNOSIS_SYSTEM_PROMPT.length > 100);
+  assert.ok(AI_DIAGNOSIS_SYSTEM_PROMPT.indexOf('強力買入') !== -1);
+  assert.ok(typeof AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT === 'string' && AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT.length > 100);
+  assert.ok(AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT.indexOf('體質穩健，續抱') !== -1);
+  assert.ok(AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT.indexOf('強力買入') === -1, '續抱診斷的 prompt 不該混進新進場的決策選項');
+  console.log('Test 3b (both system prompts exist and carry their own verdict options) passed.');
 }
 
 // --- 4. extractCoreReason_：抓「核心理由：」後面的文字 ---

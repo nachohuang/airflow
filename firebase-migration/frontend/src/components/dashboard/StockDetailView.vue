@@ -71,14 +71,17 @@ async function load() {
   }
 }
 
-/** 觸發一次新的 AI 深度診斷（會真正呼叫 Claude／Gemini API，消耗額度）——成功後
- *  整頁重新呼叫 getStockDetail 刷新，不只是把這次結果插進陣列開頭，避免跟既有
- *  同一天同一檔的舊紀錄（同一個文件 ID 被覆蓋）顯示成重複的兩筆。 */
-async function runDiagnosis() {
+/** 觸發一次新的 AI 診斷（會真正呼叫 Gemini API，消耗額度）——成功後整頁重新呼叫
+ *  getStockDetail 刷新，不只是把這次結果插進陣列開頭，避免跟既有同一天同一檔的
+ *  舊紀錄（同一個文件 ID 被覆蓋）顯示成重複的兩筆。fnName 是 'runAiDiagnosis'
+ *  （深度診斷，任何股票都能跑）或 'runPortfolioHoldDiagnosis'（持股續抱診斷，
+ *  只有 detail.holding 不是 null 時才會顯示對應按鈕）——兩者共用同一組
+ *  loading/error 狀態，使用者不會同時點兩個按鈕。 */
+async function runDiagnosis(fnName) {
   diagnosing.value = true;
   diagnosisError.value = '';
   try {
-    await callFn('runAiDiagnosis', { code: props.code });
+    await callFn(fnName, { code: props.code });
     await load();
   } catch (e) {
     diagnosisError.value = e.message || String(e);
@@ -120,6 +123,15 @@ onBeforeUnmount(function () {
         <strong>{{ detail.code }} {{ detail.name }}</strong>
         <span v-if="detail.latestClose != null" class="stock-detail-price">{{ detail.latestClose }}</span>
       </header>
+      <p v-if="detail.holding" class="hint">
+        持有中：成本 {{ detail.holding.cost }}，已持有 {{ detail.holding.daysHeld }} 天
+        <template v-if="detail.holding.profitPct != null">
+          ，未實現損益
+          <span :class="detail.holding.profitPct >= 0 ? 'pos' : 'neg'">
+            {{ detail.holding.profitPct >= 0 ? '+' : '' }}{{ detail.holding.profitPct }}%
+          </span>
+        </template>
+      </p>
 
       <div class="chart-wrap">
         <canvas ref="chartCanvas"></canvas>
@@ -145,8 +157,11 @@ onBeforeUnmount(function () {
 
       <h3>AI 診斷紀錄</h3>
       <div class="toolbar">
-        <button type="button" :disabled="diagnosing" @click="runDiagnosis">
+        <button type="button" :disabled="diagnosing" @click="runDiagnosis('runAiDiagnosis')">
           {{ diagnosing ? '診斷中（約需 30 秒~1 分鐘）...' : '跑新的深度診斷' }}
+        </button>
+        <button v-if="detail.holding" type="button" :disabled="diagnosing" @click="runDiagnosis('runPortfolioHoldDiagnosis')">
+          {{ diagnosing ? '診斷中（約需 30 秒~1 分鐘）...' : '跑新的持股續抱診斷' }}
         </button>
       </div>
       <p v-if="diagnosisError" class="error-box">{{ diagnosisError }}</p>
