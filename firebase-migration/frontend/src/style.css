@@ -243,6 +243,62 @@ label {
   margin-top: 8px;
 }
 
+/* ---------- Admin 頁面：每日排程／不跑日 ---------- */
+.schedule-time-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.schedule-time-inputs input {
+  width: 70px;
+  flex: none;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-label input {
+  width: auto;
+}
+
+.skip-date-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.skip-date-form input[type='date'] {
+  width: auto;
+  flex: none;
+}
+
+.skip-date-form input:not([type='date']) {
+  flex: 1;
+  min-width: 120px;
+}
+
+.skip-date-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skip-date-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+}
+
 .hint {
   color: var(--text);
   opacity: 0.7;

@@ -912,27 +912,27 @@ Vue（相對 React）樣板程式碼少、學習曲線平；Vite 是搭配 Vue �
   - `ClosedHistoryList.vue`：呼叫 `getClosedPortfolioHistory`，純讀取表格。
 - `frontend/src/components/admin/AdminView.vue` — 系統與資料後台，跟
   `DashboardView.vue` 一樣**直接用 Firestore client SDK 讀寫
-  `config/app`**（`firestore.rules` 的 `match /config/{configId} {
-  allow read, write: if isOwner(); }` 本來就開放擁有者直接讀寫，見
-  `firestore/schema.md` §8），不需要新的 `onCall` function。**目前只做
-  了兩項實際有被新系統讀取、改了真的會生效的設定**：
+  `config/app`／`skip_dates`**（`firestore.rules` 本來就開放擁有者直接
+  讀寫這兩個 collection，見 `firestore/schema.md` §5／§8），不需要新的
+  `onCall` function。做了四組設定：
   - `screeningStrategy`（下拉選單，對應 `functions/lib/analysis.js` 的
     `SCREENING_STRATEGIES`，跟手動用 Firestore 指令切換 `rule_v17`/
     `hybrid` 是同一個欄位，現在可以直接在畫面上切換，不用再開 Cloud
     Shell）。
   - `bigQuery.sourceMode`（下拉選單，對應 `functions/lib/bigquery.js`
     的 `sourceRefForRead_`）。
+  - **每日排程**（`triggerHour`／`triggerMinute`／`skipWeekends`）跟
+    **不跑日**（`skip_dates` collection）——這兩個一開始刻意沒做（舊版
+    的 Cloud Scheduler cron 是寫死的，完全沒讀這幾個欄位，做了也是假
+    按鈕），後來發現這不只是沒畫面，是後端邏輯真的缺了這塊（`skip_dates`
+    Phase 2 就遷移好了，但排程從來沒檢查過），回頭補上，詳見下面
+    「每日排程與不跑日」那節。
 
-  **刻意沒做**的部分：`config/app` 裡 `triggerHour`／`triggerMinute`／
-  `skipWeekends` 這幾個欄位，Firebase 版的排程是 `index.js` 裡寫死的
-  Cloud Scheduler cron（`'0 15 * * 1-5'`），完全沒讀這幾個 Firestore
-  欄位——這是舊版 Apps Script 觸發器時代留下的欄位，在新架構裡沒有接
-  任何東西，做了也是假按鈕，所以沒放進畫面，避免讓使用者以為改了這幾個
-  值會改到排程時間。`bigQuery.projectId`／`dataset`／`pricePerTb`
-  也沒開放編輯（打錯字會讓戰報整個查不到資料，風險比效益高，要改先去
-  Firebase Console 的 Firestore 頁面直接編輯文件）。AI 金鑰設定、AI
-  用量統計（在 BigQuery，不在 Firestore，見「資料庫分工」的說明）、
-  History 補抓/整理工具都還沒做。
+  `bigQuery.projectId`／`dataset`／`pricePerTb` 沒開放編輯（打錯字會讓
+  戰報整個查不到資料，風險比效益高，要改先去 Firebase Console 的
+  Firestore 頁面直接編輯文件）。AI 金鑰設定、AI 用量統計（在 BigQuery，
+  不在 Firestore，見「資料庫分工」的說明）、History 補抓/整理工具都還
+  沒做。
 - `firebase.json` 加了 `hosting` 設定（`public: "frontend/dist"`，SPA
   rewrite 全部導回 `index.html`）。
 
@@ -1186,3 +1186,52 @@ date DESC)` 索引，不用再多部署一個索引——而且「戰報燈號�
 索引需求，與其每次都猜測既有索引夠不夠用，不如直接部署驗證一次**，這份
 README 已經連續在好幾個地方踩過這個坑，之後新增任何 collection group
 查詢都要抱持「先假設需要新索引，部署驗證過才算數」的心態。
+
+## 每日排程與不跑日（2026-10-07）
+
+使用者發現 Admin 頁面沒有每日排程設定，追問之下才發現**不只是沒畫面，是
+後端邏輯真的缺了「不跑日」這塊**：`skip_dates` collection Phase 2 就已經
+遷移進 Firestore、Security Rules 也開放讀寫了，但 `functions/index.js`
+的 `generateDailyReportScheduled` 從來沒有檢查過它——就算使用者在
+`skip_dates` 加一筆，排程還是會照跑，不會真的跳過。
+
+**跟 Apps Script 版排程機制本質上的差異**：Apps Script 可以在執行階段
+動態新增/刪除真正的時間觸發器（`ScriptApp.newTrigger().atHour(hour)
+.nearMinute(minute)`），使用者在 Scheduler.gs 的 `setSchedule()` 存檔，
+下一次實際觸發時間馬上跟著變。Cloud Scheduler 的 cron 是**部署時寫死**的
+設定，沒辦法用同樣的方式動態改，除非額外串 Cloud Scheduler Admin API
+（多一組 IAM 權限、多一個 GCP client library 依賴，只為了改一個 cron
+字串，評估後覺得不划算）。
+
+**採用的做法：固定頻率 tick + 應用層判斷**：
+- `functions/lib/schedule.js` — 純邏輯：`shouldRunDailyReport_(now, opts)`
+  判斷「現在的台北時間是不是落在使用者設定的目標時間區間、有沒有跳過
+  週末、今天在不在 `skip_dates` 裡」，`test/schedule.test.js` 驗證過
+  （tick 區間比對、週末判斷、三個條件的組合情境）。
+- `functions/index.js` 的 `generateDailyReportScheduled` 的 Cloud
+  Scheduler cron 從原本寫死的 `'0 15 * * 1-5'`（15:00 UTC = 台北 23:00，
+  只有週一到週五）改成 `'*/5 * * * *'`（每 5 分鐘都被叫醒一次，週末/
+  跳過日的判斷改成完全交給 `shouldRunDailyReport_` 在應用層處理，不是
+  靠 cron 的 day-of-week 欄位）。每次被叫醒都讀一次 `config/app` 跟
+  `skip_dates`，判斷結果不符合就直接 `return`，不做任何事。
+- 使用者在 Admin 頁面改 `triggerHour`／`triggerMinute`／`skipWeekends`，
+  或在「不跑日」加一筆，**最多等 5 分鐘生效**，不用重新部署——用「觸發
+  精準度降到 5 分鐘解析度」換「改設定不用重新部署、不用多一組 Cloud
+  Scheduler Admin API 的 IAM 權限」，對「每天收盤後算一次戰報」這種
+  用途完全足夠。
+- 成本：一天 288 次 tick，絕大多數只做兩次 Firestore 讀取就直接
+  `return`（很快、很便宜），遠低於 Cloud Functions／Firestore 的免費
+  額度，不是需要擔心的成本。
+
+**前端**（`frontend/src/components/admin/AdminView.vue`）新增兩個
+form-card，一樣直接讀寫 Firestore（不經過 `onCall`）：
+- 「每日排程」：執行時間（時/分）+ 週末不執行的 checkbox。數字輸入框
+  不像下拉選單那樣適合「一改就存」（打字過程每個字元都會觸發），改用
+  本機草稿 + 明確的「套用排程設定」按鈕。
+- 「不跑日」：列出 `skip_dates` 現有項目（新到舊排序）+ 新增表單（日期
+  + 選填原因）+ 逐筆移除。
+
+⚠️ 跟其他 Cloud Function 一樣，`generateDailyReportScheduled` 的新邏輯
+本身沒辦法在這個開發環境驗證——`lib/schedule.js` 的純邏輯已經靠單元測試
+驗證過，但「Cloud Scheduler 真的每 5 分鐘叫醒一次」「改了 Admin 頁面的
+設定，等幾分鐘後排程真的照新設定跑」這兩件事要部署後才能確認。

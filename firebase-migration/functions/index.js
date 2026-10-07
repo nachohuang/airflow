@@ -37,6 +37,7 @@ const watchlistLib = require('./lib/watchlist');
 const portfolioOpsLib = require('./lib/portfolioOps');
 const utilsLib = require('./lib/utils');
 const stockDetailLib = require('./lib/stockDetail');
+const scheduleLib = require('./lib/schedule');
 
 admin.initializeApp();
 
@@ -265,12 +266,42 @@ async function runDailyAnalysis_() {
  *  微幅成長。 */
 var RUNTIME_OPTS_ = { memory: '1GiB', timeoutSeconds: 180 };
 
-/** 每個交易日台股收盤後觸發（15:00 UTC = 台北時間 23:00，History 當天資料應該
- *  已經更新完），取代 apps-script 版 scheduledDailyFetch 裡「算戰報」這一步
- *  （不含補抓 History/同步產業對照表等其他步驟，那些還沒遷移）。 */
+/** `skip_dates` collection 的文件 ID（就是日期字串 `yyyy-MM-dd`，見
+ *  firestore/schema.md §5），組成 Set 給 `scheduleLib.shouldRunDailyReport_`
+ *  用——collection 很小（偶爾才加一筆臨時停跑日），直接整個撈回來，不用查詢。 */
+async function fetchSkipDates_() {
+  const snap = await admin.firestore().collection('skip_dates').get();
+  return new Set(snap.docs.map(function (d) { return d.id; }));
+}
+
+/**
+ * 每 5 分鐘被 Cloud Scheduler 叫醒一次（不是「每個交易日固定時間」一次），叫醒
+ * 之後用 `scheduleLib.shouldRunDailyReport_` 判斷現在的台北時間是不是落在
+ * `config/app` 的 `triggerHour`/`triggerMinute` 設定的目標區間、有沒有跳過
+ * 週末／`skip_dates` 裡的臨時停跑日，不是才直接 return，不做任何事。
+ *
+ * 跟 apps-script 版的設計差異（見 lib/schedule.js 開頭的完整說明）：Apps
+ * Script 可以在執行階段動態新增/刪除真正的時間觸發器，使用者在畫面上改排程
+ * 設定，下次觸發時間馬上跟著變；Cloud Scheduler 的 cron 是部署時寫死的設定，
+ * 沒辦法用同樣的方式動態改，除非額外串 Cloud Scheduler Admin API（多一組
+ * IAM 權限、多一個 GCP 依賴）。改成固定頻率 tick 換取「使用者在 Admin 頁面
+ * 改設定，最多等 5 分鐘就生效，不用重新部署」，代價是觸發精準度降到 5 分鐘
+ * 解析度——對「每天收盤後算一次戰報」這種用途完全足夠，不需要精準到那一分鐘。
+ * 絕大多數的 tick 只做兩次 Firestore 讀取就直接 return，成本可以忽略（一天
+ * 288 次 tick，遠低於 Cloud Functions 免費額度）。
+ */
 exports.generateDailyReportScheduled = onSchedule(
-  Object.assign({ schedule: '0 15 * * 1-5' }, RUNTIME_OPTS_),
+  Object.assign({ schedule: '*/5 * * * *' }, RUNTIME_OPTS_),
   async function () {
+    const appConfig = await fetchAppConfig_();
+    const skipDates = await fetchSkipDates_();
+    const should = scheduleLib.shouldRunDailyReport_(new Date(), {
+      triggerHour: appConfig.triggerHour,
+      triggerMinute: appConfig.triggerMinute,
+      skipWeekends: appConfig.skipWeekends,
+      skipDates: skipDates
+    });
+    if (!should) return;
     await runDailyAnalysis_();
   }
 );
