@@ -1286,13 +1286,10 @@ Claude/Gemini 呼叫、費用估算這些 I/O 跟計算邏輯大部分都已經�
 `functions/index.js`／`functions/lib/aiDiagnosis.js` 裡可以直接重用，
 只差 system prompt 文字跟候選名單這一層的邏輯。
 
-**也刻意不搬的部分**：AiUsage 歷史費用記錄——apps-script 版把每次呼叫
-的 tokens/費用寫進 Sheets 的 `AiUsage` 分頁（`logAiUsage_`），`getAiUsageSummary`
-統計最近 N 天花費。這份 Firebase 版只計算並回傳**這一次呼叫**的費用給
-前端顯示，不持久化成歷史記錄（`firestore/schema.md` 把 AiUsage 標成
-「Phase 1 blueprint 設計決定要搬去 BigQuery」，是前瞻性的設計，不是
-現狀——目前舊系統的 AiUsage 實際還是存在 Sheets 裡）。之後要做歷史費用
-統計，需要先決定要不要新增一個 BigQuery 表或 Firestore collection。
+**AiUsage 歷史費用記錄**（apps-script 版把每次呼叫的 tokens/費用寫進
+Sheets 的 `AiUsage` 分頁）——這一版（2026-10-07 稍早）一開始刻意只計算
+並回傳單次呼叫的費用，不持久化歷史；同一天稍晚補上了持久化，見下面
+「AI 用量統計」那節。
 
 **檔案**：
 - `functions/lib/aiDiagnosis.js`（純邏輯，`test/aiDiagnosis.test.js`
@@ -1546,3 +1543,44 @@ Goodinfo／TWSE 財報**，只用戰報本身已經算好的量化欄位（Armor
 「排程真的在戰報算完後接著跑 Top3／候選名單橫向比較」「540 秒的逾時
 在 `aiDailyTopN=10` 時夠不夠用」這兩件事需要部署後、開啟「每日自動 AI
 診斷」實際跑過一次排程才能確認。
+
+## AI 用量統計（2026-10-07）
+
+從 `apps-script/src/AiDiagnosis.gs` 的 `logAiUsage_`／`getAiUsageSummary`
+搬過來——每次呼叫 LLM（深度診斷／續抱診斷／候選名單橫向比較／Top3 推薦）
+都順便記一筆 tokens／預估費用，Admin 頁面可以看最近 30 天的每日花費。
+apps-script 版寫進 Sheets 的 `AiUsage` 分頁，這版改寫進 Firestore 的
+`ai_usage` collection（文件 ID 用 Firestore 自動產生的 ID，不需要
+`code+date` 這種可預測的 ID——用量記錄只會累加，不會被同一筆覆蓋更新，
+跟 `ai_diagnosis` 的 upsert 語意不同）。
+
+**欄位**（對應 `AI_USAGE_COLUMNS`，英文化）：`date`／`timestamp`／
+`provider`／`model`／`code`（股票代號，或候選名單橫向比較／Top3 推薦
+各自的常數 `'SHORTLIST_SCAN'`／`'TOP3_SCAN'`，跟 apps-script 版一致）／
+`inputTokens`／`outputTokens`／`costUsd`。
+
+**實作**：
+- `functions/lib/aiUsage.js`（純邏輯，`test/aiUsage.test.js` 驗證過）：
+  `buildAiUsageSummary_(records, days, nowDateStr)`——依 `date` 分組加總
+  `calls`／`inputTokens`／`outputTokens`／`cost`，另外算 `totalCost`／
+  `totalCalls`／`todayCost`，回傳形狀跟 apps-script 版 `getAiUsageSummary`
+  一致。`nowDateStr` 由呼叫端傳入（不在這支純函式裡讀 `new Date()`），
+  方便測試。
+- `functions/index.js` 的 `logAiUsage_`（I/O，寫一筆到 `ai_usage`，刻意
+  吞掉寫入失敗的錯誤——用量記錄是「順便記一筆」的旁支資訊，寫失敗不該
+  讓已經成功的診斷流程整個報錯給使用者看）在四個 LLM 呼叫點各呼叫一次：
+  `runDeepDiagnosisForCode_`（深度診斷，也是每日候選名單展開後逐檔呼叫
+  的同一份核心邏輯）、`runPortfolioHoldDiagnosis`、`runTopPicksCore_`、
+  `runShortlistAndDeepDiagnosis_` 的候選名單橫向比較那一次呼叫（跟逐檔
+  深度診斷的呼叫是分開記的兩類）。
+- `exports.getAiUsageSummary`（`onCall`，data: `{days?}` 預設 30）：
+  只用 `.where('date', '>=', cutoffStr)` 單一不等式查詢（COLLECTION
+  scope，不需要額外索引，不加 `orderBy`，排序交給 `buildAiUsageSummary_`
+  在記憶體裡做）。
+- **Admin 頁面**新增「AI 用量統計（最近 30 天）」卡片：累計花費／今天
+  花費／每日明細表格，頁面打開時查一次（不是 `onSnapshot` 即時監聽——
+  用量歷史不需要秒級更新），附「重新整理」按鈕。
+
+⚠️ 沒辦法在這個開發環境實際驗證——純邏輯的分組/加總已經靠單元測試驗證
+過，但「真的打 LLM 之後 `ai_usage` 有沒有正確寫入一筆、Admin 頁面的
+每日明細表格算得對不對」需要部署後、實際跑過幾次 AI 診斷才能確認。

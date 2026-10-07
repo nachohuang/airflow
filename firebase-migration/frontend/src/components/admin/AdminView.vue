@@ -174,6 +174,26 @@ onMounted(async function () {
   }
 });
 
+// ---- AI 用量統計（最近 30 天）----
+// 跟金鑰狀態同一個模式：頁面打開時查一次，不是即時監聽（用量歷史不需要
+// 「秒級更新」，使用者按「重新整理」或重新打開頁面就夠了）。
+const usageSummary = ref(null);
+const usageError = ref('');
+const usageLoading = ref(true);
+
+async function loadUsageSummary() {
+  usageLoading.value = true;
+  usageError.value = '';
+  try {
+    usageSummary.value = await callFn('getAiUsageSummary', { days: 30 });
+  } catch (e) {
+    usageError.value = e.message || String(e);
+  } finally {
+    usageLoading.value = false;
+  }
+}
+onMounted(loadUsageSummary);
+
 // pricing 四個數字輸入框，跟「每日排程」的 scheduleForm 同一個理由用草稿 +
 // 「套用」按鈕（打字過程每個字元都會觸發 @input，不適合像下拉選單那樣
 // 一改就存）。
@@ -417,6 +437,42 @@ async function saveDailyAiSettings() {
       </div>
 
       <div class="form-card">
+        <h3>AI 用量統計（最近 30 天）</h3>
+        <p v-if="usageError" class="error-box">{{ usageError }}</p>
+        <p v-if="usageLoading" class="hint">載入中...</p>
+        <template v-else-if="usageSummary">
+          <div class="card-body">
+            <div>累計花費：約 ${{ usageSummary.totalCost }}（共 {{ usageSummary.totalCalls }} 次呼叫）</div>
+            <div>今天花費：約 ${{ usageSummary.todayCost }}</div>
+          </div>
+          <div v-if="usageSummary.daily.length" class="table-wrap">
+            <table class="history-table">
+              <thead>
+                <tr><th>日期</th><th>次數</th><th>輸入 Tokens</th><th>輸出 Tokens</th><th>花費</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in usageSummary.daily" :key="d.date">
+                  <td>{{ d.date }}</td>
+                  <td>{{ d.calls }}</td>
+                  <td>{{ d.inputTokens }}</td>
+                  <td>{{ d.outputTokens }}</td>
+                  <td>${{ d.cost.toFixed(4) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="hint">最近 30 天沒有任何 AI 呼叫記錄。</p>
+        </template>
+        <div class="form-actions">
+          <button type="button" :disabled="usageLoading" @click="loadUsageSummary">⟳ 重新整理</button>
+        </div>
+        <p class="hint">
+          單價可能抓錯（見上面「Claude／Gemini 單價」），這裡的花費只是預估，
+          不是 Anthropic／Google 帳單的實際金額。
+        </p>
+      </div>
+
+      <div class="form-card">
         <h3>BigQuery 設定</h3>
         <label>資料來源模式
           <select :value="config.bigQuery?.sourceMode" :disabled="saving"
@@ -437,8 +493,7 @@ async function saveDailyAiSettings() {
     </template>
 
     <p class="hint dashboard-note">
-      AI 用量統計歷史、History 補抓/整理工具還沒遷移到這裡，需要這些功能
-      請先用舊版網頁應用程式。
+      History 補抓/整理工具還沒遷移到這裡，需要這個功能請先用舊版網頁應用程式。
     </p>
   </section>
 </template>

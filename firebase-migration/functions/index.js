@@ -39,6 +39,7 @@ const utilsLib = require('./lib/utils');
 const stockDetailLib = require('./lib/stockDetail');
 const scheduleLib = require('./lib/schedule');
 const aiDiagnosisLib = require('./lib/aiDiagnosis');
+const aiUsageLib = require('./lib/aiUsage');
 
 admin.initializeApp();
 
@@ -826,17 +827,34 @@ async function callLlm_(systemPrompt, userPrompt, provider, apiKeys) {
 }
 
 /**
+ * 寫一筆 AI 呼叫的用量／費用記錄——跟 apps-script 版 logAiUsage_（寫進 Sheets
+ * 的 AiUsage 分頁）同一個用途，這版寫進 Firestore `ai_usage` collection（見
+ * README「AI 用量統計」那節）。`code` 對單檔診斷是股票代號，對候選名單橫向
+ * 比較／Top3 推薦是常數 `'SHORTLIST_SCAN'`／`'TOP3_SCAN'`，跟 apps-script 版
+ * 一致。刻意吞掉寫入失敗的錯誤——用量記錄是「順便記一筆」的旁支資訊，寫失敗
+ * 不該讓已經成功的診斷流程整個報錯給使用者看。 */
+async function logAiUsage_(code, llmResult, costUsd, timestampLabel) {
+  try {
+    await admin.firestore().collection('ai_usage').add({
+      date: utilsLib.todayStrTaipei_(),
+      timestamp: timestampLabel,
+      provider: llmResult.provider,
+      model: llmResult.model,
+      code: code,
+      inputTokens: llmResult.inputTokens || 0,
+      outputTokens: llmResult.outputTokens || 0,
+      costUsd: utilsLib.round_(costUsd, 6)
+    });
+  } catch (e) { /* 見上方說明：用量記錄寫失敗不影響呼叫端 */ }
+}
+
+/**
  * 單一股票代號跑一次 AI 深度診斷的核心邏輯，不含 onCall 的 auth／參數驗證——
  * `exports.runAiDiagnosis`（股票詳情頁單檔觸發）跟
  * `runShortlistAndDeepDiagnosis_`（每日自動診斷，對候選名單裡每一檔各呼叫一次）
  * 共用同一份實作，不要兩個呼叫路徑各自重複寫一次「查戰報列→抓財報→組
  * prompt→呼叫 LLM→算費用→寫入 Firestore」。appConfig 由呼叫端傳入（兩條路徑
  * 都已經在外層讀過一次，不用每檔股票各自重讀一次 `config/app`）。
- *
- * **不寫入 AiUsage 歷史費用記錄**（apps-script 版寫進 Sheets 的 AiUsage 分頁）
- * ——這版只計算並回傳這一次呼叫的費用給前端顯示，不持久化成歷史記錄，見
- * README「AI 診斷」那節的說明；之後要做歷史費用統計，需要先決定要不要新增
- * 一個 BigQuery 表或 Firestore collection 存這份歷史。
  */
 async function runDeepDiagnosisForCode_(appConfig, code) {
   const signalDocs = await fetchSignalHistoryForCode_(code);
@@ -878,6 +896,7 @@ async function runDeepDiagnosisForCode_(appConfig, code) {
     timestamp: timestampLabel
   };
   await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
+  await logAiUsage_(code, llmResult, cost, timestampLabel);
 
   return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
 }
@@ -981,6 +1000,7 @@ async function runTopPicksCore_(appConfig, candidatesResult) {
     timestamp: timestampLabel
   };
   await admin.firestore().collection('ai_diagnosis').doc('TOP3_' + candidatesResult.latestDate + '_top3').set(record);
+  await logAiUsage_('TOP3_SCAN', llmResult, cost, timestampLabel);
 
   return Object.assign({}, record, {
     cost: utilsLib.round_(cost, 4),
@@ -1023,6 +1043,12 @@ async function runShortlistAndDeepDiagnosis_(appConfig, candidatesResult, topN) 
     throw new Error('無法從 AI 候選名單中取出股票代號，原始回應開頭：「' +
       String(llmResult.text || '').slice(0, 150).replace(/\n/g, ' ') + '」');
   }
+
+  const shortlistCost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
+    cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
+    cacheReadInputTokens: llmResult.cacheReadInputTokens
+  }, appConfig.pricing);
+  await logAiUsage_('SHORTLIST_SCAN', llmResult, shortlistCost, timestampLabel);
 
   const results = [];
   for (const code of codes) {
@@ -1147,6 +1173,7 @@ exports.runPortfolioHoldDiagnosis = onCall(
       timestamp: timestampLabel
     };
     await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_hold').set(record);
+    await logAiUsage_(code, llmResult, cost, timestampLabel);
 
     return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
   }
@@ -1175,3 +1202,24 @@ exports.getAiKeyStatus = onCall(
     };
   }
 );
+
+/**
+ * data: {days?}（預設 30）。給 Admin 頁面顯示最近 N 天的 AI 呼叫次數/tokens/
+ * 預估費用——跟 apps-script 版 getAiUsageSummary 同一個用途，資料來源換成
+ * Firestore 的 `ai_usage` collection（見 `logAiUsage_` 的說明）。只用
+ * `.where('date', '>=', cutoffStr)` 單一不等式查詢（不加 orderBy，排序交給
+ * `aiUsageLib.buildAiUsageSummary_` 在記憶體裡做）——COLLECTION scope 的
+ * 單欄不等式查詢是 Firestore 自動索引涵蓋的範圍，不需要額外部署索引。
+ */
+exports.getAiUsageSummary = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const days = data.days || 30;
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+  const snap = await admin.firestore().collection('ai_usage').where('date', '>=', cutoffStr).get();
+  const records = snap.docs.map(function (d) { return d.data(); });
+  const nowDateStr = utilsLib.todayStrTaipei_();
+  return aiUsageLib.buildAiUsageSummary_(records, days, nowDateStr);
+});
