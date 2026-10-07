@@ -413,6 +413,32 @@ async function fetchSkipDates_() {
 }
 
 /**
+ * 寫一筆執行紀錄（成功／失敗／部分成功／略過），給 Admin 頁面「執行紀錄」卡片
+ * 顯示用——跟 apps-script 版 `logRun_`（寫進 Sheets 的 `RunLog` 分頁，上限
+ * 500 筆自動裁剪舊紀錄）同一個用途，這版寫進 Firestore 的 `run_log`
+ * collection（不做自動裁剪——Firestore 沒有「刪最舊 N 筆」這種單一操作，
+ * 要裁剪得另外查詢+批次刪除，對一個單人工具每天幾筆的寫入量，暫時不值得
+ * 做，之後資料真的多到需要時再補）。
+ *
+ * category 沿用 apps-script 版「大類-子動作」的命名慣例（例如
+ * `'每日排程-補抓資料'`），Admin 頁面依「-」前的文字分組篩選。刻意吞掉寫入
+ * 失敗的錯誤——執行紀錄是「順便記一筆」的旁支資訊，寫失敗不該讓已經成功的
+ * 主要流程整個報錯給使用者看，跟 `logAiUsage_` 同一個理由。
+ */
+async function logRun_(category, status, message, durationMs) {
+  try {
+    await admin.firestore().collection('run_log').add({
+      timestampMs: Date.now(),
+      timestamp: utilsLib.timestampLabelTaipei_(),
+      category: category,
+      status: status,
+      message: String(message || ''),
+      durationMs: durationMs || 0
+    });
+  } catch (e) { /* 見上方說明 */ }
+}
+
+/**
  * 每 5 分鐘被 Cloud Scheduler 叫醒一次（不是「每個交易日固定時間」一次），叫醒
  * 之後用 `scheduleLib.shouldRunDailyReport_` 判斷現在的台北時間是不是落在
  * `config/app` 的 `triggerHour`/`triggerMinute` 設定的目標區間、有沒有跳過
@@ -455,15 +481,47 @@ exports.generateDailyReportScheduled = onSchedule(
       skipDates: skipDates
     });
     if (!should) return;
-    await runDailyCatchupFetch_(appConfig, skipDates);
-    await runDailyAnalysis_();
+
+    const fetchStart = Date.now();
+    const fetchResult = await runDailyCatchupFetch_(appConfig, skipDates);
+    await logRun_(
+      '每日排程-補抓資料',
+      fetchResult.skipped ? '略過' : (fetchResult.failed.length ? '部分成功' : '成功'),
+      fetchResult.skipped
+        ? fetchResult.reason
+        : ('成功 ' + fetchResult.succeeded.length + ' 天' + (fetchResult.succeeded.length ? '（' + fetchResult.succeeded.join('、') + '）' : '') +
+          (fetchResult.failed.length ? '，失敗 ' + fetchResult.failed.length + ' 天' : '')),
+      Date.now() - fetchStart
+    );
+
+    const analysisStart = Date.now();
+    const analysisResult = await runDailyAnalysis_();
+    await logRun_(
+      '每日排程-重新計算戰報',
+      analysisResult.strategyError ? '失敗' : '成功',
+      analysisResult.strategyError || (analysisResult.latestDate
+        ? ('戰報日期 ' + analysisResult.latestDate + '，' + analysisResult.reportDocs.length + ' 檔訊號')
+        : '沒有可用的歷史資料，查無戰報'),
+      Date.now() - analysisStart
+    );
+
     if (appConfig.aiDailyEnabled) {
       // runDailyAiDiagnosisForTopPicks_ 內部已經把 Top3／候選名單這兩段各自包了
       // try/catch，這裡再包一層純粹是防禦性的最後一道防線——AI 診斷失敗不該讓
       // 這次 tick 被記成失敗、也不該讓已經成功寫入的戰報被当成沒跑完。
+      const aiStart = Date.now();
       try {
-        await runDailyAiDiagnosisForTopPicks_(appConfig);
-      } catch (e) { /* 見上方說明：不該發生，失敗也不影響已經寫入的戰報 */ }
+        const aiResult = await runDailyAiDiagnosisForTopPicks_(appConfig);
+        await logRun_(
+          '每日排程-每日自動AI診斷',
+          (aiResult.topPicks.ok && aiResult.shortlist.ok) ? '成功' : '部分成功',
+          'Top3：' + (aiResult.topPicks.ok ? '成功' : '失敗（' + aiResult.topPicks.error + '）') +
+            '　候選名單：' + (aiResult.shortlist.ok ? '成功' : '失敗（' + aiResult.shortlist.error + '）'),
+          Date.now() - aiStart
+        );
+      } catch (e) {
+        await logRun_('每日排程-每日自動AI診斷', '失敗', String(e.message || e), Date.now() - aiStart);
+      }
     }
   }
 );
@@ -471,8 +529,15 @@ exports.generateDailyReportScheduled = onSchedule(
 /** 手動觸發用（取代 apps-script 版「重新計算戰報」按鈕），回傳這次算出來的戰報
  *  摘要，方便部署後用 curl 或瀏覽器直接驗證有沒有接線成功。 */
 exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res) {
+  const startTime = Date.now();
   try {
     const result = await runDailyAnalysis_();
+    await logRun_(
+      '手動重新計算戰報',
+      result.strategyError ? '失敗' : '成功',
+      result.strategyError || (result.latestDate ? ('戰報日期 ' + result.latestDate + '，' + result.reportDocs.length + ' 檔訊號') : '沒有可用的歷史資料'),
+      Date.now() - startTime
+    );
     res.json({
       ok: true,
       latestDate: result.latestDate,
@@ -482,6 +547,7 @@ exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res)
       diagnostics: result.diagnostics
     });
   } catch (e) {
+    await logRun_('手動重新計算戰報', '失敗', String(e.message || e), Date.now() - startTime);
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
@@ -498,7 +564,14 @@ exports.runManualHistoryFetch = onCall(RUNTIME_OPTS_, async function (request) {
   if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
     throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
   }
+  const startTime = Date.now();
   const result = await fetchOneDayAndWrite_(appConfig.bigQuery, dateStr);
+  await logRun_(
+    '手動抓取',
+    result.kind === 'succeeded' ? '成功' : '失敗',
+    dateStr + '：' + (result.kind === 'succeeded' ? '成功寫入 ' + result.rowCount + ' 檔股票' : result.error),
+    Date.now() - startTime
+  );
   if (result.kind === 'failed') throw new HttpsError('internal', result.error);
   return result;
 });
@@ -540,12 +613,19 @@ exports.runHistoryBackfill = onCall(
       throw new HttpsError('invalid-argument', '這個區間沒有任何要補抓的日期（確認 startDate 不晚於 endDate）。');
     }
 
+    const startTime = Date.now();
     const succeeded = [];
     const failed = [];
     for (const dateStr of dates) {
       const result = await fetchOneDayAndWrite_(appConfig.bigQuery, dateStr);
       if (result.kind === 'succeeded') succeeded.push(result.date); else failed.push(result);
     }
+    await logRun_(
+      '補抓區間',
+      failed.length ? '部分成功' : '成功',
+      data.startDate + ' ~ ' + data.endDate + '：成功 ' + succeeded.length + ' 天' + (failed.length ? '，失敗 ' + failed.length + ' 天' : ''),
+      Date.now() - startTime
+    );
     return {
       attempted: dates,
       succeeded: succeeded,
@@ -1089,48 +1169,55 @@ async function logAiUsage_(code, llmResult, costUsd, timestampLabel) {
  * 都已經在外層讀過一次，不用每檔股票各自重讀一次 `config/app`）。
  */
 async function runDeepDiagnosisForCode_(appConfig, code) {
-  const signalDocs = await fetchSignalHistoryForCode_(code);
-  const row = signalDocs[0];
-  if (!row) {
-    throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
+  const startTime = Date.now();
+  try {
+    const signalDocs = await fetchSignalHistoryForCode_(code);
+    const row = signalDocs[0];
+    if (!row) {
+      throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
+    }
+
+    const timestampLabel = utilsLib.timestampLabelTaipei_();
+    const [goodinfoText, twseDatasets] = await Promise.all([
+      fetchGoodinfoText_(code),
+      fetchTwseOfficialFinancialsDatasets_()
+    ]);
+    const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
+    const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel);
+
+    const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
+    const llmResult = await callLlm_(aiDiagnosisLib.AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
+      claude: process.env.ANTHROPIC_API_KEY,
+      gemini: process.env.GEMINI_API_KEY
+    });
+
+    const diagnosisText = llmResult.text;
+    const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
+    const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
+      cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
+      cacheReadInputTokens: llmResult.cacheReadInputTokens
+    }, appConfig.pricing);
+
+    const record = {
+      date: row.date,
+      code: code,
+      name: row.name || '',
+      armorScore: row.armorScore,
+      strategy: row.strategy,
+      verdict: verdict,
+      diagnosisType: 'deep',
+      content: diagnosisText,
+      timestamp: timestampLabel
+    };
+    await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
+    await logAiUsage_(code, llmResult, cost, timestampLabel);
+    await logRun_('AI診斷', '成功', code + ' ' + (row.name || '') + ' -> ' + verdict, Date.now() - startTime);
+
+    return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
+  } catch (e) {
+    await logRun_('AI診斷', '失敗', code + '：' + String(e.message || e), Date.now() - startTime);
+    throw e;
   }
-
-  const timestampLabel = utilsLib.timestampLabelTaipei_();
-  const [goodinfoText, twseDatasets] = await Promise.all([
-    fetchGoodinfoText_(code),
-    fetchTwseOfficialFinancialsDatasets_()
-  ]);
-  const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
-  const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel);
-
-  const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
-  const llmResult = await callLlm_(aiDiagnosisLib.AI_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
-    claude: process.env.ANTHROPIC_API_KEY,
-    gemini: process.env.GEMINI_API_KEY
-  });
-
-  const diagnosisText = llmResult.text;
-  const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
-  const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
-    cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
-    cacheReadInputTokens: llmResult.cacheReadInputTokens
-  }, appConfig.pricing);
-
-  const record = {
-    date: row.date,
-    code: code,
-    name: row.name || '',
-    armorScore: row.armorScore,
-    strategy: row.strategy,
-    verdict: verdict,
-    diagnosisType: 'deep',
-    content: diagnosisText,
-    timestamp: timestampLabel
-  };
-  await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_deep').set(record);
-  await logAiUsage_(code, llmResult, cost, timestampLabel);
-
-  return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
 }
 
 /**
@@ -1233,6 +1320,7 @@ async function runTopPicksCore_(appConfig, candidatesResult) {
   };
   await admin.firestore().collection('ai_diagnosis').doc('TOP3_' + candidatesResult.latestDate + '_top3').set(record);
   await logAiUsage_('TOP3_SCAN', llmResult, cost, timestampLabel);
+  await logRun_('AI Top3 推薦', '成功', '掃描 ' + candidatesResult.candidates.length + ' 檔候選（' + candidatesResult.latestDate + '）', 0);
 
   return Object.assign({}, record, {
     cost: utilsLib.round_(cost, 4),
@@ -1248,9 +1336,14 @@ exports.runAiTopPicks = onCall(
   Object.assign({ secrets: ['GEMINI_API_KEY'] }, RUNTIME_OPTS_),
   async function (request) {
     assertOwnerAuth_(request);
-    const appConfig = await fetchAppConfig_();
-    const candidatesResult = await fetchLatestReportCandidates_();
-    return runTopPicksCore_(appConfig, candidatesResult);
+    try {
+      const appConfig = await fetchAppConfig_();
+      const candidatesResult = await fetchLatestReportCandidates_();
+      return await runTopPicksCore_(appConfig, candidatesResult);
+    } catch (e) {
+      await logRun_('AI Top3 推薦', '失敗', String(e.message || e), 0);
+      throw e;
+    }
   }
 );
 
@@ -1281,6 +1374,7 @@ async function runShortlistAndDeepDiagnosis_(appConfig, candidatesResult, topN) 
     cacheReadInputTokens: llmResult.cacheReadInputTokens
   }, appConfig.pricing);
   await logAiUsage_('SHORTLIST_SCAN', llmResult, shortlistCost, timestampLabel);
+  await logRun_('AI每日候選名單', '成功', '掃描 ' + candidatesResult.candidates.length + ' 檔候選，篩出 ' + codes.length + ' 檔：' + codes.join('、'), 0);
 
   const results = [];
   for (const code of codes) {
@@ -1354,60 +1448,67 @@ exports.runPortfolioHoldDiagnosis = onCall(
     const data = request.data || {};
     if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
     const code = utilsLib.zfill4(String(data.code).trim());
+    const startTime = Date.now();
 
-    const [appConfig, lotDocs] = await Promise.all([fetchAppConfig_(), fetchPortfolioLots_()]);
-    const portfolioMap = portfolio.buildPortfolioMap_(lotDocs);
-    if (!portfolioMap[code]) {
-      throw new HttpsError('failed-precondition', '目前沒有持有 ' + code + '，請確認「持股庫存」裡有這一筆持有中的紀錄。');
+    try {
+      const [appConfig, lotDocs] = await Promise.all([fetchAppConfig_(), fetchPortfolioLots_()]);
+      const portfolioMap = portfolio.buildPortfolioMap_(lotDocs);
+      if (!portfolioMap[code]) {
+        throw new HttpsError('failed-precondition', '目前沒有持有 ' + code + '，請確認「持股庫存」裡有這一筆持有中的紀錄。');
+      }
+
+      const [signalDocs, bqInfo] = await Promise.all([
+        fetchSignalHistoryForCode_(code),
+        fetchBqInfoForCodes_(appConfig.bigQuery, [code])
+      ]);
+      const row = signalDocs[0];
+      if (!row) {
+        throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
+      }
+      const latestClose = bqInfo[code] ? bqInfo[code].close : null;
+      const holding = buildHoldingInfo_(portfolioMap, code, latestClose);
+
+      const timestampLabel = utilsLib.timestampLabelTaipei_();
+      const [goodinfoText, twseDatasets] = await Promise.all([
+        fetchGoodinfoText_(code),
+        fetchTwseOfficialFinancialsDatasets_()
+      ]);
+      const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
+      const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel, holding);
+
+      const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
+      const llmResult = await callLlm_(aiDiagnosisLib.AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
+        claude: process.env.ANTHROPIC_API_KEY,
+        gemini: process.env.GEMINI_API_KEY
+      });
+
+      const diagnosisText = llmResult.text;
+      const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
+      const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
+        cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
+        cacheReadInputTokens: llmResult.cacheReadInputTokens
+      }, appConfig.pricing);
+
+      const record = {
+        date: row.date,
+        code: code,
+        name: row.name || '',
+        armorScore: row.armorScore,
+        strategy: row.strategy,
+        verdict: verdict,
+        diagnosisType: 'hold',
+        content: diagnosisText,
+        timestamp: timestampLabel
+      };
+      await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_hold').set(record);
+      await logAiUsage_(code, llmResult, cost, timestampLabel);
+      await logRun_('持股續抱診斷', '成功', code + ' ' + (row.name || '') + ' -> ' + verdict, Date.now() - startTime);
+
+      return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
+    } catch (e) {
+      await logRun_('持股續抱診斷', '失敗', code + '：' + String(e.message || e), Date.now() - startTime);
+      throw e;
     }
-
-    const [signalDocs, bqInfo] = await Promise.all([
-      fetchSignalHistoryForCode_(code),
-      fetchBqInfoForCodes_(appConfig.bigQuery, [code])
-    ]);
-    const row = signalDocs[0];
-    if (!row) {
-      throw new HttpsError('not-found', '在戰報裡找不到 ' + code + ' 的資料，請先確認它出現在某一天的戰報中。');
-    }
-    const latestClose = bqInfo[code] ? bqInfo[code].close : null;
-    const holding = buildHoldingInfo_(portfolioMap, code, latestClose);
-
-    const timestampLabel = utilsLib.timestampLabelTaipei_();
-    const [goodinfoText, twseDatasets] = await Promise.all([
-      fetchGoodinfoText_(code),
-      fetchTwseOfficialFinancialsDatasets_()
-    ]);
-    const twseOfficialText = aiDiagnosisLib.buildTwseOfficialFinancialsTextForCode_(code, twseDatasets);
-    const userPrompt = aiDiagnosisLib.buildDiagnosisPrompt_(row, goodinfoText, twseOfficialText, timestampLabel, holding);
-
-    const provider = appConfig.aiProvider === 'gemini' ? 'gemini' : 'claude';
-    const llmResult = await callLlm_(aiDiagnosisLib.AI_HOLDING_DIAGNOSIS_SYSTEM_PROMPT, userPrompt, provider, {
-      claude: process.env.ANTHROPIC_API_KEY,
-      gemini: process.env.GEMINI_API_KEY
-    });
-
-    const diagnosisText = llmResult.text;
-    const verdict = aiDiagnosisLib.extractVerdict_(diagnosisText);
-    const cost = aiDiagnosisLib.calcCost_(llmResult.provider, llmResult.inputTokens, llmResult.outputTokens, {
-      cacheCreationInputTokens: llmResult.cacheCreationInputTokens,
-      cacheReadInputTokens: llmResult.cacheReadInputTokens
-    }, appConfig.pricing);
-
-    const record = {
-      date: row.date,
-      code: code,
-      name: row.name || '',
-      armorScore: row.armorScore,
-      strategy: row.strategy,
-      verdict: verdict,
-      diagnosisType: 'hold',
-      content: diagnosisText,
-      timestamp: timestampLabel
-    };
-    await admin.firestore().collection('ai_diagnosis').doc(code + '_' + row.date + '_hold').set(record);
-    await logAiUsage_(code, llmResult, cost, timestampLabel);
-
-    return Object.assign({}, record, { cost: utilsLib.round_(cost, 4), groundingDisabled: !!llmResult.groundingDisabled });
   }
 );
 

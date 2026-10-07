@@ -1726,3 +1726,78 @@ Big5 解碼正不正確、BigQuery DML 寫入能不能成功」都需要部署�
 （最容易看出端點格式/編碼有沒有問題），確認沒問題後再用「補抓區間」
 補回缺的那幾天，最後看「每日排程」是不是接上了（下一次排程 tick 的戰報
 日期有沒有跟著動）。
+
+## 執行紀錄（run_log，2026-10-07）
+
+**背景**：使用者在確認上面「每日股價資料抓取」這個缺口時，順便問了一個
+更根本的問題——舊版 apps-script 的「後台管理」頁面有一個「執行紀錄」區塊
+可以看排程/手動操作的 job 總覽及執行狀況，**這次遷移到目前為止完全沒有
+搬這個功能**。這是真正的缺口，不是「做了但沒測過」——補上。
+
+舊版機制（`apps-script/src/SheetUtils.gs` `logRun_`）：每次排程/手動
+操作各自呼叫 `logRun_(type, status, message, durationSec)`，寫一列進
+`RunLog` 這個 Sheet 分頁，超過 500 列自動裁掉最舊的；後台管理頁面用
+`getRecentRunLogs(limit, category)` 讀最近 N 筆，`type` 欄位用「第一個
+`-` 前的文字」分組（例如「每日排程-補抓資料」歸進「每日排程」），供
+一個分類篩選下拉選單用。
+
+### 實作
+
+- **`functions/index.js` `logRun_(category, status, message, durationMs)`**
+  ——對應 apps-script 版的 `logRun_`，寫進新的 Firestore collection
+  `run_log`，欄位 `{timestampMs, timestamp, category, status, message,
+  durationMs}`（`timestampMs` 是數字，給 `orderBy` 排序用；`timestamp`
+  是台北時間的可讀字串，給畫面直接顯示，跟 `utilsLib.timestampLabelTaipei_`
+  其他地方的用法一致）。刻意寫成 fire-and-forget（吞掉自己的寫入失敗，
+  不往外拋例外）——記錄這次執行有沒有成功，本身絕對不能變成「讓這次執行
+  失敗」的原因，跟 apps-script 版「寫 log 只是旁支，不該影響主流程」是
+  同一個設計前提。
+- **接線的呼叫點**（涵蓋這個 App 目前所有背景/手動操作，對應 apps-script
+  版到處撒的 `logRun_` 呼叫）：
+  - `generateDailyReportScheduled`（每日排程 tick）：分三段各記一筆——
+    `每日排程-補抓資料`／`每日排程-重新計算戰報`／`每日排程-每日自動AI診斷`
+    （只在 `aiDailyEnabled` 開啟時才有這第三筆）。
+  - `generateDailyReport`（手動重新計算戰報的 HTTP 端點）→
+    `手動重新計算戰報`。
+  - `runManualHistoryFetch`（手動抓取單日）→ `手動抓取`。
+  - `runHistoryBackfill`（手動補抓區間）→ `補抓區間`。
+  - `runDeepDiagnosisForCode_`（單檔深度診斷，不管是使用者手動點「跑新的
+    深度診斷」還是每日自動候選名單逐檔跑）→ `AI診斷`。
+  - `runPortfolioHoldDiagnosis`（持股續抱診斷）→ `持股續抱診斷`。
+  - `runTopPicksCore_`／`runAiTopPicks`（Top3 橫向推薦，手動或每日自動都
+    會經過這裡）→ `AI Top3 推薦`。
+  - `runShortlistAndDeepDiagnosis_`（每日自動候選名單橫向比較這一步，跟
+    上面逐檔深度診斷是兩筆分開的紀錄）→ `AI每日候選名單`。
+  - 狀態文字目前用到的有 `成功`／`失敗`／`略過`（例如補抓資料發現沒有
+    缺口可補）／`部分成功`（例如補抓 5 天裡 3 天成功 2 天失敗，或 Top3
+    跟候選名單兩段只有一段成功）。
+- **`firestore/firestore.rules`** 新增 `run_log/{entryId}` 規則，只開
+  `isOwner()` 讀取（跟 `ai_diagnosis`／`backtest_results` 等其他後端寫入
+  的衍生資料同一組規則，前端不能直接寫，寫入只能透過 Cloud Functions 的
+  Admin SDK）。
+- **Admin 頁面**新增「執行紀錄」卡片：直接用 Firestore client SDK 的
+  `onSnapshot`（`query(collection(db,'run_log'), orderBy('timestampMs',
+  'desc'), limit(50))`）即時監聽最近 50 筆，不經過 `onCall`——跟
+  `watchlist`／`skip_dates` 這些「規則已經開放讀取、不需要額外聚合計算」
+  的 collection 走同一個模式，不是每個新 collection 都需要一支專門的
+  `onCall` 函式。狀態文字用 `runLogStatusColor()` 對應到
+  `var(--green)`／`var(--red)`／`var(--amber)`，套在既有的 `.signal-badge`
+  class 上（背景色用 `color-mix` 自動跟著 `color` 換，不用額外定義新的
+  CSS class），跟 `utils/strategyColor.js` 替操作策略上色是同一個手法。
+  耗時欄位把 `durationMs` 換成秒數顯示（`(durationMs/1000).toFixed(1)`），
+  對應 apps-script 版的「耗時(秒)」欄位。
+
+### 跟 apps-script 版的差異（刻意簡化）
+
+1. **沒有自動裁剪舊紀錄**——apps-script 版 500 列的上限是 Google Sheets
+   「列數太多會拖慢整份表格的讀寫」這個效能考量逼出來的；Firestore 是
+   per-document 儲存，單純「紀錄愈積愈多」本身不會拖慢查詢效能（查詢
+   一律 `limit(50)`，走 `timestampMs` 索引），只有儲存成本會隨時間緩慢
+   增加（一筆紀錄不到 1KB，一天撐滿寫個十幾筆，一年也只是幾 MB，
+   Firestore 儲存費率是這個等級完全不會感覺到的錢）。先不做，等真的
+   變成問題（例如之後想在這裡保留更久的歷史趨勢統計）再處理。
+2. **沒有分類篩選下拉選單**——apps-script 版 `getRunLogCategories` 讓
+   使用者在後台管理頁面只看某一大類（例如只看「每日排程」）。Firebase
+   版目前就是單純顯示最近 50 筆全部類型，筆數不多（每天正常情況下個位數
+   到十幾筆），用「項目」欄位用眼睛掃一下也看得出來，先不做額外的篩選
+   UI；如果之後紀錄密度變高（例如 AI 診斷量很大）再考慮加。

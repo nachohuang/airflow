@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
-import { collection, doc, onSnapshot, updateDoc, setDoc, deleteDoc } from 'firebase/firestore';
+import { collection, doc, onSnapshot, updateDoc, setDoc, deleteDoc, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
 
@@ -334,6 +334,43 @@ async function runBackfillNow() {
     backfillRunning.value = false;
   }
 }
+
+// ---- 執行紀錄（run_log）----
+// 跟 apps-script 版「後台管理」頁面的「執行紀錄」同一個用途，見
+// functions/index.js logRun_ 的說明——每日排程、手動抓取/補抓、AI 診斷等
+// 操作都會各自記一筆成功/失敗。直接用 Firestore client SDK 查詢（規則已經
+// 開放 owner 讀取，見 firestore.rules），不經過 onCall：這裡只是單純依
+// 時間新到舊排序取最近 N 筆，沒有需要額外聚合計算。即時監聽（onSnapshot）
+// ——排程/手動操作寫入新紀錄時，畫面不用手動重新整理就會自動更新。
+const runLogEntries = ref([]);
+const runLogError = ref('');
+const runLogLoading = ref(true);
+let unsubscribeRunLog = null;
+
+onMounted(function () {
+  unsubscribeRunLog = onSnapshot(
+    query(collection(db, 'run_log'), orderBy('timestampMs', 'desc'), limit(50)),
+    function (snap) {
+      runLogEntries.value = snap.docs.map(function (d) { return d.data(); });
+      runLogLoading.value = false;
+    },
+    function (e) {
+      runLogError.value = e.message || String(e);
+      runLogLoading.value = false;
+    }
+  );
+});
+onUnmounted(function () {
+  if (unsubscribeRunLog) unsubscribeRunLog();
+});
+
+// 狀態文字 -> 顏色，跟 utils/strategyColor.js 同一個「只覆寫 color，背景
+// 用 .signal-badge 的 color-mix 自動跟著換」用法，不用額外新增 CSS class。
+function runLogStatusColor(status) {
+  if (status === '成功') return 'var(--green)';
+  if (status === '失敗') return 'var(--red)';
+  return 'var(--amber)'; // 略過／部分成功等中間狀態
+}
 </script>
 
 <template>
@@ -622,6 +659,38 @@ async function runBackfillNow() {
         </p>
       </div>
 
+      <div class="form-card">
+        <h3>執行紀錄</h3>
+        <p v-if="runLogError" class="error-box">{{ runLogError }}</p>
+        <p v-if="runLogLoading" class="hint">載入中...</p>
+        <div v-else-if="runLogEntries.length" class="table-wrap">
+          <table class="history-table run-log-table">
+            <thead>
+              <tr><th>時間</th><th>項目</th><th>狀態</th><th>說明</th><th>耗時</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(entry, i) in runLogEntries" :key="entry.timestampMs + '-' + i">
+                <td>{{ entry.timestamp }}</td>
+                <td>{{ entry.category }}</td>
+                <td>
+                  <span class="signal-badge" :style="{ color: runLogStatusColor(entry.status) }">{{ entry.status }}</span>
+                </td>
+                <td class="run-log-message">{{ entry.message }}</td>
+                <td>{{ (entry.durationMs / 1000).toFixed(1) }}s</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="hint">目前沒有任何執行紀錄。</p>
+        <p class="hint">
+          每日排程、手動抓取/補抓、AI 診斷等背景工作執行後都會各自記一筆成功/
+          失敗紀錄在這裡，跟舊版 apps-script 後台管理頁面的「執行紀錄」同一個
+          用途——排程半夜跑完、人不在電腦前，用這裡確認昨晚有沒有順利跑完，
+          不用等戰報頁面「資料看起來怪」才回頭去查雲端後台的 log。最近 50 筆，
+          即時更新（排程/手動操作一寫入新紀錄，這裡不用重新整理就會自動更新）。
+        </p>
+      </div>
+
       <p v-if="savedAt" class="hint">已儲存（{{ savedAt }}）</p>
     </template>
 
@@ -632,3 +701,14 @@ async function runBackfillNow() {
     </p>
   </section>
 </template>
+
+<style scoped>
+/* .history-table 的 th/td 預設 white-space: nowrap（配合數字欄位右對齊），
+   執行紀錄的「說明」欄位是不定長度的中文句子，要能換行才不會把表格撐到
+   很寬、在手機上要左右滑一大段才看得完一則紀錄。 */
+.run-log-table .run-log-message {
+  white-space: normal;
+  text-align: left;
+  min-width: 220px;
+}
+</style>

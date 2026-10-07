@@ -74,6 +74,14 @@ service cloud.firestore {
     match /factor_model_history/{runId} {
       allow read: if isOwner();
     }
+    // 執行紀錄（每日排程／手動抓取/補抓/AI 診斷等操作的成功/失敗紀錄，見
+    // functions/index.js logRun_）——跟上面幾個一樣是後端寫入的衍生資料，
+    // 前端 Admin 頁面的「執行紀錄」卡片直接用 Firestore client SDK 查詢
+    // （不經過 onCall，沒有需要額外聚合計算，見 README「每日股價資料抓取」
+    // 那節 ai_usage 之後補上的這個新 collection 的說明）。
+    match /run_log/{entryId} {
+      allow read: if isOwner();
+    }
 
     // ---------- 工作狀態：前端只能讀（監聽進度），重新啟動/刪除要走
     // Cloud Function（避免使用者端直接竄改 job 狀態導致背景工作邏輯誤判） ----------
