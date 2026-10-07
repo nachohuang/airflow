@@ -2089,3 +2089,54 @@ set a memory limit greater than 512MiB」——Cloud Run 的 memory/CPU
 付一次代價，不是只有真的用到那個依賴的函式才付；這個開發環境沒辦法
 實際部署驗證冷啟動會不會 OOM，保守選一個比較安全的數字，不賭激進的
 `256MiB`）。
+
+## Bug 修正：補抓逾時被平台強制中止，job 狀態永遠卡在「執行中」（2026-10-07）
+
+**症狀**：使用者補抓一個 13 個日曆天（約 9~10 個交易日）的區間，過了
+一段時間「目前執行狀態」卡片一直顯示「執行中」不會變，「開始補抓」
+按鈕也因為這樣被鎖住，沒辦法開始下一次嘗試；同時 `getHistoryOverview`
+的數字沒有完全符合預期（有進展但不完整）。
+
+**根本原因**：`runHistoryBackfill` 原本宣告 `timeoutSeconds: 540`
+（9 分鐘），9~10 個交易日、每天 3 個 TWSE 端點依序抓、寫入時還要依
+大小切成多個 chunk（見上面「一天的資料遠超過 1MB」那節），疊起來很
+容易超過 9 分鐘。**關鍵問題不是「逾時」本身，而是逾時的處理方式**：
+Cloud Functions 平台對逾時的處理是直接強制中止這次執行（類似外部
+砍掉整個程序），**不會**讓函式自己的程式碼繼續跑、也不會走到
+`try/catch` 的 `catch` 區塊——`writeJobStatus_('historyBackfill',
+{status:'failed', ...})` 這段永遠沒有機會被執行到，`jobs/
+historyBackfill` 文件就停在上一次寫入的 `'running'` 狀態，從此卡住。
+前端原本看到 `status === 'running'` 就把「開始補抓」按鈕鎖死，兩個
+問題疊在一起，變成使用者完全沒有辦法繼續操作，连重試都不行。
+
+**修正（三部分）**：
+1. **拿掉按鈕的 job 狀態硬鎖**——這是單人工具，不需要真的防「使用者
+   自己跟自己搶」這種並發保護，「開始補抓」永遠可以按，不管上面顯示
+   的狀態是什麼。按下去的新呼叫一開始就會把 `jobs/historyBackfill`
+   覆寫成新的 `running`，等於直接覆蓋掉卡住的舊狀態，不需要像舊版
+   apps-script「排程佇列」那樣另外做一顆「強制清除卡住工作」的按鈕。
+2. **`timeoutSeconds` 從 540 調到 1800**（30 分鐘，callable function
+   允許的上限是 3600 秒）——降低撞到逾時的機率，但不是保證不會發生；
+   搭配第 1 點，就算真的撞到，使用者也不會被卡住。
+3. **補上 Admin 頁面完全沒有的兩個手動觸發功能**（使用者在同一次回報
+   裡一起提出）：
+   - **「重新計算戰報」**：新增 `exports.runManualReportRecompute`
+     （onCall），跟既有的 `generateDailyReport`（onRequest，只能用
+     curl 打，前端原本沒有接線）共用同一份核心邏輯
+     `runManualReportRecomputeCore_`——只重算戰報，不補抓資料、不跑
+     AI 診斷，通常數秒內完成，不需要 `jobs/{jobKey}` 追蹤。
+   - **「執行完整排程」**：新增 `exports.runFullScheduleNow`
+     （onCall，`timeoutSeconds: 1800`），跟 `generateDailyReportScheduled`
+     共用抽出來的 `runFullSchedulePipeline_`（補抓資料→重新計算戰報→
+     如果開啟就跑 AI 診斷），差別只在跳過
+     `scheduleLib.shouldRunDailyReport_` 的時間窗判斷（使用者明確按了
+     按鈕，不需要再檢查現在是不是排定的執行時間）——對應 apps-script
+     版「測試完整排程流程（5 步驟）」。一樣用 `jobs/fullSchedule`
+     追蹤狀態、按鈕不被鎖死，跟補抓區間同一套模式。
+
+**驗證**：`npm test`（後端）、`npm run build`（前端）都通過。這個開發
+環境沒辦法實際跑一次真的會逾時的補抓來驗證「平台強制中止不會走到
+catch」這個行為本身（需要真的連到 TWSE/BigQuery 且真的跑超過宣告的
+逾時），這是 Cloud Functions／Cloud Run 平台文件記載的逾時行為，不是
+猜測；拿掉按鈕硬鎖這個修正不依賴這個假設成不成立也會生效（不管逾時
+處理方式到底是什麼，使用者都不會再被鎖住）。

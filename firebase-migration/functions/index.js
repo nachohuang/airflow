@@ -552,6 +552,60 @@ async function writeJobStatus_(jobKey, patch) {
  * 內部呼叫的其他函式各自宣告就會生效（每支 Cloud Function 的 `secrets` 要
  * 各自獨立宣告，見 `runAiDiagnosis`/`getAiKeyStatus` 的說明）。
  */
+/**
+ * 補抓資料→重新計算戰報→（如果開著）每日自動 AI 診斷，這三步的共用核心——
+ * `generateDailyReportScheduled`（排程自動觸發）跟 `exports.runFullScheduleNow`
+ * （2026-10-07 新增，Admin 頁面手動觸發，對應 apps-script 版「測試完整排程
+ * 流程（5 步驟）」）共用同一份實作，不要兩條路徑各自維護一次「這三步要
+ * 怎麼串、每步的 logRun_ 訊息怎麼組」。`categoryPrefix` 讓兩條路徑各自的
+ * 執行紀錄分得清楚是排程自動跑的還是使用者手動按的（`'每日排程-'` vs
+ * `'手動完整排程-'`）。 */
+async function runFullSchedulePipeline_(appConfig, skipDates, categoryPrefix) {
+  const fetchStart = Date.now();
+  const fetchResult = await runDailyCatchupFetch_(appConfig, skipDates);
+  await logRun_(
+    categoryPrefix + '補抓資料',
+    fetchResult.skipped ? '略過' : (fetchResult.failed.length ? '部分成功' : '成功'),
+    fetchResult.skipped
+      ? fetchResult.reason
+      : ('成功 ' + fetchResult.succeeded.length + ' 天' + (fetchResult.succeeded.length ? '（' + fetchResult.succeeded.join('、') + '）' : '') +
+        (fetchResult.failed.length ? '，失敗 ' + fetchResult.failed.length + ' 天' : '')),
+    Date.now() - fetchStart
+  );
+
+  const analysisStart = Date.now();
+  const analysisResult = await runDailyAnalysis_();
+  await logRun_(
+    categoryPrefix + '重新計算戰報',
+    analysisResult.strategyError ? '失敗' : '成功',
+    analysisResult.strategyError || (analysisResult.latestDate
+      ? ('戰報日期 ' + analysisResult.latestDate + '，' + analysisResult.reportDocs.length + ' 檔訊號')
+      : '沒有可用的歷史資料，查無戰報'),
+    Date.now() - analysisStart
+  );
+
+  if (appConfig.aiDailyEnabled) {
+    // runDailyAiDiagnosisForTopPicks_ 內部已經把 Top3／候選名單這兩段各自包了
+    // try/catch，這裡再包一層純粹是防禦性的最後一道防線——AI 診斷失敗不該讓
+    // 整次執行被記成失敗、也不該讓已經成功寫入的戰報被当成沒跑完。
+    const aiStart = Date.now();
+    try {
+      const aiResult = await runDailyAiDiagnosisForTopPicks_(appConfig);
+      await logRun_(
+        categoryPrefix + '每日自動AI診斷',
+        (aiResult.topPicks.ok && aiResult.shortlist.ok) ? '成功' : '部分成功',
+        'Top3：' + (aiResult.topPicks.ok ? '成功' : '失敗（' + aiResult.topPicks.error + '）') +
+          '　候選名單：' + (aiResult.shortlist.ok ? '成功' : '失敗（' + aiResult.shortlist.error + '）'),
+        Date.now() - aiStart
+      );
+    } catch (e) {
+      await logRun_(categoryPrefix + '每日自動AI診斷', '失敗', String(e.message || e), Date.now() - aiStart);
+    }
+  }
+
+  return { fetchResult: fetchResult, analysisResult: analysisResult };
+}
+
 exports.generateDailyReportScheduled = onSchedule(
   Object.assign({}, RUNTIME_OPTS_, { schedule: '*/5 * * * *', timeoutSeconds: 600, secrets: ['GEMINI_API_KEY'] }),
   async function () {
@@ -564,54 +618,67 @@ exports.generateDailyReportScheduled = onSchedule(
       skipDates: skipDates
     });
     if (!should) return;
+    await runFullSchedulePipeline_(appConfig, skipDates, '每日排程-');
+  }
+);
 
-    const fetchStart = Date.now();
-    const fetchResult = await runDailyCatchupFetch_(appConfig, skipDates);
-    await logRun_(
-      '每日排程-補抓資料',
-      fetchResult.skipped ? '略過' : (fetchResult.failed.length ? '部分成功' : '成功'),
-      fetchResult.skipped
-        ? fetchResult.reason
-        : ('成功 ' + fetchResult.succeeded.length + ' 天' + (fetchResult.succeeded.length ? '（' + fetchResult.succeeded.join('、') + '）' : '') +
-          (fetchResult.failed.length ? '，失敗 ' + fetchResult.failed.length + ' 天' : '')),
-      Date.now() - fetchStart
-    );
-
-    const analysisStart = Date.now();
-    const analysisResult = await runDailyAnalysis_();
-    await logRun_(
-      '每日排程-重新計算戰報',
-      analysisResult.strategyError ? '失敗' : '成功',
-      analysisResult.strategyError || (analysisResult.latestDate
-        ? ('戰報日期 ' + analysisResult.latestDate + '，' + analysisResult.reportDocs.length + ' 檔訊號')
-        : '沒有可用的歷史資料，查無戰報'),
-      Date.now() - analysisStart
-    );
-
-    if (appConfig.aiDailyEnabled) {
-      // runDailyAiDiagnosisForTopPicks_ 內部已經把 Top3／候選名單這兩段各自包了
-      // try/catch，這裡再包一層純粹是防禦性的最後一道防線——AI 診斷失敗不該讓
-      // 這次 tick 被記成失敗、也不該讓已經成功寫入的戰報被当成沒跑完。
-      const aiStart = Date.now();
-      try {
-        const aiResult = await runDailyAiDiagnosisForTopPicks_(appConfig);
-        await logRun_(
-          '每日排程-每日自動AI診斷',
-          (aiResult.topPicks.ok && aiResult.shortlist.ok) ? '成功' : '部分成功',
-          'Top3：' + (aiResult.topPicks.ok ? '成功' : '失敗（' + aiResult.topPicks.error + '）') +
-            '　候選名單：' + (aiResult.shortlist.ok ? '成功' : '失敗（' + aiResult.shortlist.error + '）'),
-          Date.now() - aiStart
-        );
-      } catch (e) {
-        await logRun_('每日排程-每日自動AI診斷', '失敗', String(e.message || e), Date.now() - aiStart);
-      }
+/**
+ * 2026-10-07 新增：使用者發現 Admin 頁面完全沒有地方可以手動觸發完整的
+ * 排程流程（補抓資料→重新計算戰報→AI 診斷），對應 apps-script 版「系統與
+ * 資料後台」頁面的「測試完整排程流程（5 步驟）」按鈕——那邊可以跳過
+ * `shouldRunDailyReport_` 的時間窗判斷，不管現在是不是該排程執行的時間，
+ * 想重跑就重跑。這裡同樣繞過時間窗（使用者明確按了按鈕，不需要再檢查
+ * 現在是不是「該執行的時間」），直接呼叫跟排程共用的
+ * `runFullSchedulePipeline_`。
+ *
+ * `timeoutSeconds: 1800`（30 分鐘，callable function 允許的上限是 3600
+ * 秒）——這條路徑同時包含補抓資料（可能好幾天）跟 AI 診斷（Top3 橫向比較
+ * ＋候選名單逐檔深度診斷，每檔都要查 Goodinfo＋呼叫 LLM），比單純的
+ * `runHistoryBackfill` 更重，540 秒可能不夠，給更充裕的餘裕。
+ *
+ * 用 `jobs/fullSchedule` 追蹤執行狀態，跟 `runHistoryBackfill` 的
+ * `jobs/historyBackfill` 同一個模式（見 `writeJobStatus_` 的說明）——
+ * 前端用即時監聽顯示進度，不綁定這次 callable 呼叫本身有沒有收到回應。
+ */
+exports.runFullScheduleNow = onCall(
+  Object.assign({}, RUNTIME_OPTS_, { timeoutSeconds: 1800, secrets: ['GEMINI_API_KEY'] }),
+  async function (request) {
+    assertOwnerAuth_(request);
+    const startTime = Date.now();
+    await writeJobStatus_('fullSchedule', { status: 'running', startedAt: startTime, error: null });
+    try {
+      const appConfig = await fetchAppConfig_();
+      const skipDates = await fetchSkipDates_();
+      const result = await runFullSchedulePipeline_(appConfig, skipDates, '手動完整排程-');
+      await writeJobStatus_('fullSchedule', {
+        status: 'succeeded',
+        finishedAt: Date.now(),
+        result: {
+          latestDate: result.analysisResult.latestDate || null,
+          reportCount: result.analysisResult.reportDocs ? result.analysisResult.reportDocs.length : 0,
+          strategyError: result.analysisResult.strategyError || null
+        },
+        error: null
+      });
+      return { ok: true };
+    } catch (e) {
+      await writeJobStatus_('fullSchedule', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+      throw e;
     }
   }
 );
 
-/** 手動觸發用（取代 apps-script 版「重新計算戰報」按鈕），回傳這次算出來的戰報
- *  摘要，方便部署後用 curl 或瀏覽器直接驗證有沒有接線成功。 */
-exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res) {
+/**
+ * `generateDailyReport`（onRequest，方便部署後用 curl 直接驗證）／
+ * `exports.runManualReportRecompute`（onCall，2026-10-07 新增，給 Admin
+ * 頁面「手動重新計算戰報」按鈕用——使用者發現原本完全沒有這顆按鈕，只有
+ * `generateDailyReport` 這個只能用 curl 打的 HTTP endpoint，前端沒有任何
+ * 地方可以觸發）共用的核心：只做「重新計算戰報」這一步，不碰補抓資料／
+ * AI 診斷——對應 apps-script 版「重新計算戰報」這顆獨立按鈕（只跑其中一
+ * 步，不是跑完整排程），跟上面 `runFullSchedulePipeline_`／
+ * `runFullScheduleNow`（三步都跑）是兩個不同粒度的手動觸發，使用者可以
+ * 選只要哪一種。 */
+async function runManualReportRecomputeCore_() {
   const startTime = Date.now();
   try {
     const result = await runDailyAnalysis_();
@@ -621,6 +688,16 @@ exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res)
       result.strategyError || (result.latestDate ? ('戰報日期 ' + result.latestDate + '，' + result.reportDocs.length + ' 檔訊號') : '沒有可用的歷史資料'),
       Date.now() - startTime
     );
+    return result;
+  } catch (e) {
+    await logRun_('手動重新計算戰報', '失敗', String(e.message || e), Date.now() - startTime);
+    throw e;
+  }
+}
+
+exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res) {
+  try {
+    const result = await runManualReportRecomputeCore_();
     res.json({
       ok: true,
       latestDate: result.latestDate,
@@ -630,9 +707,19 @@ exports.generateDailyReport = onRequest(RUNTIME_OPTS_, async function (req, res)
       diagnostics: result.diagnostics
     });
   } catch (e) {
-    await logRun_('手動重新計算戰報', '失敗', String(e.message || e), Date.now() - startTime);
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
+});
+
+exports.runManualReportRecompute = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const result = await runManualReportRecomputeCore_();
+  return {
+    latestDate: result.latestDate,
+    reportCount: result.reportDocs.length,
+    screeningStrategy: result.screeningStrategy,
+    strategyError: result.strategyError || null
+  };
 });
 
 /** data: {date?}。手動抓取單一天的股價資料並寫進 BigQuery，不帶 date 時抓
@@ -672,11 +759,23 @@ exports.runManualHistoryFetch = onCall(RUNTIME_OPTS_, async function (request) {
  * 填年份變成補好幾年），單次呼叫跑太久而撞上這支函式自己宣告的逾時，真的
  * 要補更大的區間，分批呼叫幾次即可（每次呼叫都是獨立的，不會互相干擾，
  * 跟 apps-script 版「重複呼叫同一天會先刪除再寫入」的 idempotent 設計一致）。
- */
+ *
+ * **2026-10-07 修正**：原本 `timeoutSeconds: 540`，使用者實際補一個 13
+ * 個日曆天（跳過週六日後約 9~10 個交易日）的區間就整個逾時被平台強制
+ * 中止——TWSE 三個端點依序抓、每天抓完再寫 BigQuery（現在還會依大小切成
+ * 多個 chunk，見 `chunkRowsBySize_`），9~10 天疊起來遠遠超過 540 秒。
+ * 更嚴重的是：平台強制中止（逾時被砍掉）**不會**走到這支函式自己的
+ * try/catch，`writeJobStatus_` 的 `'failed'` 分支永遠不會被執行到，
+ * `jobs/historyBackfill` 就這樣卡在 `'running'` 回不去，使用者也沒辦法
+ * 開始下一次補抓（見 `AdminView.vue` 的對應修正：不再用 job 狀態硬擋這顆
+ * 按鈕）。改成 `timeoutSeconds: 1800`（30 分鐘，callable function 的
+ * 逾時上限是 3600 秒）給更充裕的餘裕，降低再次撞到這個情況的機率，但不
+ * 是保證不會發生——真的撞到時，使用者現在至少還能按按鈕重新開始，不會
+ * 被卡死。 */
 var BACKFILL_MAX_RANGE_DAYS = 60;
 
 exports.runHistoryBackfill = onCall(
-  Object.assign({}, RUNTIME_OPTS_, { timeoutSeconds: 540 }),
+  Object.assign({}, RUNTIME_OPTS_, { timeoutSeconds: 1800 }),
   async function (request) {
     assertOwnerAuth_(request);
     const data = request.data || {};

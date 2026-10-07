@@ -352,10 +352,16 @@ const backfillJobStatusLabel = computed(function () {
   return labels[backfillJob.value.status] || backfillJob.value.status;
 });
 
-const backfillButtonDisabled = computed(function () {
-  return backfillStarting.value || (backfillJob.value && backfillJob.value.status === 'running');
-});
-
+// 2026-10-07 修正：原本只要 backfillJob.status === 'running' 就把按鈕鎖死，
+// 使用者實際遇到的狀況——補抓一個 9~10 個交易日的區間，後端跑到被 Cloud
+// Functions 平台自己的逾時強制中止（見 index.js runHistoryBackfill 的說明），
+// 平台強制中止不會走到後端自己的 try/catch，jobs/historyBackfill 永遠不會
+// 被改成 'failed'，卡在 'running' 回不去——使用者因此完全沒辦法按「開始
+// 補抓」開始下一次。這是單人工具，不需要真的防「使用者自己跟自己搶」這種
+// 並發保護：拿掉這個硬擋，按鈕永遠可以按，使用者想重試隨時能重試（新的
+// 呼叫一開始就會把 jobs/historyBackfill 覆寫成新的 'running'，等於自動
+// 覆蓋掉卡住的舊狀態，不需要額外的「清除卡住工作」按鈕）。上面的即時狀態
+// 卡片維持顯示，純粹當作資訊參考，不再是「能不能按」的判斷依據。
 async function runBackfillNow() {
   backfillStarting.value = true;
   backfillStartError.value = '';
@@ -364,7 +370,7 @@ async function runBackfillNow() {
       startDate: backfillForm.value.startDate,
       endDate: backfillForm.value.endDate,
       skipWeekends: !!backfillForm.value.skipWeekends
-    }, 540000); // 跟後端 exports.runHistoryBackfill 宣告的 timeoutSeconds: 540 對齊
+    }, 1800000); // 跟後端 exports.runHistoryBackfill 宣告的 timeoutSeconds: 1800 對齊
     // 回傳值不需要處理——執行狀態一律透過上面的 jobs/historyBackfill 監聽
     // 顯示，這裡呼叫送出後就結束，`loadHistoryOverview` 交給上面的 watch
     // 在工作真正完成時觸發。
@@ -379,6 +385,73 @@ async function runBackfillNow() {
     }
   } finally {
     backfillStarting.value = false;
+  }
+}
+
+// ---- 手動重新計算戰報（只跑「重新計算戰報」這一步）----
+// 2026-10-07：使用者發現 Admin 頁面完全沒有地方可以手動觸發這個動作——
+// `generateDailyReport`（onRequest）原本只能用 curl 打，前端沒有接線。
+// 這支很快（通常數秒到十幾秒，不碰 TWSE／BigQuery 寫入），不需要像補抓
+// 區間那樣另外用 jobs/{jobKey} 追蹤狀態，用一般的 callFn 等結果就夠。
+const reportRecomputeRunning = ref(false);
+const reportRecomputeResult = ref(null);
+const reportRecomputeError = ref('');
+
+async function runReportRecomputeNow() {
+  reportRecomputeRunning.value = true;
+  reportRecomputeError.value = '';
+  reportRecomputeResult.value = null;
+  try {
+    reportRecomputeResult.value = await callFn('runManualReportRecompute', {});
+  } catch (e) {
+    reportRecomputeError.value = e.message || String(e);
+  } finally {
+    reportRecomputeRunning.value = false;
+  }
+}
+
+// ---- 執行完整排程（補抓資料→重新計算戰報→AI 診斷三步都跑）----
+// 2026-10-07：對應 apps-script 版「測試完整排程流程（5 步驟）」按鈕，跟
+// 「補抓區間」同一個理由用 jobs/fullSchedule 追蹤狀態（這條路徑同時包含
+// 補抓資料跟 AI 診斷，一樣有跑很久、連線中斷、元件被切走的風險）。
+const fullScheduleStarting = ref(false);
+const fullScheduleStartError = ref('');
+const fullScheduleJob = ref(null);
+let unsubscribeFullScheduleJob = null;
+
+onMounted(function () {
+  unsubscribeFullScheduleJob = onSnapshot(doc(db, 'jobs', 'fullSchedule'), function (snap) {
+    fullScheduleJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeFullScheduleJob) unsubscribeFullScheduleJob();
+});
+
+watch(fullScheduleJob, function (newVal, oldVal) {
+  if (newVal && newVal.status !== 'running' && oldVal && oldVal.status === 'running') {
+    loadHistoryOverview();
+  }
+});
+
+const fullScheduleJobStatusLabel = computed(function () {
+  if (!fullScheduleJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[fullScheduleJob.value.status] || fullScheduleJob.value.status;
+});
+
+async function runFullScheduleNow() {
+  fullScheduleStarting.value = true;
+  fullScheduleStartError.value = '';
+  try {
+    await callFn('runFullScheduleNow', {}, 1800000); // 跟後端宣告的 timeoutSeconds: 1800 對齊
+  } catch (e) {
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      fullScheduleStartError.value = e.message || String(e);
+    }
+  } finally {
+    fullScheduleStarting.value = false;
   }
 }
 
@@ -682,8 +755,8 @@ const runLogLatestByCategory = computed(function () {
             <input v-model="backfillForm.skipWeekends" type="checkbox">
             跳過週六日
           </label>
-          <button type="submit" :disabled="backfillButtonDisabled">
-            {{ backfillStarting ? '送出中...' : (backfillJob && backfillJob.status === 'running' ? '執行中...' : '開始補抓') }}
+          <button type="submit" :disabled="backfillStarting">
+            {{ backfillStarting ? '送出中...' : '開始補抓' }}
           </button>
         </form>
         <p v-if="backfillStartError" class="error-box">{{ backfillStartError }}</p>
@@ -709,10 +782,49 @@ const runLogLatestByCategory = computed(function () {
         <p class="hint">
           單次最多補 60 天，區間更大請分幾次呼叫。這裡刻意不套用「不跑日」
           （`skip_dates`）設定——那是給每日自動排程用的，手動補抓區間時你明確
-          指定了日期，不應該被悄悄跳過。執行狀態是看 <code>jobs/historyBackfill</code>
-          即時更新的，跟這次按鈕點擊本身有沒有收到回應無關——把 App 切到背景
-          或切到別的分頁再回來，都看得到當下真正的狀態。
+          指定了日期，不應該被悄悄跳過。上面的執行狀態是看
+          <code>jobs/historyBackfill</code> 即時更新的，跟這次按鈕點擊本身有沒有
+          收到回應無關——把 App 切到背景或切到別的分頁再回來，都看得到當下真正
+          的狀態。「開始補抓」這顆按鈕不會因為上面顯示「執行中」就被鎖住，隨時
+          可以按下去重新開始一次（例如上一次因為逾時卡住、確定已經沒在跑了）——
+          這是單人工具，不需要防「自己跟自己搶」。</p>
+
+        <h3 style="margin-top:16px;">手動測試工具</h3>
+        <p class="hint">
+          對應舊版 apps-script「系統與資料後台」頁面的「手動測試工具」——
+          「重新計算戰報」只重算戰報本身（不補抓新資料、不跑 AI 診斷，通常
+          數秒內完成）；「執行完整排程」把補抓資料／重新計算戰報／（如果有
+          開啟）每日自動 AI 診斷三步驟都跑一次，跟每日排程真正執行時是同一套
+          邏輯，差別只在不管現在是不是排定的執行時間，按下去就跑。
         </p>
+        <div class="form-actions">
+          <button type="button" :disabled="reportRecomputeRunning" @click="runReportRecomputeNow">
+            {{ reportRecomputeRunning ? '計算中...' : '重新計算戰報' }}
+          </button>
+          <button type="button" :disabled="fullScheduleStarting" @click="runFullScheduleNow">
+            {{ fullScheduleStarting ? '送出中...' : '執行完整排程' }}
+          </button>
+        </div>
+        <p v-if="reportRecomputeError" class="error-box">{{ reportRecomputeError }}</p>
+        <p v-if="reportRecomputeResult" class="hint">
+          {{ reportRecomputeResult.strategyError ? reportRecomputeResult.strategyError :
+            ('戰報日期 ' + reportRecomputeResult.latestDate + '，' + reportRecomputeResult.reportCount + ' 檔訊號') }}
+        </p>
+        <p v-if="fullScheduleStartError" class="error-box">{{ fullScheduleStartError }}</p>
+        <div v-if="fullScheduleJob" class="run-log-status-card" style="margin-top:8px;">
+          <div class="run-log-status-card-top">
+            <span>完整排程執行狀態</span>
+            <span class="signal-badge" :style="{ color: runLogStatusColor(fullScheduleJobStatusLabel) }">{{ fullScheduleJobStatusLabel }}</span>
+          </div>
+          <div class="hint">
+            <template v-if="fullScheduleJob.status === 'running'">還在執行中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+            <template v-else-if="fullScheduleJob.result">
+              戰報日期 {{ fullScheduleJob.result.latestDate || '-' }}，{{ fullScheduleJob.result.reportCount }} 檔訊號
+              <template v-if="fullScheduleJob.result.strategyError">（{{ fullScheduleJob.result.strategyError }}）</template>
+            </template>
+            <template v-else-if="fullScheduleJob.error">{{ fullScheduleJob.error }}</template>
+          </div>
+        </div>
 
         <p class="hint">
           <strong>架構說明：</strong>每日排程（見上面「每日排程」卡片）跟這裡的
