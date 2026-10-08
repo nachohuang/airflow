@@ -185,6 +185,7 @@ onMounted(loadSample);
       <button type="button" @click="prevYear">← 上一年</button>
       <strong>{{ viewYear }} 年</strong>
       <button type="button" @click="nextYear">下一年 →</button>
+      <button type="button" :disabled="coverageLoading" @click="loadCoverage">⟳ 重新載入</button>
     </div>
     <p v-if="coverageError" class="error-box">{{ coverageError }}</p>
     <template v-else-if="!coverageLoading">
