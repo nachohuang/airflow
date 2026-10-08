@@ -201,6 +201,12 @@ function sourceBreakdownLabel(bySource) {
   const parts = [];
   if (bySource.openapi) parts.push('OpenAPI ' + bySource.openapi);
   if (bySource.mopsBackfill) parts.push('MOPS ' + bySource.mopsBackfill);
+  // 2026-10-08 修正：加 source 欄位之前就寫入的舊資料沒有這個欄位，
+  // 後端會歸成「未知」——原本這裡沒處理這個 key，會被無聲吃掉，變成
+  // 整格完全不顯示來源標示，讓人誤以為功能沒生效。把它也顯示出來。
+  Object.keys(bySource).forEach(function (key) {
+    if (key !== 'openapi' && key !== 'mopsBackfill') parts.push('未知 ' + bySource[key]);
+  });
   return parts.join(' / ');
 }
 
