@@ -1431,6 +1431,19 @@ exports.runFinancialsRefresh = onCall(RUNTIME_OPTS_, async function (request) {
  * 財報所屬季度，不是公告日——見 `lib/financials.js
  * parseIncomeStatementRows_` 的說明，公告日拿來分組會因為同一季不同
  * 公司公告日期分散而看不出「這一季涵蓋了多少公司」）。
+ *
+ * 2026-10-08 補充：commit d6d94e8 第一次部署這支的 `bySource` 邏輯時，
+ * 剛好撞上 Cloud Run CPU 配額瞬間尖峰，這支本身健康檢查失敗；用
+ * `rerun_failed_jobs` 重跑整個 deploy job 後，Firebase CLI 卻把「這次
+ * 要部署的原始碼打包雜湊」跟「第一次嘗試時已經上傳的雜湊」拿來比對，
+ * 覺得「內容沒變」就直接跳過這支沒有真的重新部署（log 會看到
+ * `functions[getFinancialsCoverage] Skipped (No changes detected)`，
+ * 不是 `Successful update operation`）——結果線上這支一直停留在沒有
+ * `bySource` 的舊版，使用者實測看不到來源標示。這段註解本身就是刻意
+ * 用來改變這支函式的原始碼雜湊，逼 Firebase CLI 這次不能再跳過部署；
+ * 日後如果又遇到「rerun 之後 conclusion: success，但功能看起來沒生效」
+ * 的狀況，先去 log 裡找這支函式名稱後面是不是印 `Skipped (No changes
+ * detected)`，不是只看整個 workflow run 的 conclusion。
  */
 exports.getFinancialsCoverage = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
