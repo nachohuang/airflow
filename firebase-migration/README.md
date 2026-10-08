@@ -3237,3 +3237,33 @@ OpenAPI，但資料量都是有界的小量，跟「算戰報」（150 天 × �
 `runFactorCorrelationScan`、`runHistoryBackfill`、
 `runFinancialsBackfillMops`、三支 AI 診斷）維持不動——這個開發環境沒辦法
 實際部署驗證冷啟動／尖峰用量，沒把握的情況下不賭更激進的數字。
+
+## 2026-10-08：因子迴歸訓練成功後，套用模型跑回測卻完全沒有訊號
+
+訓練終於成功、套用其中一版模型後，使用者跑「一次跑全部策略比較」，
+`rule_v17` 正常跑出 2556 筆訊號，但 `factor_model_rank`／`hybrid` 兩個
+用到因子迴歸模型的策略都回報「這段區間內沒有符合...進場條件的訊號」
+——不是報錯，是整個區間、整個市場一筆訊號都沒有。
+
+根因在 `lib/factorModel.js computeWeightedFactorScore_`：這支函式（從
+apps-script/src/FactorRegression.gs 原樣複製，apps-script 版從沒出過
+事）的既有設計是「權重清單裡任何一個因子的值是 null，整個預測分數就是
+null」——避免「悄悄把缺值當成 0 貢獻」讓分數看起來比實際更可信。這個
+設計本身沒錯，但有一個沒想到的邊界情況：`lib/factorRegression.js
+buildWeightsSql_` 用的 `ML.WEIGHTS` 會把**權重剛好是 0** 的因子也列進
+結果（LASSO 只是把係數壓到 0，不會把那一列從輸出拿掉），所以套用中的
+`weights` 物件裡還是會有這些 key。今天新加的 10 個 `fundamental_*`
+財報因子目前覆蓋率近乎 0（見上面好幾節的說明），LASSO 訓練出來幾乎
+必然是精確的 0 權重——但 `computeWeightedFactorScore_` 原本不管權重是
+多少，只要值是 null 就整個否決，於是幾乎每一列都因為這幾個「權重是 0
+但值是 null」的新因子被否決掉，不是模型真的判斷每一檔股票都不該進場。
+
+修正：`computeWeightedFactorScore_` 改成只在 `weights[bqName] === 0`
+時才跳過 null 檢查——這不是放寬「悄悄假設缺值貢獻為 0」的風險（那段
+風險的前提是權重不是 0，缺值被當成 0 貢獻才會把分數算得比實際更可信），
+權重真的是 0 時，這個因子不管值是多少（包括缺值）對加總的貢獻本來就
+一定是 0，「跳過它」跟「用它的真實值去乘」在數學上是同一個結果，沒有
+被低估的問題。其他權重不是 0 的因子維持原本「缺值就整個否決」的保守
+邏輯完全不變。新增 `test/factorModel.test.js`（這支函式之前只在
+`analysis.test.js` 裡間接測過一次，沒有獨立的測試檔案）覆蓋這個邊界
+情況＋原有的保守行為，確認沒有被這次修正削弱。

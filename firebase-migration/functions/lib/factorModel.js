@@ -11,10 +11,30 @@
  */
 var config = require('./config');
 
-/** row：computeFactors_ 算完的一列；weights：{bqFeatureName: weight}（來自套用中的
- *  因子迴歸模型）。任何一個因子在這一列裡的值是 null/NaN，整個分數直接回傳 null——
- *  不能只跳過那一項繼續加總，那樣等於悄悄把缺漏的因子當成 0 貢獻，會讓分數看起來
- *  比實際情況更可信。 */
+/**
+ * row：computeFactors_ 算完的一列；weights：{bqFeatureName: weight}（來自套用中的
+ * 因子迴歸模型）。任何一個「權重不是 0」的因子在這一列裡的值是 null/NaN，整個分數
+ * 直接回傳 null——不能只跳過那一項繼續加總，那樣等於悄悄把缺漏的因子當成 0 貢獻，
+ * 會讓分數看起來比實際情況更可信。
+ *
+ * 2026-10-08 修正：原本不管權重是多少，只要值是 null 就整個回傳 null（從
+ * apps-script/src/FactorRegression.gs 原樣複製，apps-script 版候選因子清單裡
+ * 從來沒有哪個因子覆蓋率近乎 0，這個邊界情況從沒真的發生過）。今天新加的 10 個
+ * `fundamental_*` 財報因子目前覆蓋率近乎 0，LASSO 訓練出來的權重幾乎必然是精確的
+ * 0（零變異的欄位在迴歸裡沒有係數可言）——但 `ML.WEIGHTS` 會把權重是 0 的因子也
+ * 列進結果，`weights` 物件裡還是有這些 key，於是迴圈跑到這幾個 key 時，`row` 上
+ * 對應欄位是 null（沒有 as-of 財報資料可查），不管權重是不是 0 都直接整個回傳
+ * null——使用者實測遇到的「因子模型排名精選／混合策略在整個回測區間完全沒有任何
+ * 訊號」就是這個原因：幾乎每一列都因為這幾個新因子是 null 被整個否決掉，不是因為
+ * 模型本身真的判斷每一檔股票都不該進場。
+ *
+ * 權重剛好是 0 時，這個因子不管真實值是多少（包括缺值）對加總的貢獻本來就一定是
+ * 0——「跳過它」跟「它值的多少改變最終結果」在這個情況下是同一件事，不是上面那段
+ * 「悄悄假設缺值貢獻為 0」的風險（那段風險的前提是權重不是 0，缺值被當成 0 貢獻
+ * 才會把分數算得比實際情況更可信；權重真的是 0 時，就算有真實值，貢獻也還是
+ * 0，沒有「被低估」的問題）。所以只在 `weights[bqName] === 0` 時才跳過 null 檢查，
+ * 其他權重不是 0 的因子維持原本「缺值就整個否決」的保守邏輯不變。
+ */
 function computeWeightedFactorScore_(row, weights) {
   if (!weights) return null;
   var sum = 0;
@@ -23,9 +43,11 @@ function computeWeightedFactorScore_(row, weights) {
     var bqName = keys[i];
     var analysisField = config.BQ_FEATURE_TO_ANALYSIS_FIELD[bqName];
     if (!analysisField) continue; // 理論上不會發生（權重欄位都來自候選因子清單），保守跳過
+    var w = weights[bqName];
+    if (w === 0) continue; // 權重是 0，這個因子不管缺不缺值對加總都沒有影響
     var v = row[analysisField];
     if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
-    sum += weights[bqName] * v;
+    sum += w * v;
   }
   return sum;
 }
