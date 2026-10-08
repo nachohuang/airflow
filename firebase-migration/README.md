@@ -2846,3 +2846,95 @@ BigQuery 中是否已有累積相關資料」。這個開發環境連不到
 `detectFieldKey_` 都保留了原本的備援路徑（分隔符格式／關鍵字模糊比對），
 不是只認新查到的這一種格式，但最終還是需要部署後實際執行一次「重新
 整理財報因子」才能 100% 確認。
+
+## 2026-10-08：月營收歷史回補（MOPS 靜態頁面）
+
+使用者實測發現：財報因子月曆每格全部顯示紅色 0，但隨機抽樣看得到真實
+資料（2026-08，累積 1085 筆）。原因不是 bug，是涵蓋率月曆只在頁面
+`onMounted` 時載入一次，沒有自己的重新整理按鈕——補上「⟳ 重新載入」
+按鈕後確認資料其實都在，只是全部集中在 8月（月營收）／Q2（季報），因為
+這整套「財報基本面因子」功能是這個 session 當天才第一次做出來、第一次
+執行，TWSE OpenAPI 只給「目前最新一期」快照，不是使用者記憶中「一月就
+開始抓」的那份（那份其實是指股價歷史資料 `history_raw`，遷移自舊
+apps-script，是完全不同的兩套資料，年資也完全不同）。
+
+使用者接著問「能不能回溯補齊今年稍早的月份」。順著這個問題，用
+`WebSearch` 查到第三方工具 jacksu.tw 的資料底層是接「公開資訊觀測站
+MOPS」（`mops.twse.com.tw`），不是現在用的 `openapi.twse.com.tw`——這
+是兩個不同系統，MOPS 本身是支援查歷史資料的（網頁查詢介面可以選「歷史
+資料」＋輸入民國年／月）。
+
+### 找到的歷史回補路徑
+
+這個開發環境連不到任何 `*.twse.com.tw` 網域（含 `mopsov.twse.com.tw`），
+没辦法直接連線核對確切格式，改用 `WebFetch` 挖開源 Python 套件 twmops
+（github.com/whchien/twmops，目前仍在維護、最近才發過新版）的原始碼
+逆推出實際網址格式與解析邏輯：
+
+```
+https://mopsov.twse.com.tw/nas/t21/{market}/t21sc03_{民國年}_{月}_{company_type}.html
+```
+
+（`market`：`sii`=上市／`otc`=上櫃，`company_type`：0=一般業）。回應是
+Big5 編碼的純 HTML，逐產業別各自一個 `<table>`，欄位依**位置索引**（不是
+標題文字）對應：`[0]`代號 `[1]`名稱 `[2]`當月營收 `[3]`上月營收 `[4]`去年
+當月營收 `[5]`上月比較增減% `[6]`去年同月增減% `[7]`當月累計營收 `[8]`
+去年累計營收 `[9]`前期比較增減% `[10]`備註。使用者 2026-10-08 用手機
+瀏覽器實際打開 `t21sc03_115_7_0.html` 截圖確認畫面內容吻合這個格式。
+
+### 架構對應
+
+- `functions/lib/mopsRevenueHtml.js`（新檔，純函式）：`extractHtmlTables_`
+  （正規表示式拆 `<table>/<tr>/<td>`，跟 `index.js fetchGoodinfoText_` 的
+  去標籤手法同一個「夠用就好、不為單一資料源引入 cheerio 之類新依賴」
+  風格——這個專案目前沒有引入任何 HTML parser 套件）、
+  `isMopsRevenueDataRow_`（濾掉「合計」小計列／欄名列，規則從 twmops
+  原始碼逆推）、`parseMopsRevenueTables_`（位置索引對應成跟
+  `financials.js parseMonthlyRevenueRows_` 同一個輸出形狀，多一個
+  `source:'mopsBackfill'` 欄位）、`buildMopsRevenueUrl_`、
+  `enumeratePeriodsInclusive_`。
+- `functions/index.js`：`fetchMopsRevenueHtml_`（I/O，跟 `fetchTwseCsvText_`
+  同一套 Big5 解碼／手動重新導向／瀏覽器 header 組合，404 當「這個月
+  還沒歸檔」處理不拋例外）、`runFinancialsBackfillMopsCore_`（逐
+  期間×市場序列請求＋節流，刻意不用 `Promise.all` 平行發送——MOPS 有
+  速率限制）、`exports.runFinancialsBackfillMops`（onCall，`jobs/
+  financialsBackfillMops` 狀態追蹤，一次最多 12 個月）。
+- 回補出來的資料寫進**同一個** `financials_monthly` collection（doc ID
+  一樣是 `code_period`），所以既有的涵蓋率月曆／隨機抽樣 UI 不用另外
+  做一份——兩種來源的資料都會自動出現在同一份月曆/抽樣表格裡，抽樣
+  表格加了「來源」欄位（`OpenAPI`／`MOPS回補`）方便肉眼分辨。
+- 前端 `FinancialsCoverageCard.vue` 新增「歷史回補（MOPS，僅月營收）」
+  區塊：起始/結束年月輸入、「開始回補」按鈕、`jobs/financialsBackfillMops`
+  狀態卡片（含逐期間/市場的即時進度）。
+
+### 設計決定
+
+- **點對點正確性**：這個靜態頁面只有整頁共用的「出表日期」（代表頁面
+  產生/快照時間，不是每家公司逐筆的官方公告日），不能拿來當訓練要用的
+  `reportDate`。回補出來的 `reportDate` 一律用現有的
+  `estimateMonthlyRevenueReportDate_`（月底+10天法定公告期限）估算，並
+  標記 `reportDateIsEstimated: true`。
+- **不覆蓋更精確的既有資料**：如果同一個 `code_period` 已經有
+  `reportDateIsEstimated === false` 的文件（來自 OpenAPI 來源，帶官方
+  出表日期），回補時會跳過那一筆，不會讓精確值退化成這裡的粗略估計值
+  （`runFinancialsBackfillMopsCore_` 裡先讀一次既有文件組出 Set 再過濾）。
+- **只接月營收**：綜合損益表／資產負債表（四率四升用的那兩份）目前沒有
+  找到對應的 MOPS 靜態歷史頁面格式，季報財務比率還是只能靠 OpenAPI
+  往後逐月累積，這點在前端卡片跟「已知限制」都有明確標示。
+- **序列請求＋節流**：twmops 套件預設限制「每秒 1 個請求」尊重 MOPS，
+  這裡用迴圈＋`sleep_`（1.1 秒間隔）模仿同樣的節流，不用 `Promise.all`
+  平行打；一次最多回補 12 個月（×2 市場＝最多 24 個序列請求），對應
+  後端 `timeoutSeconds: 600` 的執行預算，超過要求使用者分批執行。
+
+### 還沒做的事 / 保留限制
+
+- **這個網址格式沒辦法在這個開發環境直接驗證**——是從 twmops 原始碼
+  逆推出來的，不是直接連線 `mopsov.twse.com.tw` 核對到的即時回應，部署
+  後第一次執行如果格式不符（例如欄位順序跟逆推出來的不一樣），錯誤
+  訊息會帶 HTTP 狀態碼/網址方便診斷，但無法保證第一次就跑對。
+- 季報財務比率（毛利率/營益率/淨利率/ROE）**不支援**歷史回補，見上方
+  「只接月營收」。
+- 回補出來的連續成長期數是用「全部已累積月份」重算（`computeRevenueGrowthStreaks_`
+  對整批資料重跑），不是只對新回補的部分增量更新——這個函式本身就是
+  這樣設計的（見 `doRefreshFinancials_` 的既有邏輯），這裡沿用同一套，
+  不是這次新增的行為。

@@ -251,10 +251,12 @@ collection，見 `firebase-migration/README.md`「余博邏輯延伸的基本面
 | `code` | `string` |
 | `name` | `string` |
 | `period` | `string`（`'yyyy-MM'`） |
-| `reportDate` | `string`（`'yyyy-MM-dd'`，估算的公開可得日期） |
+| `reportDate` | `string`（`'yyyy-MM-dd'`，公開可得日期） |
+| `reportDateIsEstimated` | `boolean`（`true`＝沒偵測到官方「出表日期」欄位或是 MOPS 回補來源，`reportDate` 是估算值） |
 | `revenue` | `number` \| `null` |
 | `revenueYoyPct` | `number` \| `null` |
 | `revenueGrowthStreak` | `number` \| `null` |
+| `source` | `string`（`'openapi'` \| `'mopsBackfill'`，2026-10-08 新增，見 README「月營收歷史回補」一節） |
 | `updatedAt` | `number`（epoch ms） |
 
 `financials_quarterly/{code}_{period}`（`period` 是 `'yyyy-MM-dd'`，

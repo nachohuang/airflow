@@ -37,7 +37,7 @@ const fin = require('../lib/financials');
   assert.strictEqual(parsed.length, 1);
   assert.deepStrictEqual(parsed[0], {
     code: '1101', name: '台泥', period: '2026-03', reportDate: '2026-04-11', reportDateIsEstimated: false,
-    revenue: 1000000, revenueYoyPct: 12.5
+    revenue: 1000000, revenueYoyPct: 12.5, source: 'openapi'
   });
 
   var rawWithoutYoy = [
@@ -47,6 +47,7 @@ const fin = require('../lib/financials');
   assert.ok(Math.abs(parsed2[0].revenueYoyPct - 25) < 1e-9, '沒有官方 YoY 欄位時要自己用當月/去年當月營收算出 25%');
   assert.strictEqual(parsed2[0].reportDateIsEstimated, true, '沒有「出表日期」欄位時要標記這是估計值');
   assert.strictEqual(parsed2[0].reportDate, fin.estimateMonthlyRevenueReportDate_('2026-03'), '退回「月底+10天」估算');
+  assert.strictEqual(parsed2[0].source, 'openapi', '跟 lib/mopsRevenueHtml.js 回補來源的 source 欄位對應，這支一律是 openapi');
   console.log('Test parseMonthlyRevenueRows_ (uses official YoY column, falls back to computing it, filters invalid codes) passed.');
 }
 

@@ -61,6 +61,64 @@ async function runRefreshNow() {
   }
 }
 
+// ---- 歷史回補（MOPS 靜態頁面，只有月營收）----
+// 2026-10-08 新增：使用者發現 TWSE OpenAPI（上面「重新整理財報因子」在
+// 用的那個）只有最新一期快照，没辦法回溯補齊更早的月份；研究後找到 MOPS
+// （公開資訊觀測站）的舊版靜態報表頁面網址格式可以指定民國年／月查歷史
+// （見 functions/lib/mopsRevenueHtml.js 開頭的完整說明），所以另外做這個
+// 區塊手動觸發回補。只接月營收——季報財務比率（綜合損益表／資產負債表）
+// 目前沒有找到對應的 MOPS 靜態歷史頁面格式，還是只能靠上面「重新整理」
+// 往後逐月累積，見下方「已知限制」提示。
+// 回補出來的資料跟「重新整理財報因子」寫進同一個 financials_monthly
+// collection，所以下面的涵蓋率月曆／隨機抽樣不用另外做一份，兩種來源的
+// 資料都會自動顯示在同一份月曆/抽樣表格裡。
+function defaultBackfillStartPeriod() {
+  return new Date().getFullYear() + '-01';
+}
+function defaultBackfillEndPeriod() {
+  const d = new Date();
+  d.setMonth(d.getMonth() - 1); // 預設到「上個月」，當月通常還沒被 TWSE 官方歸檔
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+const backfillStartPeriod = ref(defaultBackfillStartPeriod());
+const backfillEndPeriod = ref(defaultBackfillEndPeriod());
+const backfillStarting = ref(false);
+const backfillStartError = ref('');
+const backfillJob = ref(null);
+let unsubscribeBackfillJob = null;
+
+onMounted(function () {
+  unsubscribeBackfillJob = onSnapshot(doc(db, 'jobs', 'financialsBackfillMops'), function (snap) {
+    backfillJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+
+const backfillJobStatusLabel = computed(function () {
+  if (!backfillJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[backfillJob.value.status] || backfillJob.value.status;
+});
+
+async function runBackfillNow() {
+  backfillStarting.value = true;
+  backfillStartError.value = '';
+  try {
+    await callFn('runFinancialsBackfillMops', {
+      startPeriod: backfillStartPeriod.value,
+      endPeriod: backfillEndPeriod.value
+    }, 600000); // 跟後端 FINANCIALS_BACKFILL_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 600 對齊
+    await Promise.all([loadCoverage(), loadSample()]);
+  } catch (e) {
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0 || code.indexOf('internal') >= 0) {
+      backfillStartError.value = e.message || String(e);
+    }
+  } finally {
+    backfillStarting.value = false;
+  }
+}
+
 // ---- 涵蓋率月曆（月營收 12 格／季報 4 格，依年份切換）----
 const viewYear = ref(new Date().getFullYear());
 const coverageLoading = ref(true);
@@ -170,6 +228,48 @@ onMounted(loadSample);
       </div>
     </div>
 
+    <h3 style="margin-top:16px;">歷史回補（MOPS，僅月營收）</h3>
+    <p class="hint">
+      上面「重新整理財報因子」接的 TWSE OpenAPI 只有最新一期快照，沒辦法
+      回溯補齊更早的月份。這裡改接「公開資訊觀測站 MOPS」的舊版靜態報表
+      頁面，可以指定年月回補歷史月營收（一次最多 12 個月，會依序逐月
+      逐市場抓取，不是瞬間完成，請耐心等待）。這個來源回補出來的公告日期
+      一律是估算值（見下方抽樣表格的「來源」欄位），不會覆蓋已經有精確
+      官方出表日期的既有資料。<strong>只支援月營收</strong>，季報財務比率
+      （毛利率／營益率／淨利率／ROE）目前沒有找到對應的 MOPS 歷史頁面
+      格式，還是只能靠上面「重新整理」往後逐月累積。
+    </p>
+    <div class="form-actions" style="gap:8px; flex-wrap:wrap; align-items:center;">
+      <label class="hint">起始年月 <input type="month" v-model="backfillStartPeriod" style="margin-left:4px;" /></label>
+      <label class="hint">結束年月 <input type="month" v-model="backfillEndPeriod" style="margin-left:4px;" /></label>
+      <button type="button" :disabled="backfillStarting" @click="runBackfillNow">
+        {{ backfillStarting ? '回補中...' : '開始回補' }}
+      </button>
+    </div>
+    <p v-if="backfillStartError" class="error-box">{{ backfillStartError }}</p>
+    <div v-if="backfillJob" class="run-log-status-card" style="margin-top:8px;">
+      <div class="run-log-status-card-top">
+        <span>回補執行狀態</span>
+        <span class="signal-badge" :style="{ color: refreshJobStatusColor(backfillJob.status) }">{{ backfillJobStatusLabel }}</span>
+      </div>
+      <div class="hint">
+        <template v-if="backfillJob.status === 'running'">
+          還在執行中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。
+          <template v-if="backfillJob.progress">目前進度：{{ backfillJob.progress.period }}／{{ backfillJob.progress.market === 'sii' ? '上市' : '上櫃' }}（{{ backfillJob.progress.rowCount }} 筆）</template>
+        </template>
+        <template v-else-if="backfillJob.result">
+          這次回補抓到 {{ backfillJob.result.rowsFetched }} 筆，實際寫入 {{ backfillJob.result.rowsWritten }} 筆
+          <template v-if="backfillJob.result.rowsSkippedPrecise">（{{ backfillJob.result.rowsSkippedPrecise }} 筆因為已有精確官方日期而略過）</template>
+          （累積總筆數：月營收 {{ backfillJob.result.monthlyTotalAccumulated }}）
+          <template v-if="backfillJob.result.bqSync?.attempted">，BigQuery 同步：{{ backfillJob.result.bqSync.ok ? '成功' : ('失敗（' + backfillJob.result.bqSync.error + '）') }}</template>
+          <template v-if="backfillJob.result.httpErrors?.length">
+            <br />{{ backfillJob.result.httpErrors.length }} 個月/市場組合失敗：{{ backfillJob.result.httpErrors.join('；') }}
+          </template>
+        </template>
+        <template v-else-if="backfillJob.error">{{ backfillJob.error }}</template>
+      </div>
+    </div>
+
     <h3 style="margin-top:16px;">涵蓋率月曆</h3>
     <p class="hint">
       每個月／每一季涵蓋了多少檔股票——<span class="cal-legend-dot cal-missing"></span>紅色完全沒有資料、
@@ -212,13 +312,14 @@ onMounted(loadSample);
       <p class="hint">目前累積：月營收 {{ sample.monthlyTotalCount }} 筆、季報 {{ sample.quarterlyTotalCount }} 筆</p>
       <div v-if="sample.monthlySample.length" class="table-wrap">
         <table class="history-table">
-          <thead><tr><th>代號</th><th>名稱</th><th>年月</th><th>營收</th><th>YoY%</th><th>連續成長月數</th></tr></thead>
+          <thead><tr><th>代號</th><th>名稱</th><th>年月</th><th>營收</th><th>YoY%</th><th>連續成長月數</th><th>來源</th></tr></thead>
           <tbody>
             <tr v-for="r in sample.monthlySample" :key="r.code + '_' + r.period">
               <td>{{ r.code }}</td><td>{{ r.name }}</td><td>{{ r.period }}</td>
               <td>{{ r.revenue?.toLocaleString() ?? '-' }}</td>
               <td>{{ r.revenueYoyPct == null ? '-' : r.revenueYoyPct.toFixed(1) }}</td>
               <td>{{ r.revenueGrowthStreak ?? '-' }}</td>
+              <td>{{ r.source === 'mopsBackfill' ? 'MOPS回補' : 'OpenAPI' }}<template v-if="r.reportDateIsEstimated">（估計公告日）</template></td>
             </tr>
           </tbody>
         </table>
@@ -248,9 +349,11 @@ onMounted(loadSample);
 
     <p class="hint">
       <strong>已知限制：</strong>目前只接了「一般業」財報端點，金融/證券/
-      保險/金控等特殊產業別股票查無資料是預期行為；這批基本面因子目前
-      只用於訓練因子迴歸模型（見「策略研究」頁面），還沒接進「今日戰報/
-      回測」的即時預測分數，詳見 README「余博邏輯延伸的基本面因子」一節。
+      保險/金控等特殊產業別股票查無資料是預期行為；歷史回補只支援月營收，
+      季報財務比率沒有找到對應的 MOPS 歷史頁面格式，只能往後逐月累積；
+      這批基本面因子目前只用於訓練因子迴歸模型（見「策略研究」頁面），
+      還沒接進「今日戰報/回測」的即時預測分數，詳見 README「余博邏輯
+      延伸的基本面因子」一節。
     </p>
   </div>
 </template>

@@ -75,7 +75,11 @@ function parseTwseDate_(raw) {
 /**
  * 解析 TWSE t187ap05_L（上市公司每月營業收入彙總表）的原始列，轉成
  * `{code, name, period, reportDate, reportDateIsEstimated, revenue,
- *   revenueYoyPct}` 陣列。`period` 是 'yyyy-MM'（資料年月，財報所屬月份）
+ *   revenueYoyPct, source}` 陣列（`source` 固定是 `'openapi'`——跟
+ * `lib/mopsRevenueHtml.js parseMopsRevenueTables_` 的 `'mopsBackfill'`
+ * 對應，兩個來源寫進同一個 `financials_monthly` collection，sanity check
+ * 抽樣表格用這個欄位標示每一筆到底是哪個來源抓到的）。`period` 是
+ * 'yyyy-MM'（資料年月，財報所屬月份）
  * ，`reportDate` 是 'yyyy-MM-dd'（實際公開可得日期，訓練時間對齊要用
  * 這個，不是 `period`，見 `parseIncomeStatementRows_` 同一個「避免未來
  * 函數」的理由）。
@@ -129,7 +133,8 @@ function parseMonthlyRevenueRows_(rawRows) {
       reportDate: reportDate,
       reportDateIsEstimated: !officialReportDate,
       revenue: isNaN(revenue) ? null : revenue,
-      revenueYoyPct: (revenueYoyPct === null || isNaN(revenueYoyPct)) ? null : revenueYoyPct
+      revenueYoyPct: (revenueYoyPct === null || isNaN(revenueYoyPct)) ? null : revenueYoyPct,
+      source: 'openapi'
     };
   }).filter(function (r) { return r.code.length === 4 && r.period && r.revenue !== null; });
 }

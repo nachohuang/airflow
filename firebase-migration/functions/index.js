@@ -48,6 +48,7 @@ const industryMapLib = require('./lib/industryMap');
 const factorScanLib = require('./lib/factorScan');
 const factorRegressionLib = require('./lib/factorRegression');
 const financialsLib = require('./lib/financials');
+const mopsRevenueLib = require('./lib/mopsRevenueHtml');
 
 admin.initializeApp();
 
@@ -2287,6 +2288,176 @@ async function fetchTwseOfficialFinancialsDatasets_() {
     }
   }));
 }
+
+/**
+ * MOPS 月營收歷史靜態頁面抓取——跟 `fetchTwseCsvText_` 同一套 Big5
+ * 解碼／手動處理重新導向／完整瀏覽器 header 組合的理由（見該函式的
+ * 說明），差別是回應是 HTML 不是 CSV，而且某個（月份、市場）組合如果
+ * MOPS 還沒有這份歸檔會回 404——404 當成「這個月沒有資料」回傳 null，
+ * 不當例外拋出（呼叫端迴圈要能繼續處理下一個月／市場，不能整批中斷）。
+ * 這個網址格式是從開源套件 twmops 原始碼逆推出來的，這個開發環境連不到
+ * `*.twse.com.tw` 任何網域，沒辦法直接連線核對（見
+ * `lib/mopsRevenueHtml.js` 開頭的完整說明），部署後第一次執行如果格式
+ * 不符，錯誤訊息會帶 HTTP 狀態碼跟網址方便診斷。
+ */
+async function fetchMopsRevenueHtml_(url) {
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,*/*',
+    'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+    'Referer': 'https://mopsov.twse.com.tw/'
+  };
+  let currentUrl = url;
+  for (let hop = 0; hop < 5; hop++) {
+    const resp = await fetch(currentUrl, { headers: headers, redirect: 'manual' });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get('location');
+      if (!location) throw new Error('HTTP ' + resp.status + '（重新導向但沒有 Location header）- ' + currentUrl);
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    if (resp.status === 404) return null;
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' - ' + currentUrl);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return iconv.decode(buf, 'big5');
+  }
+  throw new Error('重新導向次數過多（超過 5 次）- 原始網址：' + url + '，最後停在：' + currentUrl);
+}
+
+function sleep_(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+var MOPS_BACKFILL_MARKETS_ = ['sii', 'otc']; // 上市／上櫃
+var MOPS_BACKFILL_RATE_LIMIT_MS_ = 1100; // 比照 twmops 預設的「每秒 1 個請求」限制，留一點餘裕
+var MOPS_BACKFILL_MAX_PERIODS_ = 12; // 一次最多回補 12 個月（×2 個市場＝24 個循序請求），避免單次執行時間失控
+
+/**
+ * 歷史月營收回補主邏輯——對每個（期間、市場）組合依序抓 MOPS 靜態頁面
+ * （見 `fetchMopsRevenueHtml_`），刻意不用 `Promise.all` 平行發送：MOPS
+ * 有速率限制（見 `lib/mopsRevenueHtml.js` 開頭的說明），用迴圈＋sleep
+ * 節流，避免被當成異常流量擋掉。單一（期間、市場）失敗不中斷整批回補，
+ * 錯誤收集起來最後一起回報，讓使用者看得到是哪幾個月/市場失敗。
+ *
+ * 跟官方 OpenAPI 來源（`doRefreshFinancials_`）寫進同一個
+ * `financials_monthly` collection，doc ID 一樣是 `code_period`——但這裡
+ * 回補出來的 `reportDate` 一律是估算值（見
+ * `lib/mopsRevenueHtml.js parseMopsRevenueTables_` 的說明：這個靜態頁面
+ * 沒有逐公司的官方公告日期），刻意「不覆蓋」已經有精確官方出表日期的
+ * 既有文件（`reportDateIsEstimated === false`，來自 OpenAPI 來源），
+ * 避免回補不小心把精確值退化成這裡的粗略估計值。
+ */
+async function runFinancialsBackfillMopsCore_(bigQueryConfig, startPeriod, endPeriod, onProgress) {
+  const periods = mopsRevenueLib.enumeratePeriodsInclusive_(startPeriod, endPeriod);
+  if (periods.length === 0) throw new Error('回補區間無效：' + startPeriod + ' ~ ' + endPeriod + '（請確認格式是 yyyy-MM，且起始不晚於結束）。');
+  if (periods.length > MOPS_BACKFILL_MAX_PERIODS_) {
+    throw new Error('一次最多回補 ' + MOPS_BACKFILL_MAX_PERIODS_ + ' 個月，請分批執行（這次要求 ' + periods.length + ' 個月）。');
+  }
+
+  let fetchedRows = [];
+  const httpErrors = [];
+  let first = true;
+
+  for (const period of periods) {
+    const reportDate = financialsLib.estimateMonthlyRevenueReportDate_(period);
+    for (const market of MOPS_BACKFILL_MARKETS_) {
+      if (!first) await sleep_(MOPS_BACKFILL_RATE_LIMIT_MS_);
+      first = false;
+      const url = mopsRevenueLib.buildMopsRevenueUrl_(market, period, 0);
+      try {
+        const html = await fetchMopsRevenueHtml_(url);
+        if (html === null) continue; // 這個月/市場 MOPS 還沒有歸檔（404），略過不當錯誤
+        const tables = mopsRevenueLib.extractHtmlTables_(html);
+        const rows = mopsRevenueLib.parseMopsRevenueTables_(tables, period, reportDate);
+        fetchedRows = fetchedRows.concat(rows);
+        if (onProgress) await onProgress({ period: period, market: market, rowCount: rows.length });
+      } catch (e) {
+        httpErrors.push(period + '/' + market + '：' + String(e.message || e));
+      }
+    }
+  }
+
+  if (fetchedRows.length === 0) {
+    throw new Error('這個區間完全沒有抓到任何資料（' + startPeriod + ' ~ ' + endPeriod + '），可能是 MOPS 網址格式跟預期不符，或這幾個月份還沒有歸檔。' +
+      (httpErrors.length ? ' 錯誤明細：' + httpErrors.join('；') : ''));
+  }
+
+  // 避免覆蓋已經有精確官方出表日期的既有文件（見上方函式說明）。
+  const existingMonthlyDocs = await fetchAllDocs_('financials_monthly');
+  const preciseKeys = new Set(
+    existingMonthlyDocs.filter(function (d) { return d.reportDateIsEstimated === false; })
+      .map(function (d) { return d.code + '_' + d.period; })
+  );
+  const rowsToWrite = fetchedRows.filter(function (r) { return !preciseKeys.has(r.code + '_' + r.period); });
+  const skippedPreciseCount = fetchedRows.length - rowsToWrite.length;
+
+  await upsertFinancialRowsToFirestore_('financials_monthly', rowsToWrite);
+
+  const allMonthly = await fetchAllDocs_('financials_monthly');
+  const streakedMonthly = financialsLib.computeRevenueGrowthStreaks_(groupAndSortFinancialRowsByCode_(allMonthly));
+
+  const bqSync = { attempted: false, ok: false, error: null };
+  if (bigQueryConfig && bigQueryConfig.projectId) {
+    bqSync.attempted = true;
+    try {
+      const allQuarterly = await fetchAllDocs_('financials_quarterly');
+      const streakedQuarterly = financialsLib.computeFundamentalStreaks_(groupAndSortFinancialRowsByCode_(allQuarterly));
+      await syncFinancialsToBigQuery_(bigQueryConfig, streakedQuarterly, streakedMonthly);
+      bqSync.ok = true;
+    } catch (e) {
+      bqSync.error = String(e.message || e);
+    }
+  }
+
+  return {
+    periodsRequested: periods.length,
+    rowsFetched: fetchedRows.length,
+    rowsWritten: rowsToWrite.length,
+    rowsSkippedPrecise: skippedPreciseCount,
+    monthlyTotalAccumulated: allMonthly.length,
+    httpErrors: httpErrors,
+    bqSync: bqSync
+  };
+}
+
+var FINANCIALS_BACKFILL_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { timeoutSeconds: 600 });
+
+/**
+ * Admin 頁面「歷史回補（MOPS）」按鈕用——跟 `runFinancialsRefresh`
+ * （OpenAPI 來源，只抓最新一期、適合排程常跑）是兩條獨立路徑，刻意不
+ * 合併成一支函式：這支是使用者手動指定區間、一次觸發的重活（逐月逐市場
+ * 序列請求＋節流），跟「每次排程/手動按一下就抓最新快照」的使用情境不
+ * 一樣。兩者寫進同一個 `financials_monthly` collection，涵蓋率月曆／
+ * 隨機抽樣這些既有的資料檢查 UI 不用另外做一份，兩種來源的資料都會
+ * 自動顯示在同一份月曆/抽樣表格裡（抽樣表格可以用 `source` 欄位分辨
+ * 這筆是哪個來源抓到的）。
+ */
+exports.runFinancialsBackfillMops = onCall(FINANCIALS_BACKFILL_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const startPeriod = request.data && request.data.startPeriod;
+  const endPeriod = request.data && request.data.endPeriod;
+  if (!startPeriod || !endPeriod) throw new HttpsError('invalid-argument', '請指定要回補的起始／結束年月（yyyy-MM）。');
+  const startTime = Date.now();
+  await writeJobStatus_('financialsBackfillMops', { status: 'running', startedAt: startTime, error: null, progress: null });
+  try {
+    const appConfig = await fetchAppConfig_();
+    const summary = await runFinancialsBackfillMopsCore_(appConfig.bigQuery || {}, startPeriod, endPeriod, async function (p) {
+      await writeJobStatus_('financialsBackfillMops', { progress: p });
+    });
+    const durationMs = Date.now() - startTime;
+    const msg = '回補 ' + startPeriod + ' ~ ' + endPeriod + '：抓到 ' + summary.rowsFetched + ' 筆，實際寫入 ' + summary.rowsWritten + ' 筆' +
+      (summary.rowsSkippedPrecise ? '（' + summary.rowsSkippedPrecise + ' 筆因為已有精確官方日期而略過）' : '') +
+      (summary.httpErrors.length ? '，' + summary.httpErrors.length + ' 個月/市場組合失敗' : '') +
+      (summary.bqSync.attempted ? '，BigQuery 同步：' + (summary.bqSync.ok ? '成功' : '失敗（' + summary.bqSync.error + '）') : '');
+    await logRun_('財報因子', '成功', msg, durationMs);
+    await writeJobStatus_('financialsBackfillMops', { status: 'succeeded', finishedAt: Date.now(), result: summary, error: null });
+    return summary;
+  } catch (e) {
+    await logRun_('財報因子', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('financialsBackfillMops', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+    throw new HttpsError('internal', String(e.message || e));
+  }
+});
 
 /** 跟 apps-script 版 callClaude_ 同一套呼叫方式（system prompt 帶
  *  `cache_control: {type: 'ephemeral'}` 做 prompt caching，省同一段系統規則文字
