@@ -65,9 +65,6 @@ service cloud.firestore {
     match /industry_map/{code} {
       allow read: if isOwner();
     }
-    match /backtest_results/{runId} {
-      allow read: if isOwner();
-    }
     match /factor_scan_results/{runId} {
       allow read: if isOwner();
     }

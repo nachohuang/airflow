@@ -43,6 +43,7 @@ var BQ_COLUMN_MAP = [
 var RAW_TABLE = 'history_raw'; // sourceMode: native
 var DEDUPED_VIEW = 'history_deduped'; // sourceMode: external
 var UNIFIED_VIEW = 'history_unified'; // sourceMode: materialized
+var INDUSTRY_MAP_TABLE = 'industry_map'; // 股票代號→產業別，見 buildSyncIndustryMapSql_
 
 function bqColumnNames_() {
   return BQ_COLUMN_MAP.map(function (m) { return m.bq; });
@@ -81,6 +82,14 @@ function sourceRefForRead_(bigQueryConfig) {
  *  materialized 模式各自的 view 再從這裡或 Drive 間接看到）。 */
 function rawTableRef_(bigQueryConfig) {
   return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + RAW_TABLE;
+}
+
+/** `industry_map` 的完整參照字串——跟 apps-script 版
+ *  `BigQuerySync.gs bqIndustryMapTableRef_` 同一張表，給還沒遷移的
+ *  FactorRegression.gs 因子特徵 view 將來 JOIN 用（見 README「策略研究」
+ *  相關章節）。 */
+function industryMapTableRef_(bigQueryConfig) {
+  return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + INDUSTRY_MAP_TABLE;
 }
 
 /**
@@ -338,11 +347,40 @@ function buildDailyCountsSql_(sourceRef, fromDateStr, toDateStr) {
     'GROUP BY date_str ORDER BY date_str';
 }
 
+/**
+ * 2026-10-08 新增：把產業對照表（已經通過 lib/industryMap.js
+ * `validateIndustryMapRows_` 驗證過的 `{code, industry}` 列）整份同步進
+ * BigQuery `industry_map` 表，給還沒遷移的 FactorRegression.gs 因子特徵
+ * view JOIN 用。跟 apps-script 版 `syncIndustryMapToBigQuery_` 一樣是
+ * 「目前狀態」的整份覆蓋（不是逐日累積的歷史資料），但走法不同：apps-script
+ * 版用 BigQuery.Jobs.insert 的 CSV load job（Apps Script 進階服務的既有
+ * 模式），這裡改成跟其他表一致的手刻 SQL 字串（`CREATE OR REPLACE TABLE
+ * ... AS SELECT`），不用另外處理 CSV 跳脫跟 load job 輪詢。
+ *
+ * 全市場上市櫃公司數量級（上千檔）遠小於 `history_raw` 動輒「天數 × 股票數」
+ * 的規模，實測組出來的 SQL 長度遠低於 1MB 上限，不需要像
+ * `buildInsertRowsSql_`／`chunkRowsBySize_` 那樣切 chunk。
+ *
+ * rows 是空陣列時（例如完全抓不到任何資料，理論上不會發生——呼叫端的
+ * `validateIndustryMapRows_` 會先擋掉），`UNNEST([])` 沒有型別資訊會直接
+ * 報錯，改用明確宣告欄位型別的空表 DDL，不是省略這個分支。
+ */
+function buildSyncIndustryMapSql_(tableRef, rows) {
+  if (!rows || rows.length === 0) {
+    return 'CREATE OR REPLACE TABLE `' + tableRef + '` (stock_id STRING, industry STRING)';
+  }
+  var structs = rows.map(function (r) {
+    return 'STRUCT(' + escapeVal_(r.code) + ' AS stock_id, ' + escapeVal_(r.industry) + ' AS industry)';
+  }).join(',\n    ');
+  return 'CREATE OR REPLACE TABLE `' + tableRef + '` AS\nSELECT * FROM UNNEST([\n    ' + structs + '\n  ])';
+}
+
 module.exports = {
   BQ_COLUMN_MAP: BQ_COLUMN_MAP,
   bqColumnNames_: bqColumnNames_,
   sourceRefForRead_: sourceRefForRead_,
   rawTableRef_: rawTableRef_,
+  industryMapTableRef_: industryMapTableRef_,
   buildHistoryRangeSql_: buildHistoryRangeSql_,
   buildHistoryRowsForCodesSql_: buildHistoryRowsForCodesSql_,
   buildStockSearchSql_: buildStockSearchSql_,
@@ -353,5 +391,6 @@ module.exports = {
   chunkRowsBySize_: chunkRowsBySize_,
   buildMaxDateSql_: buildMaxDateSql_,
   buildDateBoundsSql_: buildDateBoundsSql_,
-  buildDailyCountsSql_: buildDailyCountsSql_
+  buildDailyCountsSql_: buildDailyCountsSql_,
+  buildSyncIndustryMapSql_: buildSyncIndustryMapSql_
 };

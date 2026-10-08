@@ -44,6 +44,7 @@ const aiUsageLib = require('./lib/aiUsage');
 const twseFetchLib = require('./lib/twseFetch');
 const backtestLib = require('./lib/backtest');
 const analysisLib = require('./lib/analysis');
+const industryMapLib = require('./lib/industryMap');
 
 admin.initializeApp();
 
@@ -905,6 +906,208 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function
     await writeJobStatus_('backtest', { status: 'failed', finishedAt: Date.now(), mode: 'all', error: String(e.message || e) });
     throw e;
   }
+});
+
+/**
+ * 2026-10-08 新增：股票代號→產業別對照表的刷新＋同步，從
+ * apps-script/src/IndustryMap.gs 搬過來（純函式邏輯見 lib/industryMap.js）。
+ * 這不是「策略研究」本身的功能，是 FactorRegression.gs（還沒遷移）36 個
+ * 「產業資金流向」／「產業相對大盤」候選因子的前置依賴——那些因子要 JOIN
+ * BigQuery 的 `industry_map` 表才有意義，沒有這張表（或表是空的）它們全部
+ * 會拿到中性值 0.5，訓練預算大半被浪費（見 README「策略研究」相關章節的
+ * 分析）。公司產業分類幾乎不會變動，不接進每日排程，靠 Admin 頁面「重新
+ * 整理產業對照表」按鈕手動觸發。
+ *
+ * 跟 apps-script 版的架構差異：
+ * - **沒有搬背景 job 狀態機**（`startIndustryMapRefreshJob`／
+ *   `processIndustryMapJobTick_`／`clearIndustryMapRefreshJob_`）——跟
+ *   Backtest.gs／之前其他功能同一個理由，Cloud Functions 一次同步呼叫
+ *   搞定，不需要 Apps Script 6 分鐘限制逼出來的分批機制，改用
+ *   `jobs/industryMapRefresh` 搭配前端 `onSnapshot`（跟補抓區間/回測同一套
+ *   模式）。
+ * - **靜態參考表存 Firestore `industry_map/{code}`，不是 Sheet**——
+ *   Phase 2 已經把舊資料一次性遷移過去（見
+ *   `firebase-migration/migration/industry_map/`），這裡接手之後每次
+ *   刷新整份覆蓋（刪掉這次沒出現的舊文件，跟 `writeReportDocs_`
+ *   同一個模式），不是逐日累積的歷史資料。
+ * - **BigQuery 同步改成手刻 SQL，不是 CSV load job**——apps-script 版用
+ *   `BigQuery.Jobs.insert` 的 CSV load job（Apps Script 進階服務的既有
+ *   模式），這裡改成跟其他表一致的 `CREATE OR REPLACE TABLE ... AS
+ *   SELECT`（見 `lib/bigquery.js buildSyncIndustryMapSql_`），全市場
+ *   上千筆的資料量遠低於 1MB 查詢上限，不需要 chunk。
+ *
+ * 上櫃（TPEX）產業別資料源目前還沒確認正確的 API 路徑，跟 apps-script 版
+ * 一致：`fetchTpexListedIndustryMap_` 明確回傳「沒有資料＋警告」，不用猜的
+ * 路徑產生看起來像成功、實際上錯誤的資料。
+ */
+
+/** 產業對照表涵蓋率檢查用：抓「目前追蹤的最新一天」全市場股票代號清單。
+ *  跟 `fetchHistoryMaxDate_`（決定補抓資料要從哪一天接續，固定查寫入目標
+ *  `rawTableRef_`）目的不同，這裡要跟戰報頁面實際看到的資料來源一致，查
+ *  `sourceRefForRead_`（跟 `getHistoryOverview` 同一個理由，見該處說明）。
+ *  查無任何資料（全新安裝）回傳空陣列，呼叫端自行處理「無法比對涵蓋率」。 */
+async function fetchTrackedCodesForCoverage_(bigQueryConfig) {
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const sourceRef = bigquery.sourceRefForRead_(bigQueryConfig);
+  const [maxRows] = await client.query({ query: bigquery.buildMaxDateSql_(sourceRef) });
+  const maxDate = maxRows[0] && maxRows[0].max_date;
+  if (!maxDate) return [];
+  const rows = await fetchHistoryRangeRows_(bigQueryConfig, maxDate, maxDate);
+  return rows.map(function (r) { return r['證券代號']; });
+}
+
+/** 抓 TWSE OpenAPI 上市公司基本資料（t187ap03_L），轉成
+ *  `industryMapLib.parseTwseIndustryMapRows_` 期待的原始列、順便做掉欄位
+ *  偵測與翻譯。這支端點在 `openapi.twse.com.tw` 子網域、回應是 JSON，跟
+ *  `fetchTwseCsvText_` 處理的 `www.twse.com.tw` CSV 端點是不同主機也是
+ *  不同格式——目前沒有遇到那邊的 307 重新導向問題，用一般 `fetch` 就好，
+ *  不套用那套手動跟隨重新導向的邏輯（如果之後真的遇到類似問題，再比照
+ *  套用，不先预防性地套用增加複雜度）。 */
+async function fetchTwseListedIndustryMap_() {
+  const resp = await fetch('https://openapi.twse.com.tw/v1/opendata/t187ap03_L', {
+    headers: { 'Accept': 'application/json' }
+  });
+  if (!resp.ok) throw new Error('TWSE 上市公司基本資料查詢失敗（HTTP ' + resp.status + '）');
+  const rawRows = await resp.json();
+  return industryMapLib.parseTwseIndustryMapRows_(rawRows);
+}
+
+/** 上櫃（TPEX）產業別資料源目前還沒確認正確的 API 路徑，見上方章節說明。 */
+function fetchTpexListedIndustryMap_() {
+  return { rows: [], warning: '上櫃（TPEX）產業別資料源尚未確認正確的 API 路徑，目前只有上市股票有產業別資料。' };
+}
+
+/** 把產業對照表整份寫進 Firestore `industry_map/{code}`——跟
+ *  `writeReportDocs_` 同一個「整份覆蓋，刪掉這次沒出現的舊文件」模式，因為
+ *  這是「目前狀態」的靜態參考表，不是逐日累積的歷史資料，沒有「保留舊
+ *  版本」的需求。 */
+async function writeIndustryMapToFirestore_(rows) {
+  const db = admin.firestore();
+  const ref = db.collection('industry_map');
+  const existingSnap = await ref.get();
+  const newCodes = new Set(rows.map(function (r) { return r.code; }));
+  const staleRefs = existingSnap.docs
+    .filter(function (d) { return !newCodes.has(d.id); })
+    .map(function (d) { return d.ref; });
+
+  const updatedAt = Date.now();
+  const ops = staleRefs.map(function (docRef) { return { type: 'delete', ref: docRef }; })
+    .concat(rows.map(function (r) {
+      return {
+        type: 'set', ref: ref.doc(r.code),
+        fields: { code: r.code, name: r.name, industry: r.industry, market: r.market, updatedAt: updatedAt }
+      };
+    }));
+
+  const BATCH_SIZE = 400;
+  for (let i = 0; i < ops.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    ops.slice(i, i + BATCH_SIZE).forEach(function (op) {
+      if (op.type === 'delete') batch.delete(op.ref); else batch.set(op.ref, op.fields);
+    });
+    await batch.commit();
+  }
+}
+
+/** 把產業對照表同步進 BigQuery `industry_map` 表，給還沒遷移的
+ *  FactorRegression.gs 因子特徵 view JOIN 用（見 `lib/bigquery.js
+ *  buildSyncIndustryMapSql_` 的說明）。失敗不影響已經寫進 Firestore 的
+ *  結果——呼叫端 `doRefreshIndustryMap_` 把這一步的失敗單獨記在
+ *  `bqSync.error`，不會讓整次刷新被判定失敗。 */
+async function syncIndustryMapToBigQuery_(bigQueryConfig, rows) {
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const tableRef = bigquery.industryMapTableRef_(bigQueryConfig);
+  await client.query({ query: bigquery.buildSyncIndustryMapSql_(tableRef, rows) });
+  return { rowCount: rows.length };
+}
+
+/** 實際做事的地方：抓資料＋品質驗證＋寫入 Firestore＋BigQuery 同步＋涵蓋率
+ *  比對。任何品質檢查沒過就整批放棄、不覆蓋既有資料——跟 apps-script 版
+ *  `doRefreshIndustryMap_` 同一個「寧可保留舊資料」的原則。由
+ *  `exports.runIndustryMapRefresh` 呼叫。 */
+async function doRefreshIndustryMap_(bigQueryConfig) {
+  const twseRows = await fetchTwseListedIndustryMap_();
+  let tpexResult = { rows: [], warning: null };
+  try {
+    tpexResult = fetchTpexListedIndustryMap_();
+  } catch (e) {
+    tpexResult = { rows: [], warning: String(e.message || e) };
+  }
+
+  const allRows = twseRows.concat(tpexResult.rows || []);
+  const issues = industryMapLib.validateIndustryMapRows_(allRows);
+  if (issues.length > 0) {
+    throw new Error('產業對照表資料品質檢查沒通過，已放棄這次更新（不影響既有資料）：' + issues.join('；'));
+  }
+
+  await writeIndustryMapToFirestore_(allRows);
+
+  let coverage = { checked: false, error: '沒有設定 BigQuery，無法比對涵蓋率。' };
+  const bqSync = { attempted: false, ok: false, error: null };
+  if (bigQueryConfig && bigQueryConfig.projectId) {
+    try {
+      const trackedCodes = await fetchTrackedCodesForCoverage_(bigQueryConfig);
+      coverage = industryMapLib.computeIndustryMapCoverage_(allRows, trackedCodes);
+    } catch (e) {
+      coverage = { checked: false, error: String(e.message || e) };
+    }
+
+    bqSync.attempted = true;
+    try {
+      const bqResult = await syncIndustryMapToBigQuery_(
+        bigQueryConfig, allRows.map(function (r) { return { code: r.code, industry: r.industry }; })
+      );
+      bqSync.ok = true;
+      bqSync.rowCount = bqResult.rowCount;
+    } catch (e) {
+      bqSync.error = String(e.message || e);
+    }
+  }
+
+  const untranslated = industryMapLib.findUntranslatedIndustryCodes_(allRows);
+
+  return {
+    totalCount: allRows.length,
+    twseCount: twseRows.length,
+    tpexCount: (tpexResult.rows || []).length,
+    tpexWarning: tpexResult.warning || null,
+    coverage: coverage,
+    untranslated: untranslated,
+    bqSync: bqSync
+  };
+}
+
+exports.runIndustryMapRefresh = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const startTime = Date.now();
+  await writeJobStatus_('industryMapRefresh', { status: 'running', startedAt: startTime, error: null });
+  try {
+    const appConfig = await fetchAppConfig_();
+    const summary = await doRefreshIndustryMap_(appConfig.bigQuery || {});
+    const durationMs = Date.now() - startTime;
+    const msg = '共 ' + summary.totalCount + ' 筆（上市 ' + summary.twseCount + '，上櫃 ' + summary.tpexCount + '）' +
+      (summary.coverage.checked ? '，目前追蹤股票涵蓋率 ' + summary.coverage.coveragePct + '%' : '') +
+      (summary.untranslated.count ? '，' + summary.untranslated.count + ' 筆產業代碼沒對到文字名稱' : '') +
+      (summary.bqSync.attempted ? '，BigQuery 同步：' + (summary.bqSync.ok ? '成功' : '失敗（' + summary.bqSync.error + '）') : '') +
+      (summary.tpexWarning ? '；' + summary.tpexWarning : '');
+    await logRun_('產業對照表', '成功', msg, durationMs);
+    await writeJobStatus_('industryMapRefresh', { status: 'succeeded', finishedAt: Date.now(), result: summary, error: null });
+    return summary;
+  } catch (e) {
+    await logRun_('產業對照表', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('industryMapRefresh', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+    throw new HttpsError('internal', String(e.message || e));
+  }
+});
+
+/** Admin 頁面「產業對照表」卡片用：隨機抽 10 筆目前存的對照表資料，給人眼
+ *  抽查用（見 `industryMapLib.pickRandomSample_` 的說明）。純讀取，不會
+ *  觸發任何抓取，跟 `exports.runIndustryMapRefresh` 是分開的兩個按鈕。 */
+exports.getIndustryMapSample = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const snap = await admin.firestore().collection('industry_map').get();
+  const rows = snap.docs.map(function (d) { return d.data(); });
+  return { totalCount: rows.length, sample: industryMapLib.pickRandomSample_(rows, 10) };
 });
 
 /**

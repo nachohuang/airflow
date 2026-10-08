@@ -237,4 +237,25 @@ const bq = require('../lib/bigquery');
   console.log('Test buildDailyCountsSql_ (groups by date, excludes non-4-digit codes from stock_count) passed.');
 }
 
+// --- industryMapTableRef_ ---
+{
+  const cfg = { projectId: 'my-proj', dataset: 'twse_factor_model' };
+  assert.strictEqual(bq.industryMapTableRef_(cfg), 'my-proj.twse_factor_model.industry_map');
+  console.log('Test industryMapTableRef_ passed.');
+}
+
+// --- buildSyncIndustryMapSql_ ---
+{
+  const rows = [{ code: '1101', industry: '水泥工業' }, { code: '2330', industry: '半導體業' }];
+  const sql = bq.buildSyncIndustryMapSql_('proj.ds.industry_map', rows);
+  assert.ok(sql.indexOf('CREATE OR REPLACE TABLE `proj.ds.industry_map`') !== -1);
+  assert.ok(sql.indexOf("STRUCT('1101' AS stock_id, '水泥工業' AS industry)") !== -1);
+  assert.ok(sql.indexOf("STRUCT('2330' AS stock_id, '半導體業' AS industry)") !== -1);
+
+  const emptySql = bq.buildSyncIndustryMapSql_('proj.ds.industry_map', []);
+  assert.ok(emptySql.indexOf('UNNEST') === -1, '空陣列不能組出沒有型別資訊的 UNNEST([])');
+  assert.ok(emptySql.indexOf('stock_id STRING, industry STRING') !== -1, '空陣列要改用明確宣告型別的空表 DDL');
+  console.log('Test buildSyncIndustryMapSql_ (non-empty rows build UNNEST structs, empty rows build typed empty table) passed.');
+}
+
 console.log('All bigquery.js tests passed.');

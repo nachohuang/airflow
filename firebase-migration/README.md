@@ -2426,3 +2426,77 @@ prop（型別 `[{date, reason}]`），由 `AdminView.vue` 傳入——那邊「�
 - 因子掃描（`factor_scan_results` collection，掃描當前候選名單在各種
   因子組合下的表現分佈，不是回測歷史區間）還沒開始遷移，同樣留給
   `FactorRegression.gs` 那個階段一起處理。
+
+## 2026-10-08：策略研究（二）——IndustryMap.gs 產業對照表遷移到 Firebase
+
+搬 `FactorRegression.gs` 之前先確認的真實依賴缺口（見上面「策略研究：
+開工前的比對分析」）：那 726 行裡有 36 個「產業資金流向」／「產業相對
+大盤強度」候選因子，全部要 JOIN BigQuery 的 `industry_map` 表才有意義，
+而 Phase 2 當時只把舊 Sheets 的歷史資料一次性遷進了 Firestore，`IndustryMap.gs`
+真正「定期重抓 TWSE 產業分類 → 同步進 BigQuery」這條管線完全沒搬。沒有
+這張表，那 36 個因子訓練時全部會拿到中性值 0.5，訓練預算近 8 成被浪費
+——所以在動 `FactorRegression.gs` 本身之前，先把這個前置依賴獨立搬過來。
+
+### 架構對應
+
+- `functions/lib/industryMap.js`（新檔案）：純函式邏輯，從
+  `IndustryMap.gs` 複製 `translateIndustryCode_`／`detectFieldKey_`／
+  `validateIndustryMapRows_`／`findUntranslatedIndustryCodes_`／
+  `pickRandomSample_` 過來，新增 `parseTwseIndustryMapRows_`（抽出
+  `fetchTwseListedIndustryMap_` 裡「偵測欄位＋翻譯＋過濾」這段不需要
+  `UrlFetchApp` 的邏輯，方便測試）。`computeIndustryMapCoverage_` 跟
+  apps-script 版不同：純函式直接吃 `trackedCodes` 陣列，不自己去抓
+  「目前追蹤的最新一天」，那段 I/O 交給呼叫端。
+- `functions/lib/bigquery.js` 新增 `industryMapTableRef_`／
+  `buildSyncIndustryMapSql_`：把產業對照表同步進 BigQuery
+  `industry_map` 表，給還沒遷移的 `FactorRegression.gs` 因子特徵 view
+  將來 JOIN 用。
+- `functions/index.js` 新增 I/O glue：`fetchTrackedCodesForCoverage_`
+  （查 BigQuery 最新一天的全市場股票代號，用來算涵蓋率）、
+  `fetchTwseListedIndustryMap_`（呼叫 TWSE OpenAPI t187ap03_L）、
+  `fetchTpexListedIndustryMap_`（上櫃資料源還沒確認正確端點，明確回傳
+  「沒有資料＋警告」）、`writeIndustryMapToFirestore_`（整份覆蓋
+  `industry_map/{code}`）、`syncIndustryMapToBigQuery_`、
+  `doRefreshIndustryMap_`（串起以上步驟＋品質驗證）。
+- `exports.runIndustryMapRefresh`（onCall）＋`exports.getIndustryMapSample`
+  （onCall，純讀取隨機抽樣用，跟刷新是分開的兩個按鈕）：前者跟補抓區間/
+  回測同一套 `jobs/industryMapRefresh` 狀態追蹤模式。
+- 前端 `AdminView.vue` 新增「產業對照表」卡片（放在「資料完整性月曆」
+  之後）：刷新按鈕＋即時執行狀態卡片＋隨機抽樣表格。
+
+### 設計決定
+
+- **沒有搬背景 job 狀態機**（`startIndustryMapRefreshJob`／
+  `processIndustryMapJobTick_`／`clearIndustryMapRefreshJob_`）——跟這次
+  遷移其他功能一致的理由：Cloud Functions 一次同步呼叫就能跑完，不需要
+  Apps Script 6 分鐘執行上限逼出來的分批機制。
+- **BigQuery 同步改成手刻 `CREATE OR REPLACE TABLE ... AS SELECT`，不是
+  CSV load job**——apps-script 版用 `BigQuery.Jobs.insert` 的 CSV load
+  job（Apps Script 進階服務的既有模式，要處理 CSV 跳脫跟輪詢 job 狀態），
+  這裡改成跟其他表一致的手刻 SQL 字串（見 `buildSyncIndustryMapSql_`），
+  一次查詢直接完成，不用另外等 load job。全市場上市櫃公司數量級（上千檔）
+  遠低於 BigQuery 查詢 1MB 上限，不需要像 `history_raw` 補抓那樣切 chunk。
+- **沒有改用「橫斷面計算」把產業資金流向因子搬進 `computeFactors_`**——
+  這些因子是當天全市場 window function 算出來的（SQL 查詢階段的概念），
+  跟 `computeFactors_`（JS，逐股票算技術因子）不是同一種計算模型。這批
+  工作只負責把 `industry_map` 這張前置依賴表的資料管線接上，`FactorRegression.gs`
+  本身的因子特徵 view（`buildFeatureViewSql_`）跟推論時的橫斷面因子計算
+  架構問題，留給下一階段處理，不在這次範圍內。
+- **TWSE OpenAPI 的 fetch 沒有套用 `fetchTwseCsvText_` 那套手動跟隨
+  307 重新導向的邏輯**——`openapi.twse.com.tw`（JSON API）跟
+  `www.twse.com.tw`（CSV 匯出，之前遇過 307 問題的那個）是不同主機、
+  不同協定層的端點，目前沒有證據顯示這裡也有同樣的重新導向問題，先用
+  一般 `fetch`，如果之後真的遇到類似錯誤再比照處理，不預防性套用增加
+  複雜度。
+
+### 還沒做的事
+
+- 上櫃（TPEX）產業別資料源還沒確認正確的 API 路徑（跟 apps-script 版
+  現狀一致），目前只有上市股票有產業別資料，涵蓋率會因此低於 100%。
+- 這只是 `FactorRegression.gs` 的前置依賴，`factor_model_rank`／`hybrid`
+  策略本身還是不能用，下一階段才是真正遷移因子迴歸模型訓練本身。
+- 這個開發環境連不到 `openapi.twse.com.tw`／BigQuery，`fetchTwseListedIndustryMap_`
+  的欄位偵測關鍵字、`buildSyncIndustryMapSql_` 組出來的 SQL 都只在純函式
+  測試層級驗證過字串/邏輯本身，沒辦法在這裡實際跑一次確認 TWSE 回傳的
+  真實欄位名稱跟預期一致，需要部署後在正式環境手動按一次「重新整理產業
+  對照表」才能真正驗證。

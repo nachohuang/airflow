@@ -526,6 +526,66 @@ function runLogStatusColor(status) {
 // 注意：如果某個項目很少跑（例如持股續抱診斷），它最近一次執行有可能
 // 已經不在這最近 50 筆之內，這裡只會顯示「尚無最近紀錄」，不代表它
 // 從來沒有成功過。
+// ---- 產業對照表（股票代號→產業別，見 functions/lib/industryMap.js）----
+// 2026-10-08：FactorRegression.gs（還沒遷移）36 個「產業資金流向」候選因子
+// 的前置依賴——那些因子要 JOIN BigQuery 的 industry_map 表才有意義，這裡
+// 先把「刷新＋同步」這一步接上，跟補抓區間/回測同一套 jobs/{jobKey} 模式。
+const industryMapStarting = ref(false);
+const industryMapStartError = ref('');
+const industryMapJob = ref(null);
+let unsubscribeIndustryMapJob = null;
+
+onMounted(function () {
+  unsubscribeIndustryMapJob = onSnapshot(doc(db, 'jobs', 'industryMapRefresh'), function (snap) {
+    industryMapJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeIndustryMapJob) unsubscribeIndustryMapJob();
+});
+
+const industryMapJobStatusLabel = computed(function () {
+  if (!industryMapJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[industryMapJob.value.status] || industryMapJob.value.status;
+});
+
+async function runIndustryMapRefreshNow() {
+  industryMapStarting.value = true;
+  industryMapStartError.value = '';
+  try {
+    await callFn('runIndustryMapRefresh', {});
+    await loadIndustryMapSample();
+  } catch (e) {
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      industryMapStartError.value = e.message || String(e);
+    }
+  } finally {
+    industryMapStarting.value = false;
+  }
+}
+
+// 隨機抽樣（人眼抽查用）跟上面的「刷新」是分開的兩件事——抽樣純讀取，
+// 刷新完會順便重新抽一次（見上面 runIndustryMapRefreshNow），頁面打開時
+// 也會先抽一次看目前已經存的資料。
+const industryMapSample = ref(null);
+const industryMapSampleError = ref('');
+const industryMapSampleLoading = ref(true);
+
+async function loadIndustryMapSample() {
+  industryMapSampleLoading.value = true;
+  industryMapSampleError.value = '';
+  try {
+    industryMapSample.value = await callFn('getIndustryMapSample', {});
+  } catch (e) {
+    industryMapSampleError.value = e.message || String(e);
+  } finally {
+    industryMapSampleLoading.value = false;
+  }
+}
+onMounted(loadIndustryMapSample);
+
 const runLogLatestByCategory = computed(function () {
   const seen = {};
   const result = [];
@@ -868,6 +928,60 @@ const runLogLatestByCategory = computed(function () {
       </div>
 
       <HistoryCalendarCard :skip-dates="skipDates" />
+
+      <div class="form-card">
+        <h3>產業對照表（股票代號→產業別）</h3>
+        <p class="hint">
+          靜態參考資料，公司產業分類幾乎不會變動，不接進每日排程。目前是
+          FactorRegression.gs（因子迴歸模型，還沒遷移到 Firebase）36 個
+          「產業資金流向」候選因子的前置依賴——那些因子要靠這張表才有意義，
+          在那個功能搬完之前，這裡的刷新主要是先確保資料源本身可靠。
+        </p>
+        <div class="form-actions">
+          <button type="button" :disabled="industryMapStarting" @click="runIndustryMapRefreshNow">
+            {{ industryMapStarting ? '送出中...' : '重新整理產業對照表' }}
+          </button>
+        </div>
+        <p v-if="industryMapStartError" class="error-box">{{ industryMapStartError }}</p>
+        <div v-if="industryMapJob" class="run-log-status-card" style="margin-top:8px;">
+          <div class="run-log-status-card-top">
+            <span>目前執行狀態</span>
+            <span class="signal-badge" :style="{ color: runLogStatusColor(industryMapJobStatusLabel) }">{{ industryMapJobStatusLabel }}</span>
+          </div>
+          <div class="hint">
+            <template v-if="industryMapJob.status === 'running'">還在執行中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+            <template v-else-if="industryMapJob.result">
+              共 {{ industryMapJob.result.totalCount }} 筆（上市 {{ industryMapJob.result.twseCount }}，上櫃 {{ industryMapJob.result.tpexCount }}）
+              <template v-if="industryMapJob.result.coverage?.checked">，目前追蹤股票涵蓋率 {{ industryMapJob.result.coverage.coveragePct }}%</template>
+              <template v-if="industryMapJob.result.untranslated?.count">，{{ industryMapJob.result.untranslated.count }} 筆產業代碼沒對到文字名稱</template>
+              <template v-if="industryMapJob.result.bqSync?.attempted">，BigQuery 同步：{{ industryMapJob.result.bqSync.ok ? '成功' : ('失敗（' + industryMapJob.result.bqSync.error + '）') }}</template>
+              <template v-if="industryMapJob.result.tpexWarning"><br>{{ industryMapJob.result.tpexWarning }}</template>
+            </template>
+            <template v-else-if="industryMapJob.error">：{{ industryMapJob.error }}</template>
+          </div>
+        </div>
+
+        <h3 style="margin-top:16px;">隨機抽樣（人眼抽查用）</h3>
+        <p v-if="industryMapSampleError" class="error-box">{{ industryMapSampleError }}</p>
+        <p v-if="industryMapSampleLoading" class="hint">載入中...</p>
+        <template v-else-if="industryMapSample">
+          <p class="hint">目前共 {{ industryMapSample.totalCount }} 筆，隨機抽 {{ industryMapSample.sample.length }} 筆：</p>
+          <div v-if="industryMapSample.sample.length" class="table-wrap">
+            <table class="history-table">
+              <thead><tr><th>代號</th><th>名稱</th><th>產業別</th><th>市場別</th></tr></thead>
+              <tbody>
+                <tr v-for="r in industryMapSample.sample" :key="r.code">
+                  <td>{{ r.code }}</td><td>{{ r.name }}</td><td>{{ r.industry }}</td><td>{{ r.market }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="hint">目前沒有任何資料，請先按上面「重新整理產業對照表」。</p>
+        </template>
+        <div class="form-actions">
+          <button type="button" :disabled="industryMapSampleLoading" @click="loadIndustryMapSample">⟳ 重新抽樣</button>
+        </div>
+      </div>
 
       <div class="form-card">
         <h3>BigQuery 設定</h3>

@@ -142,9 +142,21 @@ Firestore 版本一樣要在 Cloud Function 層做，Firestore Security Rules �
 | `name` | `string` |
 | `industry` | `string` |
 | `market` | `string` |
+| `updatedAt` | `number`（epoch ms） |
 
 文件 ID：`code`。靜態參考資料，很少變動，可以整批覆蓋式匯入
 （`ensureIndustryMapSyncedToBigQuery_` 現行邏輯本來就是整批重新整理，直接照搬）。
+
+2026-10-08：Phase 2 當時只是把舊 Sheets 的歷史資料一次性遷進來，`updatedAt`
+欄位（跟 `migratedAt`／`migratedFrom` 不同）是之後才加的——現在
+`functions/index.js exports.runIndustryMapRefresh` 已經接手這張表的
+刷新（整份覆蓋，刪掉這次沒出現的舊文件），見
+`firebase-migration/README.md`「策略研究（二）——IndustryMap.gs 產業對照表
+遷移到 Firebase」一節。這張表同時也會同步一份到 BigQuery 的
+`industry_map` 表（`stock_id`／`industry` 兩欄），給還沒遷移的
+`FactorRegression.gs` 因子特徵 view JOIN 用——Firestore 版跟 BigQuery
+版是兩份獨立的資料（前者給 Admin 頁面顯示，後者給 BigQuery 查詢用），
+刷新時一起更新。
 
 ---
 
