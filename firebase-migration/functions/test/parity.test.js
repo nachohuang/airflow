@@ -256,6 +256,32 @@ const FACTOR_FIELDS = [
     factorRegressionLib.buildTrainModelSql_(modelRef, snapshotRef, 'label_return_1m', portedCandidateColumns, 0.05)
   );
 
+  // 2026-10-08 新增：實測發現把 config.FACTOR_CANDIDATE_COLUMNS 整組（含
+  // 10 個基本面候選因子）餵給 buildTrainModelSql_ 時，原本「全部欄位都
+  // NOT NULL」的 WHERE 條件會把幾乎所有列排除掉，訓練變成 0 筆資料
+  // （「Input data doesn't contain any rows」）——修正後 fundamental_*
+  // 欄位繼續出現在 SELECT，但不出現在 WHERE 的 NOT NULL 條件裡（讓
+  // BigQuery ML 用預設的 mean imputation 處理，見 factorRegression.js
+  // buildTrainModelSql_ 的說明）。這裡直接斷言組出來的 SQL 字串形狀，
+  // 不能只靠上面那組「排除基本面因子」的 parity 比對覆蓋到。
+  const fullSql = factorRegressionLib.buildTrainModelSql_(
+    modelRef, snapshotRef, 'label_return_1m', configLib.FACTOR_CANDIDATE_COLUMNS, 0.05
+  );
+  assert.ok(
+    fullSql.indexOf('fundamental_roe_pct') !== -1 && fullSql.indexOf('SELECT ') !== -1 &&
+    fullSql.substring(0, fullSql.indexOf('WHERE')).indexOf('fundamental_roe_pct') !== -1,
+    'fundamental_* 欄位要繼續出現在 SELECT 子句裡（給 BigQuery ML 當特徵用）'
+  );
+  const whereClause = fullSql.substring(fullSql.indexOf('WHERE'));
+  assert.ok(
+    whereClause.indexOf('fundamental_roe_pct IS NOT NULL') === -1,
+    'fundamental_* 欄位不該出現在 WHERE 的 NOT NULL 條件裡（避免把幾乎所有列都排除掉）'
+  );
+  assert.ok(
+    whereClause.indexOf('inst_participation IS NOT NULL') !== -1 && whereClause.indexOf('label_return_1m IS NOT NULL') !== -1,
+    '非基本面因子（原本 48 個）跟 label 仍然要出現在 WHERE 的 NOT NULL 條件裡'
+  );
+
   assert.strictEqual(context.buildEvaluateSql_(modelRef), factorRegressionLib.buildEvaluateSql_(modelRef));
   assert.strictEqual(context.buildWeightsSql_(modelRef), factorRegressionLib.buildWeightsSql_(modelRef));
 

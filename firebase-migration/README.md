@@ -3060,3 +3060,45 @@ Standard SQL 的已知限制，JOIN 的 ON 子句不支援參照外層資料表�
 一般的不等式／等值條件，不再有參照外層資料表的相關子查詢——
 point-in-time 正確性的語意完全不變（條件還是 `report_date <=
 base.date`），只是換一種 BigQuery 支援的寫法表達。
+
+### 2026-10-08 再追加：訓練變成「Input data doesn't contain any rows」
+
+上面那個 SQL 語法錯誤修好、部署上線之後，使用者重新點「開始訓練」，
+兩個 label（後續 1 個月報酬率／相對大盤抗跌力）都回報：
+
+```
+Input data doesn't contain any rows.
+```
+
+原因：`lib/factorRegression.js buildTrainModelSql_` 原本的訓練用
+`WHERE` 條件是「`featureColumns` 裡每一欄都要 `IS NOT NULL`」，而
+`trainFactorModel_`（index.js）呼叫時傳的 `featureColumns` 是
+`config.FACTOR_CANDIDATE_COLUMNS`——這份清單在「余博邏輯延伸的基本面
+因子」那次已經把 10 個 `fundamental_*` 欄位 push 進去了。因為財報資料
+目前還很稀疏（見上方「已知限制」），絕大多數 `(stock_id, date)` 的
+`fundamental_*` 欄位都是 `NULL`，AND 起來的結果幾乎沒有一列能同時滿足
+「原本 48 個候選因子都不是 NULL」＋「10 個 fundamental_* 也都不是
+NULL」，訓練用的快照表篩完變成 0 筆。
+
+這跟 `ensureFinancialsSyncedToBigQuery_` 註解原本講好的設計矛盾——
+那段註解明確說「基本面因子缺資料不影響其他既有候選因子正常訓練」，
+但實作上因為用同一個 AND 條件綁死，缺資料反而把全部訓練都擋住，是
+實作沒跟上設計意圖的 bug，不是刻意的取捨。
+
+修正：`buildTrainModelSql_` 的 `WHERE` 條件改成排除
+`config.FUNDAMENTAL_CANDIDATE_COLUMNS` 裡的欄位，只要求「非基本面
+因子」＋label 不是 NULL；`fundamental_*` 欄位繼續留在 `SELECT`
+裡當特徵用，但不會因為它是 NULL 就把整列排除掉。BigQuery ML 在
+`CREATE MODEL` 沒有 `TRANSFORM` 子句時，數值特徵欄位的 NULL 預設會
+自動用該欄位的平均值插補（mean imputation，訓練/預測用同一個訓練時
+算出的平均值），不需要自己在 SQL 裡 COALESCE 成某個值——這樣原本 48
+個因子的訓練列數不受影響（只排除掉那些原本就會因為
+`dividend_yield`／`pe_ratio`／`pb_ratio` 缺值而被排除的少數列，跟
+修正前一致），`fundamental_*` 稀疏的部分則讓 BQML 自己處理，不會再
+把訓練整批擋光。
+
+已知取捨：現階段 `fundamental_*` 幾乎全部都是用「平均值插補」出來的
+常數，LASSO 大概率會給這幾個因子很接近 0 的權重（因為插補值本身沒有
+區分度）——這是預期中的過渡狀態，不是 bug，會隨季報資料逐季累積、
+真實覆蓋率提高而改善（覆蓋率提高後，插補的比例下降，這幾個因子才有
+機會顯示出真正的預測力）。

@@ -233,7 +233,22 @@ function buildFeatureSnapshotSql_(viewRef, snapshotTableRef) {
  */
 function buildTrainModelSql_(modelRef, viewRef, labelColumn, featureColumns, l1Reg) {
   var selectCols = featureColumns.concat([labelColumn]).join(', ');
-  var notNullConds = featureColumns.concat([labelColumn]).map(function (c) { return c + ' IS NOT NULL'; }).join(' AND ');
+  // 2026-10-08 修正：基本面因子（fundamental_*，見 config.js
+  // FUNDAMENTAL_CANDIDATE_COLUMNS）目前資料覆蓋率極低（財報因子才剛開始
+  // 累積歷史），原本「全部候選因子都要 NOT NULL」的條件 AND 起來之後，
+  // 幾乎每一列都會因為某個 fundamental_* 欄位是 NULL 被整列排除，訓練
+  // 實測變成 0 筆資料（「Input data doesn't contain any rows」）——跟
+  // ensureFinancialsSyncedToBigQuery_ 註解原本講好的設計（基本面因子缺
+  // 資料「不影響其他既有候選因子正常訓練」）矛盾。改成只要求「非基本面
+  // 因子」NOT NULL；基本面因子欄位繼續選進 SELECT 但不擋列，BigQuery ML
+  // 在沒有 TRANSFORM 子句時，數值欄位的 NULL 預設就會自動用該欄位的平均值
+  // 插補（mean imputation，見官方文件 Automatic feature preprocessing），
+  // 不需要自己在 SQL 裡 COALESCE 成某個值。
+  var fundamentalCols = config.FUNDAMENTAL_CANDIDATE_COLUMNS || [];
+  var requiredNotNullCols = featureColumns.filter(function (c) {
+    return fundamentalCols.indexOf(c) === -1;
+  }).concat([labelColumn]);
+  var notNullConds = requiredNotNullCols.map(function (c) { return c + ' IS NOT NULL'; }).join(' AND ');
   return [
     'CREATE OR REPLACE MODEL `' + modelRef + '`',
     'OPTIONS(',
