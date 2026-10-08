@@ -162,19 +162,56 @@ async function loadCoverage() {
 }
 onMounted(loadCoverage);
 
+// ---- 善後：清掉誤回補進來的非上市（上櫃）資料 ----
+// 2026-10-08：MOPS 回補一開始誤抓了上市＋上櫃兩個市場（見 index.js
+// MOPS_BACKFILL_MARKETS_ 上方的完整說明），跟這個 App 其他地方「只處理
+// 上市股票」的範圍不一致。已經修正成只抓上市，但使用者已經實測寫入過
+// 一批上櫃資料，這顆按鈕一次性清掉（比對 industry_map 的上市股票清單，
+// 不在清單裡的 mopsBackfill 來源文件整批刪除＋重新同步 BigQuery）。
+const cleanupStarting = ref(false);
+const cleanupError = ref('');
+const cleanupResult = ref(null);
+
+async function runCleanupNonListed() {
+  cleanupStarting.value = true;
+  cleanupError.value = '';
+  cleanupResult.value = null;
+  try {
+    cleanupResult.value = await callFn('cleanupFinancialsNonListedCodes', {});
+    await Promise.all([loadCoverage(), loadSample()]);
+  } catch (e) {
+    cleanupError.value = e.message || String(e);
+  } finally {
+    cleanupStarting.value = false;
+  }
+}
+
 function cellStatus(stockCount) {
   if (stockCount === undefined || stockCount === 0) return 'missing';
   if (stockCount < LOW_COUNT_THRESHOLD_) return 'low';
   return 'ok';
 }
 
+// 2026-10-08 新增：使用者實測回補之後看著月曆問「這個月的資料來源是
+// 哪裡」——每格除了總檔數，額外標出 openapi／mopsBackfill 各自的檔數
+// （getFinancialsCoverage 現在回傳 bySource），不用再靠「隨機抽樣」
+// 反推猜測。
+function sourceBreakdownLabel(bySource) {
+  if (!bySource) return '';
+  const parts = [];
+  if (bySource.openapi) parts.push('OpenAPI ' + bySource.openapi);
+  if (bySource.mopsBackfill) parts.push('MOPS ' + bySource.mopsBackfill);
+  return parts.join(' / ');
+}
+
 const monthlyCells = computed(function () {
   const byPeriod = {};
-  monthlyCoverage.value.forEach(function (r) { byPeriod[r.period] = r.stockCount; });
+  monthlyCoverage.value.forEach(function (r) { byPeriod[r.period] = r; });
   const cells = [];
   for (let m = 1; m <= 12; m++) {
     const period = viewYear.value + '-' + String(m).padStart(2, '0');
-    cells.push({ label: m + ' 月', period: period, stockCount: byPeriod[period] });
+    const r = byPeriod[period];
+    cells.push({ label: m + ' 月', period: period, stockCount: r?.stockCount, sourceLabel: sourceBreakdownLabel(r?.bySource) });
   }
   return cells;
 });
@@ -251,8 +288,11 @@ onMounted(loadSample);
     <p class="hint">
       上面「重新整理財報因子」接的 TWSE OpenAPI 只有最新一期快照，沒辦法
       回溯補齊更早的月份。這裡改接「公開資訊觀測站 MOPS」的舊版靜態報表
-      頁面，可以指定年月回補歷史月營收（一次最多 12 個月，會依序逐月
-      逐市場抓取，不是瞬間完成，請耐心等待）。這個來源回補出來的公告日期
+      頁面，可以指定年月回補歷史月營收（一次最多 12 個月，會依序抓取，
+      不是瞬間完成，請耐心等待——回補期間就算畫面顯示連線中斷也不用
+      重按，下面的「回補執行狀態」卡片會顯示後端實際跑完的結果）。只抓
+      <strong>上市（sii）</strong>股票，跟這個 App 其他地方（股價歷史、
+      產業對照表）的範圍一致，不含上櫃。這個來源回補出來的公告日期
       一律是估算值（見下方抽樣表格的「來源」欄位），不會覆蓋已經有精確
       官方出表日期的既有資料。<strong>只支援月營收</strong>，季報財務比率
       （毛利率／營益率／淨利率／ROE）目前沒有找到對應的 MOPS 歷史頁面
@@ -295,6 +335,24 @@ onMounted(loadSample);
       </div>
     </div>
 
+    <p class="hint" style="margin-top:8px;">
+      若你曾經在 2026-10-08 這次修正上線前用過上面的回補功能，有可能誤
+      抓進一批上櫃（非上市）公司的月營收——按下面這顆按鈕可以比對產業
+      對照表，把不在上市股票清單裡的回補資料整批清掉（不影響 OpenAPI
+      來源的資料，只清 MOPS 回補來源）。確認下方涵蓋率月曆的檔數都是
+      乾淨的上市股票範圍之後，這顆按鈕就不用再按了。
+    </p>
+    <div class="form-actions">
+      <button type="button" :disabled="cleanupStarting" @click="runCleanupNonListed">
+        {{ cleanupStarting ? '清理中...' : '清理非上市回補資料' }}
+      </button>
+    </div>
+    <p v-if="cleanupError" class="error-box">{{ cleanupError }}</p>
+    <p v-if="cleanupResult" class="hint">
+      清掉 {{ cleanupResult.deletedCount }} 筆非上市股票的回補資料（剩餘 {{ cleanupResult.remainingCount }} 筆）
+      <template v-if="cleanupResult.bqSync?.attempted">，BigQuery 同步：{{ cleanupResult.bqSync.ok ? '成功' : ('失敗（' + cleanupResult.bqSync.error + '）') }}</template>
+    </p>
+
     <h3 style="margin-top:16px;">涵蓋率月曆</h3>
     <p class="hint">
       每個月／每一季涵蓋了多少檔股票——<span class="cal-legend-dot cal-missing"></span>紅色完全沒有資料、
@@ -319,6 +377,7 @@ onMounted(loadSample);
         <div v-for="c in monthlyCells" :key="c.period" class="fin-cal-cell" :class="'cal-' + cellStatus(c.stockCount)" :title="c.period">
           <div class="fin-cal-cell-label">{{ c.label }}</div>
           <div class="fin-cal-cell-count">{{ c.stockCount ?? 0 }}</div>
+          <div v-if="c.sourceLabel" class="fin-cal-cell-source">{{ c.sourceLabel }}</div>
         </div>
       </div>
       <p class="hint" style="margin:10px 0 4px;">季報財務比率</p>
@@ -438,6 +497,7 @@ onMounted(loadSample);
 }
 .fin-cal-cell-label { font-weight: 600; }
 .fin-cal-cell-count { font-size: 10px; opacity: 0.8; }
+.fin-cal-cell-source { font-size: 9px; opacity: 0.7; margin-top: 2px; }
 
 .cal-ok { border-color: var(--green); background: color-mix(in srgb, var(--green) 12%, var(--bg-card)); }
 .cal-low { border-color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, var(--bg-card)); }

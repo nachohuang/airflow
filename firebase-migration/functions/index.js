@@ -1439,10 +1439,16 @@ exports.getFinancialsCoverage = onCall(LIGHT_RUNTIME_OPTS_, async function (requ
     fetchAllDocs_('financials_quarterly')
   ]);
 
+  // 2026-10-08 新增：使用者實測回補之後看著月曆問「這個月的資料來源是
+  // 哪裡」——除了總檔數，每個月額外拆出 `source` 分組的檔數
+  // （openapi／mopsBackfill 各幾檔），前端月曆用這個組出「OpenAPI:X／
+  // MOPS回補:Y」的細項顯示，不用再靠下面「隨機抽樣」反推猜測來源。
   const monthlyByPeriod = {};
   monthlyDocs.forEach(function (d) {
-    if (!monthlyByPeriod[d.period]) monthlyByPeriod[d.period] = new Set();
-    monthlyByPeriod[d.period].add(d.code);
+    if (!monthlyByPeriod[d.period]) monthlyByPeriod[d.period] = { codes: new Set(), bySource: {} };
+    monthlyByPeriod[d.period].codes.add(d.code);
+    const src = d.source || '未知';
+    monthlyByPeriod[d.period].bySource[src] = (monthlyByPeriod[d.period].bySource[src] || 0) + 1;
   });
   const quarterlyByPeriod = {};
   let fiscalPeriodIsEstimated = false;
@@ -1454,7 +1460,9 @@ exports.getFinancialsCoverage = onCall(LIGHT_RUNTIME_OPTS_, async function (requ
   });
 
   return {
-    monthly: Object.keys(monthlyByPeriod).sort().map(function (p) { return { period: p, stockCount: monthlyByPeriod[p].size }; }),
+    monthly: Object.keys(monthlyByPeriod).sort().map(function (p) {
+      return { period: p, stockCount: monthlyByPeriod[p].codes.size, bySource: monthlyByPeriod[p].bySource };
+    }),
     quarterly: Object.keys(quarterlyByPeriod).sort().map(function (p) { return { period: p, stockCount: quarterlyByPeriod[p].size }; }),
     fiscalPeriodIsEstimated: fiscalPeriodIsEstimated
   };
@@ -2328,9 +2336,24 @@ function sleep_(ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
-var MOPS_BACKFILL_MARKETS_ = ['sii', 'otc']; // 上市／上櫃
+/**
+ * 2026-10-08 修正：原本是 `['sii', 'otc']`（上市＋上櫃），使用者實測回補
+ * 2026-08 之後，涵蓋率月曆的股票數從 OpenAPI 來源原本的 1085 檔跳到
+ * 1949 檔——跟這個 App 其他地方的既定範圍不一致：`industry_map`
+ * collection 明確只收上市股票（`fetchTpexListedIndustryMap_` 固定回傳
+ * 空陣列＋警告「上櫃產業別資料源尚未確認」），股價歷史（T86／MI_INDEX／
+ * BWIBBU_d）也都是 TWSE（上市）端點，整個 App 沒有任何地方真的在處理
+ * 上櫃股票。多抓的上櫃公司不會讓訓練用的資料出錯（`buildFundamentalFeatureViewSql_`
+ * 是從上市股價歷史那張 view 往外 LEFT JOIN，上櫃代號本來就不會被
+ * join 到任何一列，純粹是寫了一堆不會被用到的 Firestore 文件），但會讓
+ * 「涵蓋率月曆」的數字不是同一個口徑、對不起來，造成使用者誤判資料
+ * 品質。改成只抓 `sii`（上市），跟 OpenAPI 來源的範圍完全一致。已經
+ * 回補進去的上櫃資料靠 `cleanupMopsBackfillOtcRows_`／
+ * `exports.cleanupFinancialsNonListedCodes` 事後清掉，不是留著不管。
+ */
+var MOPS_BACKFILL_MARKETS_ = ['sii']; // 上市——跟整個 App 其他地方的範圍一致，見上方說明
 var MOPS_BACKFILL_RATE_LIMIT_MS_ = 1100; // 比照 twmops 預設的「每秒 1 個請求」限制，留一點餘裕
-var MOPS_BACKFILL_MAX_PERIODS_ = 12; // 一次最多回補 12 個月（×2 個市場＝24 個循序請求），避免單次執行時間失控
+var MOPS_BACKFILL_MAX_PERIODS_ = 12; // 一次最多回補 12 個月，避免單次執行時間失控
 
 /**
  * 歷史月營收回補主邏輯——對每個（期間、市場）組合依序抓 MOPS 靜態頁面
@@ -2455,6 +2478,73 @@ exports.runFinancialsBackfillMops = onCall(FINANCIALS_BACKFILL_RUNTIME_OPTS_, as
   } catch (e) {
     await logRun_('財報因子', '失敗', String(e.message || e), Date.now() - startTime);
     await writeJobStatus_('financialsBackfillMops', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+    throw new HttpsError('internal', String(e.message || e));
+  }
+});
+
+/**
+ * 善後：`runFinancialsBackfillMopsCore_` 2026-10-08 修正前曾經短暫用
+ * `['sii', 'otc']` 兩個市場回補過（見 `MOPS_BACKFILL_MARKETS_` 上方的
+ * 完整說明），使用者實測已經寫進一批上櫃公司的 `financials_monthly`
+ * 文件，跟這個 App 其他地方「只處理上市股票」的範圍不一致。這支把
+ * `source === 'mopsBackfill'` 且代號不在 `industry_map`（這個 App 既有
+ * 的「上市股票清單」權威來源，見 `exports.runIndustryMapRefresh`）裡的
+ * 文件整批刪掉，一次性善後用，不是常態會跑的流程。
+ */
+async function cleanupMopsBackfillOtcRows_(bigQueryConfig) {
+  const db = admin.firestore();
+  const [industryMapSnap, monthlySnap] = await Promise.all([
+    db.collection('industry_map').get(),
+    db.collection('financials_monthly').get()
+  ]);
+  const listedCodes = new Set(industryMapSnap.docs.map(function (d) { return d.id; }));
+  if (listedCodes.size === 0) {
+    throw new Error('industry_map 是空的，沒辦法判斷哪些代號是上市股票——請先執行過一次「重新整理產業對照表」再跑這個清理。');
+  }
+  const toDelete = monthlySnap.docs.filter(function (d) {
+    const data = d.data();
+    return data.source === 'mopsBackfill' && !listedCodes.has(data.code);
+  });
+  const BATCH_SIZE = 400;
+  for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    toDelete.slice(i, i + BATCH_SIZE).forEach(function (d) { batch.delete(d.ref); });
+    await batch.commit();
+  }
+
+  // Firestore 刪掉之後，BigQuery 那份（整份覆蓋同步，見
+  // `syncFinancialsToBigQuery_` 的說明）要重跑一次才會跟著乾淨，不然
+  // 殘留的上櫃資料會一直留在 `financial_revenue` 表裡，要等到下一次不
+  // 相關的「重新整理」才會被覆蓋掉。
+  const bqSync = { attempted: false, ok: false, error: null };
+  if (toDelete.length > 0 && bigQueryConfig && bigQueryConfig.projectId) {
+    bqSync.attempted = true;
+    try {
+      const [allMonthly, allQuarterly] = await Promise.all([
+        fetchAllDocs_('financials_monthly'),
+        fetchAllDocs_('financials_quarterly')
+      ]);
+      const streakedMonthly = financialsLib.computeRevenueGrowthStreaks_(groupAndSortFinancialRowsByCode_(allMonthly));
+      const streakedQuarterly = financialsLib.computeFundamentalStreaks_(groupAndSortFinancialRowsByCode_(allQuarterly));
+      await syncFinancialsToBigQuery_(bigQueryConfig, streakedQuarterly, streakedMonthly);
+      bqSync.ok = true;
+    } catch (e) {
+      bqSync.error = String(e.message || e);
+    }
+  }
+
+  return { deletedCount: toDelete.length, remainingCount: monthlySnap.size - toDelete.length, bqSync: bqSync };
+}
+
+exports.cleanupFinancialsNonListedCodes = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  try {
+    const appConfig = await fetchAppConfig_();
+    const result = await cleanupMopsBackfillOtcRows_(appConfig.bigQuery || {});
+    await logRun_('財報因子', '成功', '清掉 ' + result.deletedCount + ' 筆非上市股票的回補資料（剩餘 ' + result.remainingCount + ' 筆）' +
+      (result.bqSync.attempted ? '，BigQuery 同步：' + (result.bqSync.ok ? '成功' : '失敗（' + result.bqSync.error + '）') : ''), 0);
+    return result;
+  } catch (e) {
     throw new HttpsError('internal', String(e.message || e));
   }
 });

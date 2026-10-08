@@ -2938,3 +2938,32 @@ Big5 編碼的純 HTML，逐產業別各自一個 `<table>`，欄位依**位置�
   對整批資料重跑），不是只對新回補的部分增量更新——這個函式本身就是
   這樣設計的（見 `doRefreshFinancials_` 的既有邏輯），這裡沿用同一套，
   不是這次新增的行為。
+
+### 2026-10-08 追加：範圍修正（誤抓上櫃）、來源可見度、連線中斷誤報失敗
+
+使用者實測回補 2026-01~09 之後回報三個問題：
+
+1. **誤抓上櫃股票**：`MOPS_BACKFILL_MARKETS_` 原本是 `['sii', 'otc']`
+   （上市＋上櫃），回補後 8月涵蓋檔數從 OpenAPI 來源原本的 1085 檔跳到
+   1949 檔——跟這個 App 其他地方的既定範圍不一致：`industry_map`
+   collection 明確只收上市股票（`fetchTpexListedIndustryMap_` 固定
+   回傳空陣列＋警告「上櫃產業別資料源尚未確認」），股價歷史
+   （T86／MI_INDEX／BWIBBU_d）也都是 TWSE（上市）端點，整個 App 沒有
+   任何地方真的在處理上櫃股票。改成只抓 `sii`，已經誤寫入的上櫃資料
+   靠新增的 `exports.cleanupFinancialsNonListedCodes`（比對
+   `industry_map` 清單，刪除不在清單裡的 `mopsBackfill` 來源文件＋
+   重新同步 BigQuery）清掉，Admin 頁面歷史回補區塊有對應按鈕。
+2. **資料來源不可見**：使用者看著涵蓋率月曆問「這個月的資料是哪裡來
+   的」——`getFinancialsCoverage` 現在每個月額外回傳 `bySource`
+   （`{openapi: N, mopsBackfill: M}`），月曆每格直接顯示
+   「OpenAPI X / MOPS Y」，不用再靠下面的隨機抽樣反推猜測。
+3. **連線中斷誤報失敗**：回補 9 個月耗時數分鐘（逐月序列請求），使用者
+   手機連線中斷，前端把這個連線層級錯誤當「操作失敗」顯示，但後端其實
+   有跑完（`jobs/financialsBackfillMops` 照樣被寫成 `succeeded`）。跟
+   `AdminView.vue runBackfillNow`（補抓股價區間）已經踩過的同一個坑：
+   `FinancialsCoverageCard.vue` 原本把 `internal` 也當「送出就失敗」
+   顯示，改成只有驗證類錯誤才顯示，改用 `watch(backfillJob, ...)` 偵測
+   job 從 `running` 變成其他狀態時才重新整理涵蓋率/抽樣。
+   順便修正手機排版：起訖年月輸入框跟按鈕原本用 `flex-wrap` 擠在同一
+   列，iOS Safari 的 `input type="month"` 原生控制項寬度不固定，換行後
+   跟按鈕重疊，改成每個欄位各自一整列。
