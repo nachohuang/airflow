@@ -16,7 +16,7 @@
  * `fiscalPeriodIsEstimated` 這個旗標會在畫面上明確標出來，不要讓使用者
  * 誤以為季度分類是精確的。
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
@@ -100,6 +100,21 @@ const backfillJobStatusLabel = computed(function () {
   return labels[backfillJob.value.status] || backfillJob.value.status;
 });
 
+// 2026-10-08 修正：使用者實際跑一次 9 個月的回補（逐月逐市場序列請求，
+// 耗時數分鐘）遇到手機瀏覽器回報 fetch "Load failed"／callable 回
+// `internal` 錯誤——但 jobs/financialsBackfillMops 監聽到的最終狀態其實
+// 是成功（後端不受前端連線中斷影響，照樣跑完＋寫入＋同步 BigQuery）。
+// 跟 AdminView.vue runBackfillNow（補抓股價區間）同一個教訓：連線層級的
+// 錯誤（deadline-exceeded／unavailable／internal）不代表後端真的失敗，
+// 在這裡顯示反而誤導使用者以為操作失敗了，只有「送出就失敗」的驗證類
+// 錯誤才顯示。改成用下面的 watch 偵測 job 從 running 變成其他狀態時才
+// 重新整理涵蓋率/抽樣，不依賴 callFn 本身回傳成功。
+watch(backfillJob, function (newVal, oldVal) {
+  if (newVal && newVal.status !== 'running' && oldVal && oldVal.status === 'running') {
+    Promise.all([loadCoverage(), loadSample()]);
+  }
+});
+
 async function runBackfillNow() {
   backfillStarting.value = true;
   backfillStartError.value = '';
@@ -108,10 +123,14 @@ async function runBackfillNow() {
       startPeriod: backfillStartPeriod.value,
       endPeriod: backfillEndPeriod.value
     }, 600000); // 跟後端 FINANCIALS_BACKFILL_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 600 對齊
-    await Promise.all([loadCoverage(), loadSample()]);
+    // 回傳值不需要處理——執行狀態一律透過上面的 jobs/financialsBackfillMops
+    // 監聽顯示，重新整理交給上面的 watch 在工作真正完成時觸發。
   } catch (e) {
+    // 「送出就失敗」（驗證錯誤／沒有登入）才在這裡顯示；deadline-exceeded／
+    // unavailable／internal 這類連線層級的錯誤不代表後端真的失敗——後端
+    // 通常還是會繼續跑完，真正的結果看上面即時監聽到的執行狀態。
     const code = e.code || '';
-    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0 || code.indexOf('internal') >= 0) {
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
       backfillStartError.value = e.message || String(e);
     }
   } finally {
@@ -239,9 +258,15 @@ onMounted(loadSample);
       （毛利率／營益率／淨利率／ROE）目前沒有找到對應的 MOPS 歷史頁面
       格式，還是只能靠上面「重新整理」往後逐月累積。
     </p>
-    <div class="form-actions" style="gap:8px; flex-wrap:wrap; align-items:center;">
-      <label class="hint">起始年月 <input type="month" v-model="backfillStartPeriod" style="margin-left:4px;" /></label>
-      <label class="hint">結束年月 <input type="month" v-model="backfillEndPeriod" style="margin-left:4px;" /></label>
+    <div class="backfill-period-row">
+      <label class="hint">起始年月</label>
+      <input type="month" v-model="backfillStartPeriod" />
+    </div>
+    <div class="backfill-period-row">
+      <label class="hint">結束年月</label>
+      <input type="month" v-model="backfillEndPeriod" />
+    </div>
+    <div class="form-actions">
       <button type="button" :disabled="backfillStarting" @click="runBackfillNow">
         {{ backfillStarting ? '回補中...' : '開始回補' }}
       </button>
@@ -359,6 +384,28 @@ onMounted(loadSample);
 </template>
 
 <style scoped>
+/* 2026-10-08 修正：原本用 flex-wrap 把「起始年月」「結束年月」兩個
+ * label+input 跟「開始回補」按鈕塞在同一列，使用者手機實測畫面會
+ * 出格（input type="month" 在 iOS Safari 的原生控制項寬度不固定，
+ * flex-wrap 換行後跟按鈕疊在一起）。改成每個欄位各自獨立一整列、
+ * input 固定滿版寬度，跟 HistoryCalendarCard.vue 等其他表單欄位的
+ * 手機排版慣例一致，不依賴 flex-wrap 對原生表單控制項的換行行為。 */
+.backfill-period-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.backfill-period-row input[type="month"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: inherit;
+}
+
 .cal-toolbar {
   display: flex;
   align-items: center;
