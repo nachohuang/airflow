@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, onSnapshot, collection, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
 import { strategyColor } from '../../utils/strategyColor';
@@ -149,6 +149,125 @@ async function runFactorScan() {
     scanStarting.value = false;
   }
 }
+
+// ---- 因子迴歸模型（functions/lib/factorRegression.js）----
+// 2026-10-08：搬完這塊，factor_model_rank／hybrid 這兩個策略（上面的
+// 回測、戰報頁面）才真正有辦法訓練出一版模型可以套用。跟因子掃描一樣是
+// 獨立的研究工具，但這支會真的寫入 BigQuery ML 模型＋Firestore
+// factor_model_history，不是只讀不寫。
+const FACTOR_LABEL_NAMES = { return1m: '後續1個月報酬率', downsideResistance: '相對大盤抗跌力' };
+
+function topWeightedFeatures(weights, count) {
+  if (!weights) return [];
+  return Object.keys(weights).sort(function (a, b) { return Math.abs(weights[b]) - Math.abs(weights[a]); }).slice(0, count || 5);
+}
+
+// factor_model_history 直接用 Firestore client SDK 讀（規則已經開放
+// owner 讀取，見 firestore.rules），跟 AdminView.vue 的 run_log／
+// skip_dates 同一個模式，不需要另外寫一個 onCall 包一層。
+const factorModelHistory = ref([]);
+const factorModelHistoryError = ref('');
+let unsubscribeFactorModelHistory = null;
+
+onMounted(function () {
+  unsubscribeFactorModelHistory = onSnapshot(
+    query(collection(db, 'factor_model_history'), orderBy('timestamp', 'desc'), limit(50)),
+    function (snap) { factorModelHistory.value = snap.docs.map(function (d) { return d.data(); }); },
+    function (e) { factorModelHistoryError.value = e.message || String(e); }
+  );
+});
+onUnmounted(function () {
+  if (unsubscribeFactorModelHistory) unsubscribeFactorModelHistory();
+});
+
+// 同一次「執行因子迴歸」會對兩個 label 各留一筆文件，依 timestamp 分組
+// 成一次次「訓練批次」顯示，「套用」是整批一起套用（見後端
+// exports.applyFactorModel 的說明：不讓兩個 label 套用到不同版本）。
+// factorModelHistory 本身已經依 timestamp 新到舊排序好，分組時依遇到的
+// 順序 push 進 order 陣列即可維持排序，不用另外排序一次。
+const factorModelRuns = computed(function () {
+  const byTs = {};
+  const order = [];
+  factorModelHistory.value.forEach(function (d) {
+    if (!byTs[d.timestamp]) { byTs[d.timestamp] = { timestamp: d.timestamp, labels: [] }; order.push(d.timestamp); }
+    byTs[d.timestamp].labels.push(d);
+  });
+  return order.map(function (ts) { return byTs[ts]; });
+});
+
+// 「🌟 目前生效模型」：對應 apps-script 版 getActiveFactorModelSummary，
+// 這裡不另外開一個 onCall，直接在前端用 factorModelHistory 篩 applied
+// 的文件算出來即可（weights 本來就已經在 onSnapshot 讀到的資料裡）。
+const activeModelSummary = computed(function () {
+  const applied = factorModelHistory.value.filter(function (d) { return d.applied; });
+  if (applied.length === 0) return [];
+  return applied.map(function (d) {
+    return {
+      labelKey: d.labelKey,
+      labelName: FACTOR_LABEL_NAMES[d.labelKey] || d.labelKey,
+      timestamp: d.timestamp,
+      r2: d.r2,
+      topFeatures: topWeightedFeatures(d.weights, 5)
+    };
+  });
+});
+
+const factorRegForm = ref({ l1Reg: 0.05 });
+const factorRegStarting = ref(false);
+const factorRegStartError = ref('');
+const factorRegJob = ref(null);
+let unsubscribeFactorRegJob = null;
+
+onMounted(function () {
+  unsubscribeFactorRegJob = onSnapshot(doc(db, 'jobs', 'factorRegression'), function (snap) {
+    factorRegJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeFactorRegJob) unsubscribeFactorRegJob();
+});
+
+// job 的 status 只有 running／succeeded／failed（二元，完全失敗才會是
+// failed——某一個 label 訓練失敗但另一個成功，仍然算 succeeded，哪個
+// label 失敗看下面的訓練歷史表格，跟 run_log 裡「部分失敗」的文字紀錄
+// 是分開的兩件事，不是同一個狀態欄位）。
+const factorRegJobStatusLabel = computed(function () {
+  if (!factorRegJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[factorRegJob.value.status] || factorRegJob.value.status;
+});
+
+async function runFactorRegressionNow() {
+  factorRegStarting.value = true;
+  factorRegStartError.value = '';
+  try {
+    await callFn('runFactorRegression', {
+      l1Reg: Number(factorRegForm.value.l1Reg) || undefined
+    }, 1800000); // 跟後端 FACTOR_REGRESSION_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 1800 對齊
+  } catch (e) {
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      factorRegStartError.value = e.message || String(e);
+    }
+  } finally {
+    factorRegStarting.value = false;
+  }
+}
+
+const applyingTimestamp = ref('');
+const applyError = ref('');
+
+async function applyModel(timestamp) {
+  applyingTimestamp.value = timestamp;
+  applyError.value = '';
+  try {
+    await callFn('applyFactorModel', { timestamp: timestamp });
+  } catch (e) {
+    applyError.value = e.message || String(e);
+  } finally {
+    applyingTimestamp.value = '';
+  }
+}
 </script>
 
 <template>
@@ -186,10 +305,9 @@ async function runFactorScan() {
       <p v-if="startError" class="error-box">{{ startError }}</p>
       <p class="hint">
         進場區間最多 60 天（資料量太大單次跑不完，請分批）；
-        <code>factor_model_rank</code>／<code>hybrid</code> 需要先套用一版抗跌力
-        因子迴歸模型才能跑，這個功能還沒遷移到 Firebase（見 README「策略研究」
-        那節），目前這兩個策略會回報「需要先套用模型」的錯誤，請先用
-        <code>rule_v17</code>。
+        <code>factor_model_rank</code>／<code>hybrid</code> 需要先在下面的
+        「因子迴歸模型」訓練並套用一版抗跌力模型才能跑，沒套用的話這兩個
+        策略會回報「需要先套用模型」的錯誤，請先用 <code>rule_v17</code>。
       </p>
     </div>
 
@@ -314,6 +432,88 @@ async function runFactorScan() {
           </template>
         </template>
       </div>
+    </div>
+
+    <div class="form-card">
+      <h3>🧮 因子迴歸模型</h3>
+      <p class="hint">
+        用 BigQuery ML 的 LASSO 線性迴歸，從全部候選因子（含法人參與度／
+        趨勢分數／逢低接手率等 10 個基礎因子＋2 個動能時機因子＋36 個產業
+        資金流向因子）裡找出目前最能預測「後續 1 個月報酬率」跟「相對大盤
+        抗跌力」的組合。訓練出來的某一版套用後，上面的回測（以及正式戰報）
+        的 <code>factor_model_rank</code>／<code>hybrid</code> 策略才會真的
+        有模型可以用。建議每週跑一次就夠——因子有效性不會一天一天大幅變動。
+      </p>
+
+      <template v-if="activeModelSummary.length">
+        <h3 style="margin-top:0;">🌟 目前生效模型</h3>
+        <div v-for="m in activeModelSummary" :key="m.labelKey" class="card-body">
+          <div>
+            <strong>{{ m.labelName }}</strong>　執行時間 {{ m.timestamp }}　R²={{ m.r2 == null ? 'N/A' : Number(m.r2).toFixed(4) }}
+          </div>
+          <div>關鍵影響因子：{{ m.topFeatures.join('、') }}</div>
+        </div>
+      </template>
+      <p v-else class="hint">目前沒有套用任何一版因子迴歸模型。</p>
+
+      <h3 style="margin-top:16px;">執行本週因子迴歸</h3>
+      <label>L1 正規化強度（數字愈大，愈多因子的權重會被壓到 0）
+        <input v-model.number="factorRegForm.l1Reg" type="number" min="0" step="0.01" style="max-width:120px;">
+      </label>
+      <div class="form-actions">
+        <button type="button" :disabled="factorRegStarting" @click="runFactorRegressionNow">
+          {{ factorRegStarting ? '送出中...' : '開始訓練' }}
+        </button>
+      </div>
+      <p v-if="factorRegStartError" class="error-box">{{ factorRegStartError }}</p>
+      <div v-if="factorRegJob" class="run-log-status-card" style="margin-top:8px;">
+        <div class="run-log-status-card-top">
+          <span>執行狀態</span>
+          <span class="signal-badge" :style="{ color: jobStatusColor(factorRegJobStatusLabel) }">{{ factorRegJobStatusLabel }}</span>
+        </div>
+        <div class="hint">
+          <template v-if="factorRegJob.status === 'running'">還在訓練中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態（BigQuery ML 訓練通常要數分鐘）。</template>
+          <template v-else-if="factorRegJob.error">{{ factorRegJob.error }}</template>
+          <template v-else-if="factorRegJob.result">
+            {{ factorRegJob.result.timestamp }}：{{ factorRegJob.result.results.map(r => r.labelName + (r.error ? '失敗' : ('R²=' + (r.r2 == null ? 'N/A' : Number(r.r2).toFixed(4))))).join('、') }}
+          </template>
+        </div>
+      </div>
+      <p class="hint">
+        第一次訓練（或 BigQuery 的 <code>industry_map</code> 表從沒成功同步過）
+        會先自動刷新一次產業對照表，可能讓這次執行時間拉長；之後已經同步過
+        就不會每次都重抓（公司產業分類幾乎不會變動）。
+      </p>
+
+      <h3 style="margin-top:16px;">訓練歷史</h3>
+      <p v-if="factorModelHistoryError" class="error-box">{{ factorModelHistoryError }}</p>
+      <p v-else-if="applyError" class="error-box">{{ applyError }}</p>
+      <div v-if="factorModelRuns.length" class="table-wrap">
+        <table class="history-table">
+          <thead><tr><th>執行時間</th><th>結果</th><th>目前套用</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="run in factorModelRuns" :key="run.timestamp">
+              <td>{{ run.timestamp }}</td>
+              <td class="run-log-message">
+                <div v-for="l in run.labels" :key="l.labelKey">
+                  {{ FACTOR_LABEL_NAMES[l.labelKey] || l.labelKey }}：
+                  <template v-if="l.status && l.status.indexOf('失敗') !== -1">{{ l.status }}</template>
+                  <template v-else>R²={{ l.r2 == null ? 'N/A' : Number(l.r2).toFixed(4) }}</template>
+                </div>
+              </td>
+              <td>
+                <span v-if="run.labels.some(l => l.applied)" class="signal-badge" :style="{ color: 'var(--green)' }">✓ 套用中</span>
+              </td>
+              <td>
+                <button type="button" :disabled="applyingTimestamp === run.timestamp" @click="applyModel(run.timestamp)">
+                  {{ applyingTimestamp === run.timestamp ? '套用中...' : '套用這一版' }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-else class="hint">目前沒有任何訓練紀錄。</p>
     </div>
   </section>
 </template>

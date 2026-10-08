@@ -85,11 +85,25 @@ function rawTableRef_(bigQueryConfig) {
 }
 
 /** `industry_map` 的完整參照字串——跟 apps-script 版
- *  `BigQuerySync.gs bqIndustryMapTableRef_` 同一張表，給還沒遷移的
- *  FactorRegression.gs 因子特徵 view 將來 JOIN 用（見 README「策略研究」
- *  相關章節）。 */
+ *  `BigQuerySync.gs bqIndustryMapTableRef_` 同一張表，給
+ *  `lib/factorRegression.js buildFeatureViewSql_` 的因子特徵 view JOIN 用。 */
 function industryMapTableRef_(bigQueryConfig) {
   return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + INDUSTRY_MAP_TABLE;
+}
+
+var FEATURE_VIEW = 'factor_features'; // lib/factorRegression.js buildFeatureViewSql_ 建的 view
+var FEATURE_SNAPSHOT_TABLE = 'factor_features_snapshot'; // 訓練時凍結的一次性快照表
+
+/** 因子迴歸模型的特徵 view 完整參照字串——跟 apps-script 版 `bqFeatureViewRef_` 同一張。 */
+function featureViewRef_(bigQueryConfig) {
+  return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + FEATURE_VIEW;
+}
+
+/** 訓練兩個 label 用的一次性快照表完整參照字串——跟 apps-script 版
+ *  `bqFeatureSnapshotTableRef_` 同一張，見
+ *  `lib/factorRegression.js buildFeatureSnapshotSql_` 的說明。 */
+function featureSnapshotTableRef_(bigQueryConfig) {
+  return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + FEATURE_SNAPSHOT_TABLE;
 }
 
 /**
@@ -381,6 +395,8 @@ module.exports = {
   sourceRefForRead_: sourceRefForRead_,
   rawTableRef_: rawTableRef_,
   industryMapTableRef_: industryMapTableRef_,
+  featureViewRef_: featureViewRef_,
+  featureSnapshotTableRef_: featureSnapshotTableRef_,
   buildHistoryRangeSql_: buildHistoryRangeSql_,
   buildHistoryRowsForCodesSql_: buildHistoryRowsForCodesSql_,
   buildStockSearchSql_: buildStockSearchSql_,

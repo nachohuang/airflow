@@ -46,6 +46,7 @@ const backtestLib = require('./lib/backtest');
 const analysisLib = require('./lib/analysis');
 const industryMapLib = require('./lib/industryMap');
 const factorScanLib = require('./lib/factorScan');
+const factorRegressionLib = require('./lib/factorRegression');
 
 admin.initializeApp();
 
@@ -1163,6 +1164,210 @@ exports.runFactorCorrelationScan = onCall(BACKTEST_RUNTIME_OPTS_, async function
     await writeJobStatus_('factorScan', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
     throw e;
   }
+});
+
+/**
+ * 2026-10-08 新增：因子迴歸模型訓練，從 apps-script/src/FactorRegression.gs
+ * 搬過來（純函式 SQL 組字串見 lib/factorRegression.js，跟原始 apps-script
+ * 檔案逐函式 byte-for-byte 比對過，見 test/parity.test.js Parity 6）。對應
+ * apps-script 版 `runFactorRegression()`——對兩個 label（return1m／
+ * downsideResistance）各訓練一次 BigQuery ML LASSO 模型，結果各寫一筆到
+ * Firestore `factor_model_history`（跟 Phase 2 一次性遷移過去的舊資料
+ * 共用同一個 collection／doc ID 規則，見
+ * `lib/factorRegression.js buildFactorModelDocId_` 的說明）。
+ *
+ * 搬完這支，`factor_model_rank`／`hybrid` 這兩個戰報篩選策略（跟回測）
+ * 才真正有辦法訓練出一版模型可以套用——在這之前只能一直回報「需要先
+ * 套用模型」。
+ *
+ * 跟 apps-script 版的架構差異：
+ * - **沒有搬背景 job 狀態機**——同一套理由，Cloud Functions 一次同步
+ *   呼叫就能跑完，不需要 6 分鐘上限逼出來的分批機制，改用
+ *   `jobs/factorRegression` 搭配前端 `onSnapshot`。
+ * - **`ensureIndustryMapSyncedToBigQuery_` 檢查的是 Firestore
+ *   `jobs/industryMapRefresh` 的最近一次結果，不是 Script Properties**
+ *   ——因子特徵 view 裡 36 個「產業資金流向」候選因子都要 JOIN BigQuery
+ *   的 `industry_map` 表才有意義（見「策略研究（二）」那節），這裡沿用
+ *   apps-script 版 `ensureIndustryMapSyncedToBigQuery_` 同一個「自動
+ *   檢核」邏輯：如果從來沒有成功同步過，先自動跑一次「重新整理產業
+ *   對照表」，不用使用者自己記得要先手動點一次；已經成功同步過就直接
+ *   跳過（公司產業分類幾乎不會變動，沒必要每次訓練都重抓）。這裡失敗
+ *   不阻擋後續訓練繼續進行（吞掉錯誤），只是 industry_* 這組因子當下
+ *   沒有真實資料可用（COALESCE 成 0.5，訓練還是能正常跑，只是這些
+ *   因子暫時沒有訊號）——跟 apps-script 版的取捨完全一致。
+ * - **`timestampSecondsTaipei_`**（`lib/utils.js` 新增）：因子迴歸結果
+ *   的 Firestore 文件 ID 跟 Phase 2 遷移過去的舊資料共用同一套
+ *   `buildFactorModelDocId_` 規則，必須用跟 apps-script 版
+ *   `Utilities.formatDate(..., 'yyyy-MM-dd HH:mm:ss')` 完全一致的格式
+ *   （含秒），不能沿用既有的 `timestampLabelTaipei_`（那支是給 run_log／
+ *   AI 診斷用的「台股監控 ...」標籤格式，不含秒、有中文前綴）。
+ */
+
+/** 跟 apps-script 版 `ensureIndustryMapSyncedToBigQuery_` 同一個理由，
+ *  見上方區塊的完整說明。 */
+async function ensureIndustryMapSyncedToBigQuery_(bigQueryConfig) {
+  const snap = await admin.firestore().collection('jobs').doc('industryMapRefresh').get();
+  const lastResult = snap.exists ? snap.data() : null;
+  if (lastResult && lastResult.result && lastResult.result.bqSync && lastResult.result.bqSync.ok) return;
+  try {
+    await doRefreshIndustryMap_(bigQueryConfig);
+  } catch (e) { /* 見上方區塊說明：這裡失敗不阻擋後續訓練繼續進行 */ }
+}
+
+/** 確保 BigQuery 的因子特徵 view（`factor_features`）存在且是最新定義——
+ *  訓練前一定要先跑一次 `CREATE OR REPLACE VIEW`（每次都重建，不是只在
+ *  第一次建立），因為 view 的定義本身可能隨著這支程式的部署而改變。 */
+async function ensureFeatureView_(bigQueryConfig) {
+  await ensureIndustryMapSyncedToBigQuery_(bigQueryConfig);
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const rawTableRef = bigquery.rawTableRef_(bigQueryConfig);
+  const industryMapTableRef = bigquery.industryMapTableRef_(bigQueryConfig);
+  const viewRef = bigquery.featureViewRef_(bigQueryConfig);
+  await client.query({ query: factorRegressionLib.buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) });
+}
+
+/** 對單一 label 跑一次訓練＋評估＋取權重，對應 apps-script 版
+ *  `trainFactorModel_`。sourceRef 是這次訓練實際要讀的來源（同一次執行
+ *  對兩個 label 共用同一份快照表，見 `buildFeatureSnapshotSql_` 的
+ *  說明，避免 view 的特徵工程 SQL 被重跑兩次）。 */
+async function trainFactorModel_(bigQueryConfig, labelDef, l1Reg, sourceRef) {
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const modelRef = bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + factorRegressionLib.factorModelName_(labelDef.key);
+
+  await client.query({ query: factorRegressionLib.buildTrainModelSql_(modelRef, sourceRef, labelDef.column, config.FACTOR_CANDIDATE_COLUMNS, l1Reg) });
+  const [evalRows] = await client.query({ query: factorRegressionLib.buildEvaluateSql_(modelRef) });
+  const [weightRows] = await client.query({ query: factorRegressionLib.buildWeightsSql_(modelRef) });
+  const weights = factorRegressionLib.summarizeWeights_(weightRows);
+  const r2 = evalRows.length > 0 ? parseFloat(evalRows[0].r2_score) : null;
+
+  return {
+    labelKey: labelDef.key,
+    labelName: labelDef.name,
+    r2: r2,
+    weights: weights,
+    featureColumns: config.FACTOR_CANDIDATE_COLUMNS,
+    l1Reg: l1Reg
+  };
+}
+
+/** 把一次訓練結果（成功或失敗）寫進 Firestore `factor_model_history`，
+ *  跟 Phase 2 遷移過去的舊資料共用同一套 doc ID 規則（見
+ *  `lib/factorRegression.js buildFactorModelDocId_`）。失敗的那筆沒有
+ *  weights/r2，`status` 記錯誤訊息，成功的記「完成」——跟 apps-script 版
+ *  `runFactorRegression` 的 try/catch 行為一致：某一個 label 失敗不影響
+ *  另一個 label 正常寫入。`applied` 固定是 false（新訓練出來的版本預設
+ *  不自動套用，要使用者自己到前端按「套用」，見
+ *  `exports.applyFactorModel`）。 */
+async function writeFactorModelHistory_(timestamp, result) {
+  const docId = factorRegressionLib.buildFactorModelDocId_(timestamp, result.labelKey);
+  await admin.firestore().collection('factor_model_history').doc(docId).set({
+    timestamp: timestamp,
+    labelKey: result.labelKey,
+    l1Reg: result.l1Reg != null ? result.l1Reg : null,
+    featureColumns: result.featureColumns || [],
+    trainRows: null, // apps-script 版本身也沒有真的填這欄，見 trainFactorModel_ 的回傳值，照原樣保留
+    r2: result.error ? null : result.r2,
+    weights: result.error ? {} : result.weights,
+    status: result.error ? ('失敗：' + result.error) : '完成',
+    applied: false
+  });
+}
+
+/** 主流程：對兩個 label 各跑一次訓練，結果各寫一筆到
+ *  `factor_model_history`——對應 apps-script 版 `runFactorRegression()`。 */
+async function runFactorRegressionCore_(bigQueryConfig, l1Reg) {
+  await ensureFeatureView_(bigQueryConfig);
+
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const viewRef = bigquery.featureViewRef_(bigQueryConfig);
+  const snapshotRef = bigquery.featureSnapshotTableRef_(bigQueryConfig);
+  await client.query({ query: factorRegressionLib.buildFeatureSnapshotSql_(viewRef, snapshotRef) });
+
+  const reg = l1Reg || config.FACTOR_MODEL_L1_REG_DEFAULT;
+  const timestamp = utilsLib.timestampSecondsTaipei_();
+  const results = [];
+
+  for (const key of Object.keys(config.FACTOR_LABELS)) {
+    const labelDef = config.FACTOR_LABELS[key];
+    try {
+      const result = await trainFactorModel_(bigQueryConfig, labelDef, reg, snapshotRef);
+      await writeFactorModelHistory_(timestamp, result);
+      results.push(result);
+    } catch (e) {
+      const errResult = { labelKey: labelDef.key, labelName: labelDef.name, error: String(e.message || e) };
+      await writeFactorModelHistory_(timestamp, errResult);
+      results.push(errResult);
+    }
+  }
+
+  return { timestamp: timestamp, results: results };
+}
+
+/**
+ * `timeoutSeconds: 1800`／`memory: '2GiB'`：BQML 訓練（`CREATE MODEL` +
+ * `ML.EVALUATE` + `ML.WEIGHTS`，對兩個 label 各跑一輪，`max_iterations`
+ * 設到 BQML 允許的上限 49，見 `lib/factorRegression.js
+ * buildTrainModelSql_` 的說明）是這整個 App 最重的 BigQuery 操作，比
+ * 回測／每日戰報都重——這個開發環境沒辦法連上真正的 BigQuery 實際量測
+ * 一次訓練要多久，`runHistoryBackfill` 的 1800s 是目前這個 App 用過最高
+ * 的上限，保守沿用同一個值；真的在正式環境遇到逾時/OOM 再依實測調整。
+ */
+var FACTOR_REGRESSION_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '2GiB', timeoutSeconds: 1800 });
+
+exports.runFactorRegression = onCall(FACTOR_REGRESSION_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const l1Reg = data.l1Reg != null ? utilsLib.toNumber(data.l1Reg) : null;
+  const startTime = Date.now();
+  await writeJobStatus_('factorRegression', { status: 'running', startedAt: startTime, params: { l1Reg: l1Reg }, error: null });
+  try {
+    const appConfig = await fetchAppConfig_();
+    if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+      throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+    }
+    const result = await runFactorRegressionCore_(appConfig.bigQuery, l1Reg);
+    const durationMs = Date.now() - startTime;
+    const summaryMsg = result.results.map(function (r) {
+      return r.labelName + (r.error ? '：失敗（' + r.error + '）' : '：R²=' + (r.r2 == null ? 'N/A' : r.r2.toFixed(4)));
+    }).join('、');
+    const okCount = result.results.filter(function (r) { return !r.error; }).length;
+    await logRun_('因子迴歸', okCount === result.results.length ? '成功' : '部分失敗', summaryMsg, durationMs);
+    await writeJobStatus_('factorRegression', { status: 'succeeded', finishedAt: Date.now(), result: result, error: null });
+    return result;
+  } catch (e) {
+    await logRun_('因子迴歸', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('factorRegression', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+    throw e;
+  }
+});
+
+/**
+ * data: {timestamp}。把某一次「執行因子迴歸」（timestamp）產生的所有
+ * label 一起標記為「目前套用版本」，同時清掉其他所有版本（不管哪個
+ * label）的套用標記——對應 apps-script 版 `applyFactorModel`。套用刻意
+ * 做成「整個版本」等級的動作，不是兩個 label 各自獨立套用：原本可以
+ * 分開套用會導致「目前生效的到底是哪一版」沒有單一答案（例如 1個月報酬
+ * 用 A 版、抗跌力卻套用 B 版），使用者在畫面上完全看不出這種不一致。
+ */
+exports.applyFactorModel = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const timestamp = request.data && request.data.timestamp;
+  if (!timestamp) throw new HttpsError('invalid-argument', '缺少 timestamp');
+
+  const db = admin.firestore();
+  const snap = await db.collection('factor_model_history').get();
+  if (snap.empty) throw new HttpsError('not-found', '目前沒有任何因子迴歸訓練紀錄');
+
+  const batch = db.batch();
+  let matchedAny = false;
+  snap.docs.forEach(function (doc) {
+    const applied = doc.data().timestamp === timestamp;
+    if (applied) matchedAny = true;
+    batch.update(doc.ref, { applied: applied });
+  });
+  if (!matchedAny) throw new HttpsError('not-found', '找不到執行時間是 ' + timestamp + ' 的訓練紀錄');
+  await batch.commit();
+  return { ok: true };
 });
 
 /**

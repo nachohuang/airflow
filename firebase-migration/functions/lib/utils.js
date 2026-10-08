@@ -309,6 +309,27 @@ function timestampLabelTaipei_() {
   return '台股監控 ' + y + '-' + m + '-' + day + ' ' + h + ':' + min;
 }
 
+/** 2026-10-08 新增：'yyyy-MM-dd HH:mm:ss' 格式的台北時間字串（含秒）——跟
+ *  apps-script 版 FactorRegression.gs `runFactorRegression` 寫入
+ *  FactorModelHistory「執行時間」欄位用的
+ *  `Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss')`
+ *  同一個格式，也是 `migration/lib/normalize.js formatAsTaipei_` 遷移舊
+ *  資料時統一轉成的格式——新訓練出來的資料要用同一個格式，
+ *  `factor_model_history` 這個 collection 才能讓新舊資料共用同一套
+ *  `buildFactorModelDocId_` 文件 ID 規則（見 lib/factorRegression.js 的
+ *  說明）。跟 `timestampLabelTaipei_`／`todayStrTaipei_` 同一招「位移 8
+ *  小時再取 UTC 欄位」，只是多取秒數、不帶「台股監控」前綴。 */
+function timestampSecondsTaipei_() {
+  var d = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var day = String(d.getUTCDate()).padStart(2, '0');
+  var h = String(d.getUTCHours()).padStart(2, '0');
+  var min = String(d.getUTCMinutes()).padStart(2, '0');
+  var sec = String(d.getUTCSeconds()).padStart(2, '0');
+  return y + '-' + m + '-' + day + ' ' + h + ':' + min + ':' + sec;
+}
+
 /** yyyy-MM-dd 字串比較用的日期正規化（避免時區問題，純字串操作）。 */
 function normalizeDateStr(v) {
   if (v === null || v === undefined) return null;
@@ -351,5 +372,6 @@ module.exports = {
   pearsonCorrelation: pearsonCorrelation,
   normalizeDateStr: normalizeDateStr,
   todayStrTaipei_: todayStrTaipei_,
-  timestampLabelTaipei_: timestampLabelTaipei_
+  timestampLabelTaipei_: timestampLabelTaipei_,
+  timestampSecondsTaipei_: timestampSecondsTaipei_
 };

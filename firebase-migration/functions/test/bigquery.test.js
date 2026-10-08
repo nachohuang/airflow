@@ -244,6 +244,14 @@ const bq = require('../lib/bigquery');
   console.log('Test industryMapTableRef_ passed.');
 }
 
+// --- featureViewRef_／featureSnapshotTableRef_ ---
+{
+  const cfg = { projectId: 'my-proj', dataset: 'twse_factor_model' };
+  assert.strictEqual(bq.featureViewRef_(cfg), 'my-proj.twse_factor_model.factor_features');
+  assert.strictEqual(bq.featureSnapshotTableRef_(cfg), 'my-proj.twse_factor_model.factor_features_snapshot');
+  console.log('Test featureViewRef_／featureSnapshotTableRef_ passed.');
+}
+
 // --- buildSyncIndustryMapSql_ ---
 {
   const rows = [{ code: '1101', industry: '水泥工業' }, { code: '2330', industry: '半導體業' }];

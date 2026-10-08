@@ -9,7 +9,7 @@
  * 調整策略參數（例如 LIQUIDITY_MIN 門檻），直接改這份，不用回頭改 Apps
  * Script 那份。
  */
-module.exports = {
+var CONFIG = {
   // 策略參數（原本寫死在各 cell，後來集中管理）。
   STRATEGY: {
     LIQUIDITY_MIN: 40000000,
@@ -90,5 +90,82 @@ module.exports = {
     dividend_yield: '殖利率(%)',
     pe_ratio: '本益比',
     pb_ratio: '股價淨值比'
-  }
+  },
+
+  // ---- 2026-10-08 新增：FactorRegression.gs（因子迴歸模型）用的常數 ----
+  // 10 個基礎候選因子＋2 個「動能時機」候選因子（股票自己的價量資料就能算，
+  // 不需要產業對照表）——下面緊接著還會 push 進「產業資金流向」（24 個）／
+  // 「產業相對大盤強度」（12 個）候選因子，合計 48 個，跟 apps-script 版
+  // CONFIG.FACTOR_CANDIDATE_COLUMNS 的組成方式一致（見該檔案 Config.gs
+  // 367~382 行：先定義基礎清單，再用 forEach+push 把動態產生的欄位名稱
+  // 加進去，不是寫死整份清單——這裡沿用同一個「先宣告陣列，後面再 push」
+  // 寫法，不是為了跟 apps-script 像而像，是因為 industryFlowFactorName／
+  // industryRelMarketFactorName 這兩個函式要先定義好才能呼叫，物件字面量
+  // 裡沒辦法一邊定義自己的方法一邊呼叫它們）。
+  //
+  // 'inst_accum_divergence_20d'／'days_since_new_low' 只加進這裡（訓練用候選
+  // 因子），沒有加進上面的 BQ_FEATURE_TO_ANALYSIS_FIELD——跟 'industry_flow_*'
+  // 同一個理由（見下面 FACTOR_CANDIDATE_COLUMNS 註解）：這兩個因子的算法
+  // （橫斷面排名）不是 computeFactors_ 目前會算的量，要讓「今日戰報/回測」
+  // 的即時預測分數用上這兩個因子，需要在 computeFactors_ 另外補上對應計算，
+  // 這是獨立於「訓練」之外的下一步工作，不在這次範圍內。
+  FACTOR_CANDIDATE_COLUMNS: [
+    'inst_participation', 'inst_part_ma5', 'ibf_20d', 'trend_score', 'ma20_slope',
+    'vol_ratio', 'bias60', 'dividend_yield', 'pe_ratio', 'pb_ratio',
+    'inst_accum_divergence_20d', 'days_since_new_low'
+  ],
+
+  // 產業資金流向的候選因子矩陣：4 種法人類別 × 6 種移動平均窗口，跟
+  // apps-script 版 FactorRegression.gs buildFeatureViewSql_ 開頭的完整
+  // 說明一致（這裡不重複抄一次，見那支檔案）。
+  INDUSTRY_FLOW_INVESTOR_TYPES: [
+    { key: 'all', label: '三大法人合計', column: 'inst_net' },
+    { key: 'foreign', label: '外資', column: 'foreign_v' },
+    { key: 'trust', label: '投信', column: 'trust_v' },
+    { key: 'dealer', label: '自營商', column: 'dealer_v' }
+  ],
+  INDUSTRY_FLOW_WINDOWS: [1, 5, 10, 15, 30, 60],
+
+  industryFlowFactorName: function (typeKey, window) {
+    return 'industry_flow_' + typeKey + '_' + window + 'd';
+  },
+
+  // 「產業相對大盤買賣超強度」候選因子：'all'（三大法人合計）用完整 6 種
+  // 天期，其他分法人版本只用代表性的 1 天跟 20 天，避免候選因子數量從
+  // 24 個再翻倍到 48 個。
+  INDUSTRY_REL_MARKET_TYPE_WINDOWS: [1, 20],
+
+  industryRelMarketWindowsForType: function (typeKey) {
+    return typeKey === 'all' ? CONFIG.INDUSTRY_FLOW_WINDOWS : CONFIG.INDUSTRY_REL_MARKET_TYPE_WINDOWS;
+  },
+
+  industryRelMarketFactorName: function (typeKey, window) {
+    return 'industry_rel_mkt_' + typeKey + '_' + window + 'd';
+  },
+
+  // 兩個要預測的目標（label）：後續一個月的報酬率、相對大盤的抗跌力。
+  FACTOR_LABELS: {
+    RETURN_1M: { key: 'return1m', column: 'label_return_1m', name: '後續1個月報酬率' },
+    DOWNSIDE_RESISTANCE: { key: 'downsideResistance', column: 'label_downside_resistance', name: '相對大盤抗跌力' }
+  },
+
+  FACTOR_MODEL_L1_REG_DEFAULT: 0.05
 };
+
+// 把「產業資金流向」「產業相對大盤買賣超強度」候選因子欄位名稱 push 進候選
+// 因子清單——集中寫在這裡（跟 CONFIG 物件字面量本身分開），因為要呼叫
+// CONFIG.industryFlowFactorName 這個剛剛定義好的函式，見上面的說明。
+// 合計 4*6=24 個（產業資金流向）+ 6+3*2=12 個（產業相對大盤強度），
+// 跟 apps-script 版 Config.gs 完全對應。
+CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
+  CONFIG.INDUSTRY_FLOW_WINDOWS.forEach(function (w) {
+    CONFIG.FACTOR_CANDIDATE_COLUMNS.push(CONFIG.industryFlowFactorName(t.key, w));
+  });
+});
+CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
+  CONFIG.industryRelMarketWindowsForType(t.key).forEach(function (w) {
+    CONFIG.FACTOR_CANDIDATE_COLUMNS.push(CONFIG.industryRelMarketFactorName(t.key, w));
+  });
+});
+
+module.exports = CONFIG;

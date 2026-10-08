@@ -2590,3 +2590,108 @@ BigQuery ML 無關），`FactorRegression.gs` 是 726 行的 BigQuery ML LASSO
 - `FactorRegression.gs`（BigQuery ML LASSO 迴歸，726 行）本身還沒遷移
   ——`factor_model_rank`／`hybrid` 這兩個策略仍然不能用，因子相關性
   掃描只是獨立的研究輔助工具，不會自動把結果接進正式的因子模型訓練。
+
+## 2026-10-08：策略研究（四）——FactorRegression.gs 因子迴歸模型訓練遷移到 Firebase
+
+這是「策略研究：開工前的比對分析」裡規模最大、風險最高的一塊（726 行，
+BigQuery ML LASSO 訓練管線）。前三個階段（Backtest.gs／IndustryMap.gs／
+FactorScan.gs）都已經搬完，這裡是最後一塊——搬完之後 `factor_model_rank`／
+`hybrid` 這兩個戰報篩選策略（跟上面的回測）才真正有模型可以套用。
+
+### 架構對應
+
+- `functions/lib/factorRegression.js`（新檔案）：純函式邏輯，包含整段
+  `buildFeatureViewSql_`（因子特徵 view，10 個基礎因子＋2 個動能時機因子
+  ＋24 個產業資金流向因子＋12 個產業相對大盤強度因子，共 48 個候選因子）
+  逐行對照 apps-script 版照搬，`buildFeatureSnapshotSql_`／
+  `buildTrainModelSql_`／`buildEvaluateSql_`／`buildWeightsSql_`／
+  `summarizeWeights_`／`topWeightedFeatures_`／`factorModelName_`／
+  `buildIndustryCapitalFlowStatsSql_` 一併搬過來，新增
+  `buildFactorModelDocId_`（Firestore 文件 ID 規則，跟 Phase 2 一次性
+  遷移腳本的 `buildDocId_` 公式一致，新舊資料才能共用同一個
+  collection）。**這批函式用 `test/parity.test.js` 的 vm 技巧逐一跟
+  apps-script/src/FactorRegression.gs 的原始函式比對（Parity 6），SQL
+  組字串是字串完全相等斷言，不是「看起來差不多」——這是目前整個遷移
+  專案風險最高的一段 SQL（一大段多層 CTE 的 window function），字串
+  完全相等是能做到的最強驗證，彌補這個環境連不到真正 BigQuery、無法
+  實際執行驗證的缺口。**
+- `functions/lib/config.js` 新增 `FACTOR_CANDIDATE_COLUMNS`（48 個，
+  用跟 apps-script 版同一招「先宣告基礎清單，再用 forEach+push 動態
+  生成產業因子欄位名稱」組出來，不是手動寫死整份 48 項清單）、
+  `INDUSTRY_FLOW_INVESTOR_TYPES`／`INDUSTRY_FLOW_WINDOWS`／
+  `INDUSTRY_REL_MARKET_TYPE_WINDOWS`／`industryFlowFactorName`／
+  `industryRelMarketWindowsForType`／`industryRelMarketFactorName`／
+  `FACTOR_LABELS`／`FACTOR_MODEL_L1_REG_DEFAULT`。`BQ_FEATURE_TO_ANALYSIS_FIELD`
+  （推論時給 `computeWeightedFactorScore_` 查的對照表）**沒有擴充**
+  ——這是刻意的，見下面「設計決定」。
+- `functions/lib/bigquery.js` 新增 `featureViewRef_`／
+  `featureSnapshotTableRef_` 兩個表格參照字串 helper，跟既有的
+  `rawTableRef_`／`industryMapTableRef_` 同一個模式。
+- `functions/lib/utils.js` 新增 `timestampSecondsTaipei_`（'yyyy-MM-dd
+  HH:mm:ss' 格式，含秒）——因子迴歸結果的文件 ID 要跟 Phase 2 遷移過去
+  的舊資料共用同一套格式，不能沿用給 run_log／AI 診斷用的
+  `timestampLabelTaipei_`（那支不含秒、有中文前綴）。
+- `functions/index.js` 新增 I/O glue：`ensureIndustryMapSyncedToBigQuery_`
+  （訓練前自動檢核，見下面說明）、`ensureFeatureView_`（建立/更新因子
+  特徵 view）、`trainFactorModel_`（對單一 label 跑訓練＋評估＋取權重）、
+  `writeFactorModelHistory_`（寫進 Firestore `factor_model_history`）、
+  `runFactorRegressionCore_`（主流程，對兩個 label 各跑一次）。新增兩個
+  onCall：`exports.runFactorRegression`（訓練，沿用 `jobs/{jobKey}`
+  狀態追蹤模式）、`exports.applyFactorModel`（套用某一版，整個版本一起
+  套用／取消套用其他版本，不讓兩個 label 套用到不同版本）。
+- 前端 `ResearchView.vue` 新增「🧮 因子迴歸模型」卡片：目前生效模型摘要
+  （關鍵影響因子）、L1 正規化強度輸入＋訓練按鈕＋執行狀態、訓練歷史
+  表格（依執行時間分組，每筆可以按「套用這一版」）。
+
+### 設計決定
+
+- **沒有搬背景 job 狀態機**——跟這次遷移其他功能一致的理由：Cloud
+  Functions 一次同步呼叫就能跑完，不需要 Apps Script 6 分鐘上限逼出來
+  的分批機制。
+- **`ensureIndustryMapSyncedToBigQuery_` 檢查 Firestore `jobs/industryMapRefresh`
+  的最近一次結果，不是 Script Properties**：訓練前自動檢核 BigQuery 的
+  `industry_map` 表有沒有成功同步過，沒有就先自動刷新一次（見「策略
+  研究（二）」那節），不用使用者自己記得要先手動點一次。已經成功同步
+  過就跳過，失敗也不阻擋後續訓練（候選因子裡的產業因子當下只是拿不到
+  真實資料，COALESCE 成中性值 0.5，不影響其他因子正常訓練）——跟
+  apps-script 版的取捨完全一致。
+- **`BQ_FEATURE_TO_ANALYSIS_FIELD` 刻意沒有擴充到 48 個候選因子**：
+  產業資金流向／產業相對大盤強度／動能時機這 38 個因子是當天全市場
+  橫斷面 window function 算出來的（SQL 查詢階段的概念），跟
+  `computeFactors_`（JS，逐股票算技術因子）不是同一種計算模型——要讓
+  「今日戰報/回測」的即時預測分數用上這些因子，需要在 `computeFactors_`
+  另外補上對應的橫斷面計算邏輯，這是獨立於「訓練」之外的工作，風險
+  也完全不同（牽涉到會不會改壞現有戰報/回測的既有計算），不在這次
+  範圍內。這不是遺漏：`computeWeightedFactorScore_`（`lib/factorModel.js`，
+  Phase 2 就已經搬好）原本就有「查不到對照就跳過那一項」的防呆邏輯
+  （見該函式說明），這些因子就算被 LASSO 選中且權重不是 0，也只是
+  「暫時不會真的貢獻進即時預測分數」，不會出錯、也不會讓預測分數變成
+  null。apps-script 版原始碼的 Config.gs 註解明確記載了同一個範圍
+  界線跟同一個理由，這裡不是這次遷移才發明的妥協，是照搬原作者已經
+  做過的判斷。
+- **`memory: '2GiB'`／`timeoutSeconds: 1800`**（`FACTOR_REGRESSION_RUNTIME_OPTS_`）
+  ：BQML 訓練（`CREATE MODEL`＋`ML.EVALUATE`＋`ML.WEIGHTS`，對兩個 label
+  各跑一輪，`max_iterations` 設到 BQML 允許的上限 49）是這整個 App 最重
+  的 BigQuery 操作，這個開發環境沒辦法連上真正的 BigQuery 實際量測，
+  沿用 `runHistoryBackfill` 用過的最高上限（1800s）保守估計，正式環境
+  真的遇到逾時/OOM 再依實測調整。
+- **沒有搬 `getIndustryFlowFactorOptions`／`getIndustryCapitalFlowFactorStats`
+  這組診斷工具**（apps-script 版「檢查某個產業資金流向因子的資料分佈，
+  判斷它權重是 0 到底是真的沒用還是資料本身有問題」）：這是訓練結果
+  出來之後才會用到的進階除錯工具，不是訓練本身的必要路徑，先把訓練＋
+  套用這個核心迴圈搬完、確認能跑，這組工具留給下一輪需要時再補。
+
+### 還沒做的事
+
+- `BQ_FEATURE_TO_ANALYSIS_FIELD` 的 38 個因子缺口（見上面「設計決定」）
+  ——如果訓練結果顯示某個產業因子真的有效（R² 貢獻明顯、權重不是 0），
+  下一步才值得投入去幫 `computeFactors_` 補上對應的橫斷面計算邏輯，
+  讓即時預測分數也用得上。
+- `getIndustryFlowFactorOptions`／`getIndustryCapitalFlowFactorStats`
+  診斷工具（見上面「設計決定」）。
+- 這個開發環境連不到真正的 BigQuery，`buildFeatureViewSql_` 等 SQL
+  組字串只在「跟 apps-script 原始碼字串完全相等」這個層級驗證過（見
+  `test/parity.test.js` Parity 6），沒辦法確認這段 SQL 在真實 BigQuery
+  上執行會不會报錯/跑多久——需要部署後在正式環境手動按一次「開始訓練」
+  才能真正驗證整條管線（抓資料→建 view→訓練→評估→取權重→寫入
+  Firestore）跑得通。

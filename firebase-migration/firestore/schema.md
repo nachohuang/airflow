@@ -160,23 +160,39 @@ Firestore 版本一樣要在 Cloud Function 層做，Firestore Security Rules �
 
 ---
 
-## 7. `factor_scan_results/{runId}`、`factor_model_history/{runId}`
+## 7. `factor_model_history/{docId}`
 
-兩張都是「背景工作跑完的結果快取」，結構直接對應
-`FACTOR_SCAN` / `FACTOR_MODEL_COLUMNS` 現行欄位定義，文件 ID 用執行批次的
-時間戳記或 UUID。這兩張非即時關鍵、也不常查詢，Phase 2 不急著遷，排在
-Phase 3 跟對應的背景工作邏輯（`FactorRegression.gs`）一起搬（因為欄位是
-那幾支背景工作自己寫出來的，邏輯沒搬完之前，資料格式都還可能因為順便
-重構而調整）。`factor_model_history` 已經在用（`fetchAppliedFactorModels_`
-讀取已套用的因子模型，`runDailyAnalysis_`／回測都會查詢），只是寫入端
-（迴歸模型訓練本身）還沒遷移。
+結構對應 apps-script 版 `FACTOR_MODEL_COLUMNS`（英文化欄名，見下表），
+文件 ID 用 `timestamp`＋`labelKey` 組出來（`lib/factorRegression.js
+buildFactorModelDocId_`，Phase 2 一次性遷移腳本跟 2026-10-08 之後新訓練
+出來的資料共用同一套公式）。
 
-2026-10-08：原本列在這裡的 `backtest_results/{runId}` **不需要建立**
-——`Backtest.gs` 遷移到 Firebase 後確認：apps-script 版本身也沒有把回測
-結果持久化到 Sheet，只存在 Script Properties 的背景 job 狀態裡（跑完
-下一次就覆蓋），Firebase 版用 `jobs/backtest`（同樣每次覆蓋，不是歷史
-紀錄）維持跟原本行為一致，見 `firebase-migration/README.md`「策略研究
-（一）——Backtest.gs 回測功能遷移到 Firebase」一節。
+| 欄位 | 型別 |
+| :-- | :-- |
+| `timestamp` | `string`（`'YYYY-MM-DD HH:mm:ss'`，台北時間） |
+| `labelKey` | `string`（`'return1m'` \| `'downsideResistance'`） |
+| `l1Reg` | `number` |
+| `featureColumns` | `string[]`（候選因子欄位名稱清單） |
+| `trainRows` | `number` \| `null`（apps-script 版本身也沒有真的填這欄，照原樣保留） |
+| `r2` | `number` \| `null` |
+| `weights` | `{[bqFeatureName]: number}` |
+| `status` | `string`（`'完成'` 或 `'失敗：...'`） |
+| `applied` | `boolean` |
+
+2026-10-08：寫入端（`exports.runFactorRegression`／`exports.applyFactorModel`，
+見 `firebase-migration/README.md`「策略研究（四）——FactorRegression.gs
+因子迴歸模型訓練遷移到 Firebase」一節）已經遷移完成，這張表現在是
+「讀寫都在 Firebase」的正式表，不再只是 Phase 2 一次性遷移過去的唯讀
+歷史資料。
+
+原本列在這裡的 `factor_scan_results/{runId}`／`backtest_results/{runId}`
+**都不需要建立**——apps-script 版的 `FactorScan.gs`／`Backtest.gs` 本身
+都沒有把結果持久化到 Sheet（回測結果存在 Script Properties 的背景 job
+狀態，跑完下一次就覆蓋；因子掃描更單純，直接把結果回傳給前端，從來沒有
+寫過任何 Sheet），Firebase 版分別用 `jobs/backtest`／`jobs/factorScan`
+（同樣每次覆蓋，不是歷史紀錄）維持跟原本行為一致，見
+`firebase-migration/README.md`「策略研究（一）——Backtest.gs 回測功能
+遷移到 Firebase」一節。
 
 ---
 
