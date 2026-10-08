@@ -2467,6 +2467,12 @@ var FINANCIALS_BACKFILL_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { timeo
  * 隨機抽樣這些既有的資料檢查 UI 不用另外做一份，兩種來源的資料都會
  * 自動顯示在同一份月曆/抽樣表格裡（抽樣表格可以用 `source` 欄位分辨
  * 這筆是哪個來源抓到的）。
+ *
+ * 2026-10-08 補充：commit d6d94e8 把 `MOPS_BACKFILL_MARKETS_` 改成只抓
+ * 上市之後，這支連續兩次部署都撞上 Cloud Run 配額健康檢查失敗，
+ * `rerun_failed_jobs` 重跑時又被 Firebase CLI 誤判成「內容沒變」而跳過
+ * （見 `getFinancialsCoverage` 上方那段更完整的說明）——這段註解一樣是
+ * 刻意改變原始碼雜湊，逼這支真的重新部署一次，不是單純的裝飾文字。
  */
 exports.runFinancialsBackfillMops = onCall(FINANCIALS_BACKFILL_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
@@ -2549,6 +2555,8 @@ async function cleanupMopsBackfillOtcRows_(bigQueryConfig) {
   return { deletedCount: toDelete.length, remainingCount: monthlySnap.size - toDelete.length, bqSync: bqSync };
 }
 
+// 2026-10-08 補充：同一個「rerun_failed_jobs 被 Firebase CLI 誤判成無
+// 變更而跳過」問題，見 exports.runFinancialsBackfillMops 上方的說明。
 exports.cleanupFinancialsNonListedCodes = onCall(RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   try {
