@@ -2500,3 +2500,41 @@ prop（型別 `[{date, reason}]`），由 `AdminView.vue` 傳入——那邊「�
   測試層級驗證過字串/邏輯本身，沒辦法在這裡實際跑一次確認 TWSE 回傳的
   真實欄位名稱跟預期一致，需要部署後在正式環境手動按一次「重新整理產業
   對照表」才能真正驗證。
+
+## 2026-10-08：「標示已賣出」支援部分賣出（新增賣出股數欄位）
+
+使用者看到「標示已賣出」表單只有賣出日期／賣出價格，回報少了可以輸入
+「賣出單位數」的地方——原本 apps-script 版跟 Firebase 版都刻意不支援
+部分賣出（舊版註解明講：想部分獲利了結要先手動刪除想保留的買進紀錄，
+只結案剩下的那幾筆，算是進階用法），這次改成直接在表單上加一個選填的
+「賣出股數」欄位，由後端處理部分賣出的邏輯，不用使用者自己先手動拆
+買進紀錄。
+
+### 設計
+
+- **FIFO（先進先出）**：`lib/portfolioOps.js` 新增 `planPartialClose_`
+  純函式，依買進日期由舊到新，依序把整筆 lot 標記賣出，直到剩下的賣出
+  股數不夠賣掉下一筆完整的 lot，就把那一筆「就地切開」成「已賣出的
+  部分」跟「繼續持有的部分」兩筆文件。不用使用者自己指定要賣哪一筆
+  買進紀錄（維持這個表單原本「選一檔股票就好」的簡單操作），FIFO 也是
+  股票庫存管理最常見的預設慣例。
+- **留空＝整檔全部結案，行為跟改之前完全一樣**：`sellShares` 不帶、是
+  空字串，或剛好等於目前總股數，都視為「全部賣出」，直接沿用原本
+  `fullyClosedIds` 涵蓋所有 lot 的路徑，不會因為新增這個欄位讓最常見的
+  「整檔賣掉」操作多一個步驟。
+- **切開的 lot 用 Firestore 自動產生的新文件 ID**：`exports.closePortfolioPosition`
+  把原本那筆 lot 的 `shares` 改成剩下的股數（繼續 `status: 'holding'`），
+  另外用 `savePortfolioItem` 新增買進紀錄同一個「`db.collection('portfolio_lots').doc()`
+  產生新 ID 當 `transactionId`」寫法，新增一筆 `status: 'sold'` 的文件。
+  `buildClosedHistory_` 本來就是依 `code+sellDate+sellPrice` 分組算已
+  實現損益，這筆新拆出來的「已賣出」文件會自然跟同一次結案動作分在
+  同一組，不需要改 `buildClosedHistory_` 本身。
+- **驗證失敗整批放棄，不會部分寫入**：賣出股數 `<=0` 或超過目前總股數，
+  `planPartialClose_` 直接回傳 `error`，`exports.closePortfolioPosition`
+  在送出任何 Firestore batch 寫入之前就先擋下來拋 `invalid-argument`，
+  不會有「寫到一半」的中間狀態。
+- 寫 `planPartialClose_` 的測試時抓到一個邊界案例：賣出股數剛好等於
+  前面幾筆 lot 的加總（例如兩筆各 1000 股，賣 1000 股）時，迴圈最後一輪
+  `remaining` 已經歸零，原本的寫法還是會走進「切 lot」那個分支，對下一筆
+  lot 生出一個 `soldShares: 0` 的假 `partialLot`——加上 `remaining > 0`
+  的迴圈條件後修正，測試案例已經涵蓋這個情境。

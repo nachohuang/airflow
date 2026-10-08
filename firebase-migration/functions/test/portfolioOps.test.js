@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { buildPortfolioCards_, buildClosedHistory_ } = require('../lib/portfolioOps');
+const { buildPortfolioCards_, buildClosedHistory_, planPartialClose_ } = require('../lib/portfolioOps');
 
 // --- 1. buildPortfolioCards_：同一檔股票分批買進 -> 一張卡片、加權平均成本、lots 依買進日排序 ---
 {
@@ -55,6 +55,56 @@ const { buildPortfolioCards_, buildClosedHistory_ } = require('../lib/portfolioO
   assert.strictEqual(tsmcGroup.realizedPct, 20, '(12-10)/10*100 = 20');
   assert.strictEqual(tsmcGroup.realizedAmount, 4000, '(12-10)*2000 = 4000');
   console.log('Test 2 (buildClosedHistory_ groups sold lots and computes realized P&L) passed.');
+}
+
+// --- 3. planPartialClose_：sellShares 空值／等於總股數 -> 全部賣出（維持原本行為） ---
+{
+  const lots = [{ id: 'old', buyDate: '2026-01-01', shares: 1000 }, { id: 'new', buyDate: '2026-02-01', shares: 1000 }];
+  assert.deepStrictEqual(
+    planPartialClose_(lots, null),
+    { fullyClosedIds: ['old', 'new'], partialLot: null, error: null },
+    'sellShares 是 null 要等同「全部賣出」，不是當成 0'
+  );
+  assert.deepStrictEqual(planPartialClose_(lots, undefined).fullyClosedIds, ['old', 'new']);
+  assert.deepStrictEqual(planPartialClose_(lots, '').fullyClosedIds, ['old', 'new'], '空字串也要當成全部賣出');
+  assert.deepStrictEqual(
+    planPartialClose_(lots, 2000),
+    { fullyClosedIds: ['old', 'new'], partialLot: null, error: null },
+    '剛好等於總股數，整批賣出，不應該切出 partialLot'
+  );
+  console.log('Test 3 (planPartialClose_ treats blank/total sellShares as sell-everything) passed.');
+}
+
+// --- 4. planPartialClose_：FIFO 切 lot ---
+{
+  const lots = [{ id: 'old', buyDate: '2026-01-01', shares: 1000 }, { id: 'new', buyDate: '2026-02-01', shares: 1000 }];
+  // 剛好賣掉最舊那一筆的全部，不多不少 -> 不需要切 lot
+  assert.deepStrictEqual(
+    planPartialClose_(lots, 1000),
+    { fullyClosedIds: ['old'], partialLot: null, error: null }
+  );
+  // 比最舊那一筆多一點 -> 最舊那筆整筆賣掉，第二筆要切開
+  assert.deepStrictEqual(
+    planPartialClose_(lots, 1200),
+    { fullyClosedIds: ['old'], partialLot: { id: 'new', soldShares: 200, remainingShares: 800 }, error: null }
+  );
+  // 比最舊那一筆少 -> 最舊那筆直接被切開，第二筆完全不動
+  assert.deepStrictEqual(
+    planPartialClose_(lots, 300),
+    { fullyClosedIds: [], partialLot: { id: 'old', soldShares: 300, remainingShares: 700 }, error: null }
+  );
+  console.log('Test 4 (planPartialClose_ FIFO: closes oldest lots fully, splits the lot where the cutoff falls) passed.');
+}
+
+// --- 5. planPartialClose_：不合法的賣出股數 ---
+{
+  const lots = [{ id: 'a', buyDate: '2026-01-01', shares: 1000 }];
+  assert.ok(planPartialClose_(lots, 0).error, '0 股要回報錯誤');
+  assert.ok(planPartialClose_(lots, -100).error, '負數要回報錯誤');
+  const tooMany = planPartialClose_(lots, 1500);
+  assert.ok(tooMany.error && tooMany.error.indexOf('超過目前總股數') !== -1, '超過總股數要回報錯誤，不能部分執行');
+  assert.deepStrictEqual(tooMany.fullyClosedIds, [], '驗證失敗不該回傳任何要關閉的 lot');
+  console.log('Test 5 (planPartialClose_ rejects <=0 and over-total sellShares without partial side effects) passed.');
 }
 
 console.log('All portfolioOps.js tests passed.');

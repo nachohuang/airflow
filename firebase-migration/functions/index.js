@@ -1493,9 +1493,22 @@ exports.deletePortfolioLot = onCall(LIGHT_RUNTIME_OPTS_, async function (request
   return await buildPortfolioResult_();
 });
 
-/** data: {code, sellDate, sellPrice}。把某檔股票目前所有「持有中」的紀錄一次性
- *  標記為已賣出（用同一個賣出日期/價格），不支援部分賣出（對應 apps-script 版
- *  closePortfolioPosition 的說明）。 */
+/**
+ * data: {code, sellDate, sellPrice, sellShares?}。把某檔股票目前持有中的
+ * 紀錄標記為已賣出（用同一個賣出日期/價格）。`sellShares` 不帶、是空字串，
+ * 或等於目前總股數，維持原本「整檔一次全部結案」的行為；帶一個小於總
+ * 股數的數字，就依 FIFO（先進先出，見 `portfolioOpsLib.planPartialClose_`
+ * 的說明）只結案那麼多股——2026-10-08 使用者在「標示已賣出」表單明確
+ * 要求要能輸入賣出股數，不是只能整檔全賣。
+ *
+ * FIFO 切到某一筆 lot 中間時，那一筆會被拆成兩筆文件：原本那筆改成
+ * `shares` 剩下的部分、繼續 `status: 'holding'`；另外新增一筆
+ * `status: 'sold'`、`shares` 是賣掉的那部分——跟 `savePortfolioItem`
+ * 新增買進紀錄同一個「用 Firestore 自動產生的文件 ID 當 transactionId」
+ * 寫法。`buildClosedHistory_` 依 `code+sellDate+sellPrice` 分組算已實現
+ * 損益，這筆新拆出來的「已賣出」文件自然會跟同一次結案動作的其他筆分在
+ * 同一組，不需要額外處理。
+ */
 exports.closePortfolioPosition = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
@@ -1508,10 +1521,35 @@ exports.closePortfolioPosition = onCall(LIGHT_RUNTIME_OPTS_, async function (req
   const db = admin.firestore();
   const snap = await db.collection('portfolio_lots').where('code', '==', code).where('status', '==', 'holding').get();
   if (snap.empty) throw new HttpsError('not-found', '找不到 ' + code + ' 目前持有中的買進紀錄');
+
+  const lots = snap.docs
+    .map(function (doc) { return { id: doc.id, ref: doc.ref, data: doc.data() }; })
+    .sort(function (a, b) { return (a.data.buyDate || '') < (b.data.buyDate || '') ? -1 : 1; }); // FIFO：買進日期由舊到新
+
+  const plan = portfolioOpsLib.planPartialClose_(
+    lots.map(function (l) { return { id: l.id, shares: l.data.shares }; }),
+    data.sellShares
+  );
+  if (plan.error) throw new HttpsError('invalid-argument', plan.error);
+
+  const byId = {};
+  lots.forEach(function (l) { byId[l.id] = l; });
   const batch = db.batch();
-  snap.docs.forEach(function (doc) {
-    batch.update(doc.ref, { status: 'sold', sellDate: data.sellDate, sellPrice: sellPrice });
+  plan.fullyClosedIds.forEach(function (id) {
+    batch.update(byId[id].ref, { status: 'sold', sellDate: data.sellDate, sellPrice: sellPrice });
   });
+  if (plan.partialLot) {
+    const target = byId[plan.partialLot.id];
+    batch.update(target.ref, { shares: plan.partialLot.remainingShares });
+    const newRef = db.collection('portfolio_lots').doc();
+    batch.set(newRef, Object.assign({}, target.data, {
+      transactionId: newRef.id,
+      shares: plan.partialLot.soldShares,
+      status: 'sold',
+      sellDate: data.sellDate,
+      sellPrice: sellPrice
+    }));
+  }
   await batch.commit();
   return await buildPortfolioResult_();
 });

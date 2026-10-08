@@ -110,7 +110,69 @@ function buildClosedHistory_(lotDocs) {
   return groups;
 }
 
+/**
+ * 2026-10-08 新增：「標示已賣出/結案」支援部分賣出——使用者明確要求在結案
+ * 表單上要能輸入「賣出股數」，不是只能整檔一次全部結案（原本 apps-script／
+ * Firebase 版都刻意不支援部分賣出，要部分獲利了結得先手動刪除想保留的
+ * 買進紀錄，見 `exports.closePortfolioPosition` 原本的說明）。
+ *
+ * 策略是 FIFO（先進先出）：依買進日期由舊到新，依序把整筆 lot 標記賣出，
+ * 直到剩下的賣出股數不夠賣掉下一筆完整的 lot，那一筆就地切成「已賣出的
+ * 部分」跟「繼續持有的部分」兩筆——不需要使用者自己指定要賣哪一筆，維持
+ * 這個表單原本「選一檔股票就好」的簡單操作方式，也是股票庫存管理最常見
+ * 的預設慣例。
+ *
+ * lots：這檔股票目前持有中的 lots，呼叫端必須先依 buyDate 由舊到新排序好
+ * （純函式不自己排序，排序規則留給呼叫端決定，這裡只信任傳進來的順序）。
+ * sellShares：null/undefined/空字串代表「全部賣出」（維持原本整檔結案的
+ * 行為，呼叫端可以直接拿舊版的語意不用另外判斷）；等於全部持股加總也是
+ * 一樣的效果，只是要先算出 totalShares 才知道兩者相等。
+ *
+ * 回傳 `{ fullyClosedIds, partialLot, error }`：
+ *   - error 非 null 代表賣出股數不合法（<=0 或超過目前總股數），呼叫端
+ *     應該整個放棄這次操作，不要寫入任何東西。
+ *   - fullyClosedIds：要整筆標記賣出的 lot id 清單。
+ *   - partialLot：`{id, soldShares, remainingShares}` 或 null（沒有任何
+ *     一筆需要切開，例如全部賣出，或賣出股數剛好等於前面幾筆的加總）。
+ */
+function planPartialClose_(lots, sellShares) {
+  var safeLots = lots || [];
+  var totalShares = safeLots.reduce(function (sum, l) { return sum + (Number(l.shares) || 0); }, 0);
+
+  if (sellShares === null || sellShares === undefined || sellShares === '') {
+    return { fullyClosedIds: safeLots.map(function (l) { return l.id; }), partialLot: null, error: null };
+  }
+
+  var target = Number(sellShares);
+  if (!target || target <= 0) return { fullyClosedIds: [], partialLot: null, error: '賣出股數必須大於 0' };
+  if (target > totalShares) {
+    return { fullyClosedIds: [], partialLot: null, error: '賣出股數（' + target + '）超過目前總股數（' + totalShares + '）' };
+  }
+  if (target === totalShares) {
+    return { fullyClosedIds: safeLots.map(function (l) { return l.id; }), partialLot: null, error: null };
+  }
+
+  var fullyClosedIds = [];
+  var remaining = target;
+  for (var i = 0; i < safeLots.length && remaining > 0; i++) {
+    var lot = safeLots[i];
+    var lotShares = Number(lot.shares) || 0;
+    if (remaining >= lotShares) {
+      fullyClosedIds.push(lot.id);
+      remaining -= lotShares;
+    } else {
+      return {
+        fullyClosedIds: fullyClosedIds,
+        partialLot: { id: lot.id, soldShares: remaining, remainingShares: lotShares - remaining },
+        error: null
+      };
+    }
+  }
+  return { fullyClosedIds: fullyClosedIds, partialLot: null, error: null };
+}
+
 module.exports = {
   buildPortfolioCards_: buildPortfolioCards_,
-  buildClosedHistory_: buildClosedHistory_
+  buildClosedHistory_: buildClosedHistory_,
+  planPartialClose_: planPartialClose_
 };

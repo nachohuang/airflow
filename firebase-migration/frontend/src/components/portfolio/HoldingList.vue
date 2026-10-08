@@ -79,7 +79,11 @@ async function deleteLot(lotId) {
 }
 
 function openCloseForm(card) {
-  closeForm.value = { code: card.code, sellDate: '', sellPrice: '' };
+  // sellShares 預設空白＝整檔全部結案（維持原本最常見的操作），要部分獲利
+  // 了結才需要填這一格——見 closePortfolioPosition／planPartialClose_ 的
+  // 說明：有填且小於 totalShares 才會部分結案，填了但等於 totalShares
+  // 效果跟留空一樣。totalShares 放在表單上給使用者對照，不是送出的欄位。
+  closeForm.value = { code: card.code, totalShares: card.totalShares, sellDate: '', sellPrice: '', sellShares: '' };
 }
 
 async function submitClose() {
@@ -89,7 +93,8 @@ async function submitClose() {
     items.value = await callFn('closePortfolioPosition', {
       code: closeForm.value.code,
       sellDate: closeForm.value.sellDate,
-      sellPrice: Number(closeForm.value.sellPrice)
+      sellPrice: Number(closeForm.value.sellPrice),
+      sellShares: closeForm.value.sellShares === '' ? undefined : Number(closeForm.value.sellShares)
     });
     closeForm.value = null;
   } catch (e) {
@@ -144,6 +149,13 @@ onMounted(load);
       <label>賣出價格
         <input v-model="closeForm.sellPrice" type="number" step="0.01" required>
       </label>
+      <label>賣出股數（選填，目前總股數 {{ closeForm.totalShares }}）
+        <input v-model="closeForm.sellShares" type="number" step="1" min="1" :max="closeForm.totalShares" :placeholder="'留空＝全部賣出（' + closeForm.totalShares + ' 股）'">
+      </label>
+      <p class="hint">
+        留空就是整檔全部結案；填小於目前總股數的數字則只結案那麼多股（依
+        先進先出，從最早買進的那幾筆開始算），其餘股數維持持有中。
+      </p>
       <div class="form-actions">
         <button type="submit">確認結案</button>
         <button type="button" @click="closeForm = null">取消</button>
