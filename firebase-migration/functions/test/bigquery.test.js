@@ -347,7 +347,18 @@ const bq = require('../lib/bigquery');
   assert.ok(sql.indexOf('(SELECT MAX(') === -1, '不應該再出現舊版那種 JOIN ON 子句裡的相關子查詢寫法');
   assert.ok(sql.indexOf('fundamental_gross_margin_streak') !== -1);
   assert.ok(sql.indexOf('fundamental_revenue_growth_streak') !== -1);
-  console.log('Test buildFundamentalFeatureViewSql_ (layers on top of base view, point-in-time as-of join via ARRAY_AGG not correlated subquery-in-JOIN, exposes all 10 fundamental columns) passed.');
+  // 2026-10-08 再修正：財報資料覆蓋率實測是真的 0 筆（跟 factor_features
+  // 的歷史日期範圍幾乎沒有重疊），BigQuery ML 訓練時想用 mean imputation
+  // 處理這些欄位的 NULL，結果連平均值都算不出來而整個報錯「Failed to
+  // calculate mean since the entries in corresponding column
+  // 'fundamental_gross_margin_pct' are all NULLs.」——改成在這裡明確
+  // COALESCE 成 0（跟 inst_accum_divergence_20d 同一個既有慣例），不管
+  // 覆蓋率是 0 還是部分覆蓋都一定有值，不依賴 BigQuery ML 的自動插補。
+  assert.ok(sql.indexOf('COALESCE(base_fr.fr.gross_margin_pct, 0) AS fundamental_gross_margin_pct') !== -1, '財報因子缺值要 COALESCE 成 0，不能留 NULL（否則覆蓋率是 0 時 BQML mean imputation 會直接報錯）');
+  assert.ok(sql.indexOf('COALESCE(base_fr.fr.roe_streak, 0) AS fundamental_roe_streak') !== -1);
+  assert.ok(sql.indexOf('COALESCE(base_rev.rev.revenue_yoy_pct, 0) AS fundamental_revenue_yoy_pct') !== -1);
+  assert.ok(sql.indexOf('COALESCE(base_rev.rev.revenue_growth_streak, 0) AS fundamental_revenue_growth_streak') !== -1);
+  console.log('Test buildFundamentalFeatureViewSql_ (layers on top of base view, point-in-time as-of join via ARRAY_AGG not correlated subquery-in-JOIN, exposes all 10 fundamental columns, missing values COALESCEd to 0) passed.');
 }
 
 console.log('All bigquery.js tests passed.');

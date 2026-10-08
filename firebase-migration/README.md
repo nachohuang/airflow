@@ -3102,3 +3102,44 @@ NULL」，訓練用的快照表篩完變成 0 筆。
 區分度）——這是預期中的過渡狀態，不是 bug，會隨季報資料逐季累積、
 真實覆蓋率提高而改善（覆蓋率提高後，插補的比例下降，這幾個因子才有
 機會顯示出真正的預測力）。
+
+### 2026-10-08 再追加：mean imputation 本身也失敗——覆蓋率是真的 0
+
+上面那個修正部署上線後，使用者重新點「開始訓練」，兩個 label 都
+從「0 筆資料」進展到一個新錯誤：
+
+```
+Failed to calculate mean since the entries in corresponding column
+'fundamental_gross_margin_pct' are all NULLs.
+```
+
+原因：上一個修正假設的是「`fundamental_*` 覆蓋率低，但不是 0」，讓
+BigQuery ML 的 mean imputation 處理那些少數缺值的列。但實測發現現在
+`financial_ratios` 這張表的資料跟 `factor_features` 的歷史日期範圍
+幾乎完全沒有重疊（覆蓋率是真的 0 筆，不是「低」），`fundamental_
+gross_margin_pct` 這一整欄在快照表裡沒有任何一筆非 NULL 值——
+mean imputation 需要先算出欄位的平均值才能拿去填補 NULL，一整欄全是
+NULL 時平均值這個概念根本不存在，BigQuery ML 直接報錯，不是「優雅
+退化」成某個預設值。
+
+修正：不再依賴 BigQuery ML 的自動插補，改在 `buildFundamentalFeatureViewSql_`
+（`lib/bigquery.js`）的 SELECT 階段直接把 10 個 `fundamental_*` 欄位
+COALESCE 成 `0`——跟這支 view 的「上游」`buildFeatureViewSql_`
+（`lib/factorRegression.js`）本身既有的慣例一致（`inst_accum_divergence_20d`
+缺值 COALESCE 成 0、`days_since_new_low` 缺值 COALESCE 成 0.5），
+不管覆蓋率是 0 還是部分覆蓋，這個欄位永遠有具體數值，不會再依賴
+BigQuery ML 內部能不能算出平均值。`lib/factorRegression.js
+buildTrainModelSql_` 上一次的修正（排除 `fundamental_*` 的 NOT NULL
+要求）繼續保留——COALESCE 之後這些欄位本來就不會是 NULL，兩個修正
+疊在一起沒有衝突，只是現在 NOT NULL 的排除條件變成不會被真正觸發的
+保險，不影響正確性。
+
+已知取捨：COALESCE 成 `0` 對毛利率／營益率／淨利率／ROE 這幾個百分比
+欄位來說不是統計意義上的「中性值」（不像其他因子拿 0.5 代表 percentile
+rank 的中位數那樣真正中立）——在覆蓋率還是 0 或接近 0 的現階段，這個
+選擇基本上等於讓 LASSO 看到「這些因子幾乎是常數 0」，迴歸權重會趨近
+於 0，等於暫時學不到這幾個因子的預測力。這跟上一次修正預期的「過渡
+狀態」是同一個結論，只是現在的覆蓋率比原本估計的更糟（原本以為至少
+有 Q2 那一期能跟近期的 `date` 重疊，實際上沒有）——會隨財報資料
+實際累積、`financial_ratios`／`financial_revenue` 跟 `factor_features`
+的日期範圍開始重疊而自然改善，不需要再改程式碼。

@@ -518,17 +518,36 @@ function buildSyncFinancialRevenueSql_(tableRef, rows) {
  * 回測/訓練會「提前看到」財報季結束但還沒公告的資訊，見
  * `lib/financials.js parseIncomeStatementRows_` 的說明）。
  *
- * 找不到任何財報資料的 (stock_id, date)（例如新上市不滿一期、或財報來源
- * 本身缺漏）這幾個新欄位一律是 NULL，不特別 COALESCE 成中性值——跟
- * `buildFeatureViewSql_` 原本的 `dividend_yield`／`pe_ratio`／`pb_ratio`
- * 同一個處理方式（這幾個原本就可能是 NULL，`buildTrainModelSql_` 的
- * `WHERE ... IS NOT NULL` 本來就會把這些列排除在訓練之外，不是這次才
- * 出現的新行為）。
- *
  * 訓練（`runFactorRegressionCore_`）之後改成對這個疊加後的 view 做
  * snapshot／訓練，不是原本的 `factor_features`，10 個新因子欄位名稱
  * （`fundamental_` 前綴）要加進 `config.js` 的 `FACTOR_CANDIDATE_COLUMNS`
  * 才會真的被 LASSO 考慮進去。
+ */
+/**
+ * 2026-10-08 再修正：找不到任何財報資料的 (stock_id, date) 這幾個新欄位
+ * 原本一律留著 NULL（不特別 COALESCE），指望 BigQuery ML 訓練時用內建
+ * 的 mean imputation 處理（見 `lib/factorRegression.js
+ * buildTrainModelSql_` 的說明）——但使用者實測遇到財報資料目前覆蓋率
+ * 是真的「完全 0 筆」（`financial_ratios` 還只有極少數公司有資料、
+ * 跟 `factor_features` 的歷史日期範圍幾乎沒有重疊），BigQuery ML 連
+ * mean 都算不出來，直接報錯：
+ *   "Failed to calculate mean since the entries in corresponding
+ *    column 'fundamental_gross_margin_pct' are all NULLs."
+ * 這是 mean imputation 本身的已知極限：欄位一筆非 NULL 值都沒有的話，
+ * 平均值這個概念就不存在，不是「覆蓋率低」可以優雅處理的情況，是
+ *「覆蓋率剛好是 0」這個邊界直接讓它整個失敗。
+ *
+ * 改成在這裡明確 COALESCE 成 0——跟 `lib/factorRegression.js
+ * buildFeatureViewSql_` 本身既有的慣例一致（`inst_accum_divergence_20d`
+ * 缺值 COALESCE 成 0、`days_since_new_low` 缺值 COALESCE 成 0.5），
+ * 用一個固定常數取代「沒有資料」，不依賴 BigQuery ML 的自動插補
+ * （不管覆蓋率是 0 還是部分覆蓋，COALESCE 後這個欄位永遠有值，不會再
+ * 讓訓練整個報錯）。已知取捨：0 不是這幾個百分比欄位（毛利率／營益率／
+ * 淨利率／ROE）統計意義上的「中性值」（不像其他因子用 0.5 代表
+ * percentile rank 的中位數），在覆蓋率還很低的現階段，LASSO 看到的
+ * 「大多數列都是常數 0」會讓這些因子的迴歸權重趨近於 0（學不到真正的
+ * 預測力）——這是預期中的過渡狀態，不是 bug，隨財報資料逐季累積、
+ * 真實覆蓋率提高後會自然改善，詳見 README「已知限制」。
  */
 /**
  * 2026-10-08 修正：原本的寫法在 `LEFT JOIN ... ON` 的條件裡用相關子查詢
@@ -569,16 +588,16 @@ function buildFundamentalFeatureViewSql_(baseFeatureViewRef, financialRatiosTabl
     ')',
     'SELECT',
     '  base.*,',
-    '  base_fr.fr.gross_margin_pct AS fundamental_gross_margin_pct,',
-    '  base_fr.fr.operating_margin_pct AS fundamental_operating_margin_pct,',
-    '  base_fr.fr.net_margin_pct AS fundamental_net_margin_pct,',
-    '  base_fr.fr.roe_pct AS fundamental_roe_pct,',
-    '  base_fr.fr.gross_margin_streak AS fundamental_gross_margin_streak,',
-    '  base_fr.fr.operating_margin_streak AS fundamental_operating_margin_streak,',
-    '  base_fr.fr.net_margin_streak AS fundamental_net_margin_streak,',
-    '  base_fr.fr.roe_streak AS fundamental_roe_streak,',
-    '  base_rev.rev.revenue_yoy_pct AS fundamental_revenue_yoy_pct,',
-    '  base_rev.rev.revenue_growth_streak AS fundamental_revenue_growth_streak',
+    '  COALESCE(base_fr.fr.gross_margin_pct, 0) AS fundamental_gross_margin_pct,',
+    '  COALESCE(base_fr.fr.operating_margin_pct, 0) AS fundamental_operating_margin_pct,',
+    '  COALESCE(base_fr.fr.net_margin_pct, 0) AS fundamental_net_margin_pct,',
+    '  COALESCE(base_fr.fr.roe_pct, 0) AS fundamental_roe_pct,',
+    '  COALESCE(base_fr.fr.gross_margin_streak, 0) AS fundamental_gross_margin_streak,',
+    '  COALESCE(base_fr.fr.operating_margin_streak, 0) AS fundamental_operating_margin_streak,',
+    '  COALESCE(base_fr.fr.net_margin_streak, 0) AS fundamental_net_margin_streak,',
+    '  COALESCE(base_fr.fr.roe_streak, 0) AS fundamental_roe_streak,',
+    '  COALESCE(base_rev.rev.revenue_yoy_pct, 0) AS fundamental_revenue_yoy_pct,',
+    '  COALESCE(base_rev.rev.revenue_growth_streak, 0) AS fundamental_revenue_growth_streak',
     'FROM `' + baseFeatureViewRef + '` base',
     'LEFT JOIN base_fr ON base_fr.stock_id = base.stock_id AND base_fr.date = base.date',
     'LEFT JOIN base_rev ON base_rev.stock_id = base.stock_id AND base_rev.date = base.date'
