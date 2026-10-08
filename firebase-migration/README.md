@@ -2210,3 +2210,38 @@ Chrome UA 字串＋`Accept`／`Accept-Language`／`Referer: https://www.twse.com
 使用者體驗本身就是值得做的理由，不需要等到「這支也真的卡住過」才補。
 
 **驗證**：`npm test`（後端）、`npm run build`（前端）都通過。
+
+## 新功能：資料完整性月曆（2026-10-08）
+
+使用者明確提出的新功能，apps-script 版沒有對應功能可以照抄——要一個
+地方能用月曆的方式，一眼看出哪幾天的股價資料有缺口/筆數異常，不用
+一天一天手動核對「歷史股價資料」卡片的資料總覽。
+
+**後端**：`lib/bigquery.js` 新增 `buildDailyCountsSql_(sourceRef,
+fromDateStr, toDateStr)`——依 `date_str` `GROUP BY`，算出這個區間每
+一天的四碼股票筆數（`LENGTH(stock_id) = 4`，排除權證/ETF，跟
+`buildHistoryRangeSql_` 的 `stocksOnly` 同一個理由——權證代號是 6 碼，
+流通中的數量遠超過一般股票，混進來會讓「筆數」這個數字失真）跟總列數
+（含權證/ETF，當對照用）。`exports.getHistoryDailyCounts`（onCall，
+data: `{month}`，格式 `'yyyy-MM'`）查的是 `sourceRefForRead_`（這個
+App 實際在用的來源，跟 `getHistoryOverview` 同一個邏輯），不是固定查
+`history_raw`，月曆上看到的缺口才會跟戰報實際讀到的資料一致。一次查
+整個月，不是每天各查一次。
+
+**前端**：新增 `HistoryCalendarCard.vue`，獨立元件（不是塞進
+`AdminView.vue` 本來就已經很大的檔案），放在「歷史股價資料」卡片
+下面。月曆格子純前端判斷顯示狀態（後端只回傳原始數字，不另外算好
+狀態字串）：
+- 未來日期：淡化顯示，不代表異常。
+- 週六日沒有資料：中性灰色——TWSE 本來就不開盤，不是漏抓。
+- **平日完全沒有資料**：紅色「缺」——真正需要注意的缺口。
+- **平日有資料但四碼股票筆數低於 500**（`LOW_COUNT_THRESHOLD_`，正常
+  交易日通常有八百到一千多檔，這個門檻是粗略估計不是精確值，純粹用來
+  抓「明顯低到不正常」的情況）：橘色「少」。
+- 其餘（平日且筆數正常）：綠色，正常。
+
+**驗證**：`test/bigquery.test.js` 新增 `buildDailyCountsSql_` 的測試
+（確認有 `GROUP BY`／`ORDER BY`／排除非四碼代號的條件）；`npm test`
+（後端）、`npm run build`（前端）都通過。實際月曆畫面長什麼樣子、
+BigQuery 查詢的真實回應沒辦法在這個開發環境驗證（跟這次遷移其他碰
+BigQuery／TWSE 的程式碼一樣，見其他地方反覆提到的網路政策限制）。

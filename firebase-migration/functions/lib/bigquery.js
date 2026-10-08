@@ -320,6 +320,24 @@ function buildDateBoundsSql_(sourceRef) {
     'FROM `' + sourceRef + '`';
 }
 
+/**
+ * 2026-10-08 新增：Admin 頁面「資料完整性月曆」用——某個區間（通常是一整
+ * 個月）每一天各自的四碼股票筆數／總列數，`GROUP BY date_str`，一次查
+ * 整個月，不用為了核對資料完整性一天一天手動呼叫 `buildDateBoundsSql_`。
+ * `stock_count` 只算 `LENGTH(stock_id) = 4` 的代號（排除權證/ETF，跟
+ * `buildHistoryRangeSql_` 的 `stocksOnly` 同一個理由——權證代號是 6 碼，
+ * 流通中的數量遠超過一般股票，混進來會讓「筆數」這個數字失真，看不出
+ * 股票本身的資料到底有沒有缺）；`row_count` 是這天全部列數（含權證/ETF）
+ * 當對照用，兩者差距異常大的話，可能代表權證資料比例不正常。 */
+function buildDailyCountsSql_(sourceRef, fromDateStr, toDateStr) {
+  return 'SELECT date_str, ' +
+    'COUNT(DISTINCT CASE WHEN LENGTH(stock_id) = 4 THEN stock_id END) AS stock_count, ' +
+    'COUNT(*) AS row_count ' +
+    'FROM `' + sourceRef + '` ' +
+    "WHERE date_str >= '" + fromDateStr + "' AND date_str <= '" + toDateStr + "' " +
+    'GROUP BY date_str ORDER BY date_str';
+}
+
 module.exports = {
   BQ_COLUMN_MAP: BQ_COLUMN_MAP,
   bqColumnNames_: bqColumnNames_,
@@ -334,5 +352,6 @@ module.exports = {
   buildDeleteAndInsertTransactionSql_: buildDeleteAndInsertTransactionSql_,
   chunkRowsBySize_: chunkRowsBySize_,
   buildMaxDateSql_: buildMaxDateSql_,
-  buildDateBoundsSql_: buildDateBoundsSql_
+  buildDateBoundsSql_: buildDateBoundsSql_,
+  buildDailyCountsSql_: buildDailyCountsSql_
 };

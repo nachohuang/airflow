@@ -225,4 +225,16 @@ const bq = require('../lib/bigquery');
   console.log('Test buildDateBoundsSql_ passed.');
 }
 
+// --- buildDailyCountsSql_ ---
+{
+  const sql = bq.buildDailyCountsSql_('proj.ds.history_raw', '2026-10-01', '2026-10-31');
+  assert.ok(sql.indexOf('GROUP BY date_str') !== -1, '要依日期分組');
+  assert.ok(sql.indexOf('ORDER BY date_str') !== -1, '要依日期排序，前端才不用自己再排一次');
+  assert.ok(sql.indexOf("LENGTH(stock_id) = 4") !== -1, 'stock_count 要排除非四碼的權證/ETF 代號');
+  assert.ok(sql.indexOf("date_str >= '2026-10-01'") !== -1);
+  assert.ok(sql.indexOf("date_str <= '2026-10-31'") !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.history_raw`') !== -1);
+  console.log('Test buildDailyCountsSql_ (groups by date, excludes non-4-digit codes from stock_count) passed.');
+}
+
 console.log('All bigquery.js tests passed.');

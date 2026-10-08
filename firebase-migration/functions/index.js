@@ -919,6 +919,46 @@ exports.getHistoryOverview = onCall(RUNTIME_OPTS_, async function (request) {
 });
 
 /**
+ * data: {month}（'yyyy-MM'）。給 Admin 頁面「資料完整性月曆」用：這個月
+ * 每一天各自的四碼股票筆數／總列數，一次查整個月（見 `lib/bigquery.js`
+ * `buildDailyCountsSql_`），不用為了確認資料完整一天一天手動核對
+ * `getHistoryOverview`——2026-10-08 使用者明確要求的新功能，apps-script
+ * 版沒有對應功能可以照抄，這是全新設計的檢查工具。跟 `getHistoryOverview`
+ * 一樣查 `sourceRefForRead_`（這個 App 實際在用的來源），不是固定查
+ * `history_raw`，月曆上看到的缺口才會跟戰報實際讀到的資料一致。 */
+exports.getHistoryDailyCounts = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const month = String(data.month || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    throw new HttpsError('invalid-argument', 'month 格式要是 yyyy-MM。');
+  }
+  const appConfig = await fetchAppConfig_();
+  if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+    throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+  }
+  const parts = month.split('-');
+  const year = Number(parts[0]);
+  const monthNum = Number(parts[1]); // 1-based
+  const fromDateStr = month + '-01';
+  // Date.UTC 的月份參數是 0-based，所以傳 monthNum（下個月，0-based 剛好對上
+  // 這個月）配合 day=0，算出來就是「這個月的最後一天」。
+  const lastDay = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+  const toDateStr = month + '-' + String(lastDay).padStart(2, '0');
+
+  const client = new BigQuery({ projectId: appConfig.bigQuery.projectId });
+  const sourceRef = bigquery.sourceRefForRead_(appConfig.bigQuery);
+  const [rows] = await client.query({ query: bigquery.buildDailyCountsSql_(sourceRef, fromDateStr, toDateStr) });
+  return rows.map(function (r) {
+    return {
+      date: r.date_str,
+      stockCount: Number(r.stock_count) || 0,
+      rowCount: Number(r.row_count) || 0
+    };
+  });
+});
+
+/**
  * 以下是 Watchlist／Portfolio 的讀寫邏輯（Phase 3，跟戰報計算一起遷移），從
  * apps-script/src/Watchlist.gs／apps-script/src/Portfolio.gs 搬過來。用
  * onCall（不是 onRequest／onSchedule）——這幾支是給之後的前端（Phase 5）直接

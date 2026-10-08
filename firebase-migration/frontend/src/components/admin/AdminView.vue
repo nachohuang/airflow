@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { collection, doc, onSnapshot, updateDoc, setDoc, deleteDoc, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
+import HistoryCalendarCard from './HistoryCalendarCard.vue';
 
 /** 跟 functions/lib/analysis.js 的 SCREENING_STRATEGIES 是同一份清單（key／label）
  *  ——那邊是純運算邏輯用的 Node 模組，這裡是獨立的前端套件，不方便直接 import，
@@ -865,6 +866,8 @@ const runLogLatestByCategory = computed(function () {
           materialized。
         </p>
       </div>
+
+      <HistoryCalendarCard />
 
       <div class="form-card">
         <h3>BigQuery 設定</h3>
