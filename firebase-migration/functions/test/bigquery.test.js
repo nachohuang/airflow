@@ -67,7 +67,15 @@ const bq = require('../lib/bigquery');
   const sqlInjection = bq.buildHistoryRowsForCodesSql_('proj.ds.history_unified', ["2330'; DROP TABLE x; --"]);
   assert.ok(sqlInjection.indexOf("stock_id IN ('2330; DROP TABLE x; --')") !== -1,
     '代號字串裡的單引號要被濾掉，不會提前結束字串字面值造成 SQL injection');
-  console.log('Test buildHistoryRowsForCodesSql_ (IN clause, optional startStr, quote stripping) passed.');
+
+  // 2026-10-08 新增：因子檢視器要限制在使用者指定的區間內，補一個選填的
+  // endStr 上界，不能無限抓到今天——確認加了這個參數不影響既有呼叫端
+  // （只傳 3 個參數時行為跟修改前完全一樣）。
+  const sqlWithEnd = bq.buildHistoryRowsForCodesSql_('proj.ds.history_unified', ['2330'], '2026-09-25', '2026-09-30');
+  assert.ok(sqlWithEnd.indexOf("date_str >= '2026-09-25'") !== -1 && sqlWithEnd.indexOf("date_str <= '2026-09-30'") !== -1,
+    '帶 endStr 時要同時有下界跟上界條件');
+  assert.ok(sqlNoStart.indexOf('date_str <=') === -1, '沒帶 endStr 的既有呼叫端不該多出上界條件');
+  console.log('Test buildHistoryRowsForCodesSql_ (IN clause, optional startStr/endStr, quote stripping) passed.');
 }
 
 // --- buildStockSearchSql_：只選 3 欄（計費考量）、LIKE 比對代號/名稱、濾掉
@@ -359,6 +367,20 @@ const bq = require('../lib/bigquery');
   assert.ok(sql.indexOf('COALESCE(base_rev.rev.revenue_yoy_pct, 0) AS fundamental_revenue_yoy_pct') !== -1);
   assert.ok(sql.indexOf('COALESCE(base_rev.rev.revenue_growth_streak, 0) AS fundamental_revenue_growth_streak') !== -1);
   console.log('Test buildFundamentalFeatureViewSql_ (layers on top of base view, point-in-time as-of join via ARRAY_AGG not correlated subquery-in-JOIN, exposes all 10 fundamental columns, missing values COALESCEd to 0) passed.');
+}
+
+// --- buildFactorDetailSql_：因子檢視器查詢，單一股票 + 日期區間 ---
+{
+  const sql = bq.buildFactorDetailSql_('proj.ds.factor_features_fundamental', '2330', '2026-09-01', '2026-09-30');
+  assert.ok(sql.indexOf('FROM `proj.ds.factor_features_fundamental`') !== -1);
+  assert.ok(sql.indexOf("WHERE stock_id = '2330'") !== -1, '應該用等號只查這一檔股票，不是 IN 子句');
+  assert.ok(sql.indexOf("date >= '2026-09-01'") !== -1 && sql.indexOf("date <= '2026-09-30'") !== -1, '要同時有區間上下界');
+  assert.ok(sql.indexOf('ORDER BY date') !== -1, '結果要依日期排序，方便逐日對照');
+
+  const sqlInjection = bq.buildFactorDetailSql_('proj.ds.factor_features_fundamental', "2330'; DROP TABLE x; --", '2026-09-01', '2026-09-30');
+  assert.ok(sqlInjection.indexOf("stock_id = '2330\\'; DROP TABLE x; --'") !== -1,
+    '代號字串裡的單引號要被 escapeVal_ 跳脫（反斜線），不會提前結束字串字面值造成 SQL injection');
+  console.log('Test buildFactorDetailSql_ (single stock + date range, ordered by date, quote stripping) passed.');
 }
 
 console.log('All bigquery.js tests passed.');

@@ -292,6 +292,82 @@ async function applyModel(timestamp) {
     applyingTimestamp.value = '';
   }
 }
+
+// ---- 因子檢視器（functions/index.js getStockFactorDetail）----
+// 2026-10-08：這次因子迴歸訓練一路踩到好幾個跟資料覆蓋率有關的 bug
+//（Input data doesn't contain any rows／mean imputation 對全 NULL 欄位
+// 報錯），每次都只能靠猜測＋翻 deploy log 定位原因。這張卡片讓使用者
+// 自己選一檔股票、一段區間，直接看 BigQuery 算出來的逐日因子值，以及
+// 背後的原始財報/股價資料，不用每次都重新部署一次診斷用的 SQL——跟上面
+// 三個工具一樣是獨立的研究工具，但這支是唯讀查詢，不寫入任何資料，不用
+// jobs/{jobKey} 監聽模式，一次 callFn 直接拿結果即可。
+const inspectorSearchText = ref('');
+const inspectorSearchResults = ref([]);
+let inspectorSearchDebounceTimer = null;
+
+function scheduleInspectorSearch() {
+  const q = inspectorSearchText.value.trim();
+  clearTimeout(inspectorSearchDebounceTimer);
+  if (!q) {
+    inspectorSearchResults.value = [];
+    return;
+  }
+  inspectorSearchDebounceTimer = setTimeout(async function () {
+    try {
+      inspectorSearchResults.value = await callFn('searchStockCodes', { query: q });
+    } catch (e) {
+      inspectorSearchResults.value = [];
+    }
+  }, 400);
+}
+
+const inspectorForm = ref({ code: '', name: '', startDate: '', endDate: '' });
+
+function selectInspectorStock(r) {
+  inspectorForm.value.code = r.code;
+  inspectorForm.value.name = r.name;
+  inspectorSearchText.value = '';
+  inspectorSearchResults.value = [];
+}
+
+const inspectorLoading = ref(false);
+const inspectorError = ref('');
+const inspectorResult = ref(null);
+
+async function runInspector() {
+  inspectorLoading.value = true;
+  inspectorError.value = '';
+  inspectorResult.value = null;
+  try {
+    inspectorResult.value = await callFn('getStockFactorDetail', {
+      code: inspectorForm.value.code,
+      startDate: inspectorForm.value.startDate,
+      endDate: inspectorForm.value.endDate
+    }, 180000);
+  } catch (e) {
+    inspectorError.value = e.message || String(e);
+  } finally {
+    inspectorLoading.value = false;
+  }
+}
+
+// 因子欄位名稱不在前端另外手刻一份清單（跟後端 config.js
+// FACTOR_CANDIDATE_COLUMNS 共用同一份定義，兩邊維護會跟著訓練/計算邏輯
+// 變動而逐漸對不齊）——直接從回傳的第一列自己的欄位順序推出要顯示哪些
+// 欄（排除已經有自己固定欄位的 stock_id／stock_name／date）。
+const inspectorFactorColumns = computed(function () {
+  const rows = inspectorResult.value && inspectorResult.value.factorRows;
+  if (!rows || !rows.length) return [];
+  return Object.keys(rows[0]).filter(function (k) { return k !== 'stock_id' && k !== 'stock_name' && k !== 'date'; });
+});
+
+/** 因子數值顯示用：四捨五入到 4 位小數，避免浮點數誤差印出一長串，
+ *  null/undefined 顯示為 '-'（跟「這欄缺資料」區分開，不是真的是 0）。 */
+function formatFactorValue(v) {
+  if (v === null || v === undefined) return '-';
+  if (typeof v !== 'number') return v;
+  return Number(v.toFixed(4));
+}
 </script>
 
 <template>
@@ -552,6 +628,133 @@ async function applyModel(timestamp) {
         清單＋在 BigQuery 因子特徵 view 加對應的計算邏輯，不是前端能調的
         設定。
       </p>
+    </div>
+
+    <div class="form-card">
+      <h3>🔍 因子檢視器</h3>
+      <p class="hint">
+        選一檔股票、一段區間，直接看 BigQuery 算出來的逐日因子值（含 10 個
+        財報基本面因子），再往下對照背後的原始財報資料（Firestore
+        <code>financials_quarterly</code>／<code>financials_monthly</code>）
+        跟原始股價/籌碼資料——排查「這天這個因子到底是不是 NULL、算出來是
+        多少」用，唯讀查詢，不會寫入或改動任何資料。
+      </p>
+      <div class="search-bar">
+        <input v-model="inspectorSearchText" placeholder="輸入股票代號或名稱搜尋" @input="scheduleInspectorSearch">
+      </div>
+      <div v-if="inspectorSearchText && inspectorSearchResults.length" class="card-list search-results-list">
+        <button
+          v-for="r in inspectorSearchResults"
+          :key="r.code"
+          type="button"
+          class="search-result-item"
+          @click="selectInspectorStock(r)"
+        >
+          {{ r.code }} {{ r.name }}
+        </button>
+      </div>
+      <p v-if="inspectorForm.code" class="hint">已選擇：{{ inspectorForm.code }} {{ inspectorForm.name }}</p>
+      <div class="schedule-time-inputs">
+        <input v-model="inspectorForm.startDate" type="date" required>
+        <span>~</span>
+        <input v-model="inspectorForm.endDate" type="date" required>
+      </div>
+      <div class="form-actions">
+        <button type="button" :disabled="inspectorLoading || !inspectorForm.code" @click="runInspector">
+          {{ inspectorLoading ? '查詢中...' : '查詢' }}
+        </button>
+      </div>
+      <p v-if="inspectorError" class="error-box">{{ inspectorError }}</p>
+
+      <template v-if="inspectorResult">
+        <h3 style="margin-top:16px;">計算後因子值（{{ inspectorResult.factorRows.length }} 筆）</h3>
+        <p v-if="!inspectorResult.factorRows.length" class="hint">
+          這段區間在 <code>factor_features_fundamental</code> view 裡查不到任何列——可能是這段區間還沒有股價資料，或這檔代號是權證/ETF（排除在因子計算範圍外）。
+        </p>
+        <div v-else class="table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th v-for="f in inspectorFactorColumns" :key="f">{{ f }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in inspectorResult.factorRows" :key="row.date">
+                <td>{{ row.date }}</td>
+                <td v-for="f in inspectorFactorColumns" :key="f">{{ formatFactorValue(row[f]) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="margin-top:16px;">原始財報資料——季報財務比率（{{ inspectorResult.rawFinancials.quarterly.length }} 筆，不限查詢區間，這檔股票全部累積紀錄）</h3>
+        <p v-if="!inspectorResult.rawFinancials.quarterly.length" class="hint">Firestore <code>financials_quarterly</code> 裡完全沒有這檔股票的資料。</p>
+        <div v-else class="table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>公告日</th><th>所屬季度</th><th>毛利率%</th><th>營益率%</th><th>淨利率%</th><th>ROE%</th>
+                <th>毛利率連增</th><th>營益率連增</th><th>淨利率連增</th><th>ROE連增</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="d in inspectorResult.rawFinancials.quarterly" :key="d.code + '_' + d.period">
+                <td>{{ d.period }}</td>
+                <td>{{ d.fiscalPeriod }}</td>
+                <td>{{ d.grossMarginPct }}</td>
+                <td>{{ d.operatingMarginPct }}</td>
+                <td>{{ d.netMarginPct }}</td>
+                <td>{{ d.roePct }}</td>
+                <td>{{ d.grossMarginStreak }}</td>
+                <td>{{ d.operatingMarginStreak }}</td>
+                <td>{{ d.netMarginStreak }}</td>
+                <td>{{ d.roeStreak }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="margin-top:16px;">原始財報資料——月營收（{{ inspectorResult.rawFinancials.monthly.length }} 筆，不限查詢區間，這檔股票全部累積紀錄）</h3>
+        <p v-if="!inspectorResult.rawFinancials.monthly.length" class="hint">Firestore <code>financials_monthly</code> 裡完全沒有這檔股票的資料。</p>
+        <div v-else class="table-wrap">
+          <table class="history-table">
+            <thead><tr><th>所屬月份</th><th>公開可得日(估算)</th><th>營收YoY%</th><th>連續成長月數</th><th>來源</th></tr></thead>
+            <tbody>
+              <tr v-for="d in inspectorResult.rawFinancials.monthly" :key="d.code + '_' + d.reportDate">
+                <td>{{ d.period }}</td>
+                <td>{{ d.reportDate }}</td>
+                <td>{{ d.revenueYoyPct }}</td>
+                <td>{{ d.revenueGrowthStreak }}</td>
+                <td>{{ d.source || '未知' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="margin-top:16px;">原始股價/籌碼資料（{{ inspectorResult.rawHistory.length }} 筆，查詢區間內）</h3>
+        <p v-if="!inspectorResult.rawHistory.length" class="hint">BigQuery History 裡這段區間查不到這檔股票的原始資料。</p>
+        <div v-else class="table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr><th>日期</th><th>收盤價</th><th>外資</th><th>投信</th><th>自營商</th><th>成交股數</th><th>殖利率%</th><th>本益比</th><th>股價淨值比</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="h in inspectorResult.rawHistory" :key="h['日期']">
+                <td>{{ h['日期'] }}</td>
+                <td>{{ h['收盤價'] }}</td>
+                <td>{{ h['外資'] }}</td>
+                <td>{{ h['投信'] }}</td>
+                <td>{{ h['自營商'] }}</td>
+                <td>{{ h['成交股數'] }}</td>
+                <td>{{ h['殖利率(%)'] }}</td>
+                <td>{{ h['本益比'] }}</td>
+                <td>{{ h['股價淨值比'] }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
     </div>
   </section>
 </template>

@@ -3143,3 +3143,57 @@ rank 的中位數那樣真正中立）——在覆蓋率還是 0 或接近 0 的
 有 Q2 那一期能跟近期的 `date` 重疊，實際上沒有）——會隨財報資料
 實際累積、`financial_ratios`／`financial_revenue` 跟 `factor_features`
 的日期範圍開始重疊而自然改善，不需要再改程式碼。
+
+## 2026-10-08：因子檢視器（排查因子覆蓋率問題用的診斷工具）
+
+上面三次修正都是靠使用者實測回報的錯誤訊息＋我這邊猜測原因、翻 deploy
+log 才定位出來的——使用者提出一個合理的疑問：「月營收是月頻、股價是
+日頻，兩者到底是怎麼整合的」，點出「覆蓋率是 0」這個結論本身也只是
+推測，沒有直接證據。既然沒辦法從這個開發環境連線查 BigQuery／Firestore
+確認，不如直接做一個工具讓使用者自己查：選一檔股票、一段區間，一次看
+三組資料：
+
+1. **計算後因子值**：BigQuery `factor_features_fundamental` view 裡這檔
+   股票在區間內逐日算出來的全部因子值（48 個既有候選因子＋10 個財報
+   基本面因子）——直接回答「這天這個因子到底是不是 NULL、算出來是
+   多少」，不用自己回算或猜測。
+2. **原始財報資料**：Firestore `financials_quarterly`／
+   `financials_monthly` 裡這檔股票全部累積的原始列（不限查詢區間，筆數
+   本身不多，直接給全部）——讓使用者自己對照「最近一期財報的公告日」
+   是不是真的落在查詢區間附近，不然光看區間內的因子值看不出「到底是
+   沒資料，還是查詢區間剛好沒蓋到」。顯示的「連續上升期數」
+   （`grossMarginStreak`／`roeStreak`／`revenueGrowthStreak`）是即時用
+   `lib/financials.js computeFundamentalStreaks_`／
+   `computeRevenueGrowthStreaks_` 對這檔股票重算一次，不是 Firestore
+   原始公告列本來就有的欄位（那兩支函式算完只同步進 BigQuery
+   `financial_ratios`／`financial_revenue`，沒有寫回 Firestore，見
+   `doRefreshFinancials_` 的說明）——這裡顯示的數字跟訓練/因子計算
+   實際用到的是同一份，不是只有原始公告值。
+3. **原始股價/籌碼資料**：區間內原始 History 列（收盤價／外資／投信／
+   自營商／成交股數／殖利率／本益比／股價淨值比），對照「算出來的
+   因子」跟「背後真正的原始資料」。
+
+**實作**：
+- 後端新增 `lib/factorInspector.js`（純函式：`validateFactorInspectorRange_`
+  驗證查詢區間上限 365 天、`sortFinancialDocsByDate_` 把財報列依日期
+  排序）＋ `lib/bigquery.js buildFactorDetailSql_`（查單一股票＋區間的
+  因子值，`SELECT * FROM factor_features_fundamental WHERE stock_id = ?
+  AND date BETWEEN ? AND ?`）＋ `buildHistoryRowsForCodesSql_` 補一個
+  選填的 `endStr` 上界（原本只能「從某天開始」查到今天，因子檢視器需要
+  限制在使用者指定的區間內）＋新的 `exports.getStockFactorDetail`
+  callable function（跟訓練前一樣先 `ensureFeatureView_`／
+  `ensureFundamentalFeatureView_` 確保 view 是最新定義）。
+- 前端在 Research 頁面新增「🔍 因子檢視器」卡片：股票搜尋（重用既有的
+  `searchStockCodes`）＋起訖日期，查詢後顯示上述三組表格。因子欄位名稱
+  不在前端另外手刻一份清單（避免跟後端 `config.js
+  FACTOR_CANDIDATE_COLUMNS` 兩邊維護逐漸對不齊），直接從回傳的第一列
+  自己的欄位順序推出要顯示哪些欄。
+
+**實作細節**：BigQuery 的 `date` 欄位是真正的 DATE 型態（這支 App 其他
+地方查的 `date_str` 都是 STRING，這是唯一例外），`@google-cloud/bigquery`
+client 讀回來是 `BigQueryDate` 物件（`{ value: 'yyyy-MM-dd' }`，實測
+`JSON.stringify` 印出來不是乾淨的字串），直接回傳給前端不保證序列化
+正確，後端明確取出 `.value` 再回傳。
+
+唯讀查詢，不寫入或改動任何資料，不用 `jobs/{jobKey}` 監聽模式，一次
+`callFn` 直接拿結果即可。

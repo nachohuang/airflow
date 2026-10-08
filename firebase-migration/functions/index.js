@@ -49,6 +49,7 @@ const factorScanLib = require('./lib/factorScan');
 const factorRegressionLib = require('./lib/factorRegression');
 const financialsLib = require('./lib/financials');
 const mopsRevenueLib = require('./lib/mopsRevenueHtml');
+const factorInspectorLib = require('./lib/factorInspector');
 
 admin.initializeApp();
 
@@ -2239,6 +2240,91 @@ exports.getStockDetail = onCall(RUNTIME_OPTS_, async function (request) {
     scoreHistory: scoreHistory,
     aiDiagnoses: aiDiagnoses,
     holding: buildHoldingInfo_(portfolioMap, code, latestClose)
+  };
+});
+
+/**
+ * 「因子檢視器」：data: {code, startDate, endDate}。這次財報因子訓練一路
+ * 踩到好幾個跟資料覆蓋率有關的 bug（Input data doesn't contain any
+ * rows／mean imputation 對全 NULL 欄位報錯），每次都只能靠猜測＋翻
+ * deploy log 定位原因。這支函式讓使用者自己選一檔股票、一段區間，一次
+ * 看三組資料：
+ *   1. factorRows：`factor_features_fundamental` view 裡這檔股票在區間
+ *      內逐日算出來的全部因子值（48 個既有候選因子＋10 個財報基本面
+ *      因子）——直接回答「這天這個因子到底是不是 NULL、算出來是多少」。
+ *   2. rawFinancials：Firestore `financials_quarterly`／
+ *      `financials_monthly` 裡這檔股票全部累積的原始財報列（不限查詢
+ *      區間，筆數本身就不多，直接給全部——使用者才能自己對照「最近一期
+ *      財報的公告日」是不是真的落在查詢區間附近，不然光看區間內的
+ *      factorRows 看不出「到底有沒有資料，還是查詢區間剛好沒蓋到」）。
+ *   3. rawHistory：區間內原始 History 列（股價／法人買賣超等），對照
+ *      「算出來的因子」跟「背後真正的原始資料」。
+ * 跟 `runFactorRegressionCore_` 訓練前一樣，先確保 `factor_features`／
+ * `factor_features_fundamental` 這兩個 view 是最新定義，不會查到部署
+ * 改掉之前的舊版本。
+ */
+exports.getStockFactorDetail = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const code = utilsLib.sanitizeStockId_(data.code);
+  if (!code) throw new HttpsError('invalid-argument', '股票代號格式不正確。');
+  const startStr = String(data.startDate || '').trim();
+  const endStr = String(data.endDate || '').trim();
+  const rangeCheck = factorInspectorLib.validateFactorInspectorRange_(startStr, endStr);
+  if (rangeCheck.error) throw new HttpsError('invalid-argument', rangeCheck.error);
+
+  const appConfig = await fetchAppConfig_();
+  if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+    throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+  }
+
+  await ensureFeatureView_(appConfig.bigQuery);
+  await ensureFundamentalFeatureView_(appConfig.bigQuery);
+
+  const client = new BigQuery({ projectId: appConfig.bigQuery.projectId });
+  const viewRef = bigquery.fundamentalFeatureViewRef_(appConfig.bigQuery);
+  const sourceRef = bigquery.sourceRefForRead_(appConfig.bigQuery);
+  const db = admin.firestore();
+
+  const [factorResult, historyResult, quarterlySnap, monthlySnap] = await Promise.all([
+    client.query({ query: bigquery.buildFactorDetailSql_(viewRef, code, startStr, endStr) }),
+    client.query({ query: bigquery.buildHistoryRowsForCodesSql_(sourceRef, [code], startStr, endStr) }),
+    db.collection('financials_quarterly').where('code', '==', code).get(),
+    db.collection('financials_monthly').where('code', '==', code).get()
+  ]);
+
+  // factor_features_fundamental 的 `date` 欄位是真正的 BigQuery DATE 型態
+  // （跟這支 App 其他地方查詢的 date_str 都是 STRING 不一樣），
+  // @google-cloud/bigquery client 讀回來是 BigQueryDate 物件
+  // （`{ value: 'yyyy-MM-dd' }`），直接回傳給前端不保證會被正確序列化成
+  // 字串——這裡明確取出 `.value`（已經是字串就原樣保留，`.value` 在字串
+  // 上是 undefined，三元運算會退回原值），回傳乾淨的 yyyy-MM-dd 字串。
+  const factorRows = (factorResult[0] || []).map(function (r) {
+    return Object.assign({}, r, { date: (r.date && r.date.value) ? r.date.value : r.date });
+  });
+  const rawHistory = historyResult[0].map(bigquery.mapBqRowToHistoryRow_).filter(function (r) { return r !== null; });
+  const quarterlyDocs = factorInspectorLib.sortFinancialDocsByDate_(
+    quarterlySnap.docs.map(function (d) { return d.data(); }), 'period'
+  );
+  const monthlyDocs = factorInspectorLib.sortFinancialDocsByDate_(
+    monthlySnap.docs.map(function (d) { return d.data(); }), 'reportDate'
+  );
+  // Firestore financials_quarterly／financials_monthly 存的是原始公告列，
+  // 不含 grossMarginStreak／roeStreak／revenueGrowthStreak 這幾個「連續
+  // 上升期數」——那是 doRefreshFinancials_ 讀回全部累積歷史才能算出來的
+  // 衍生欄位，算完只同步進 BigQuery financial_ratios／financial_revenue，
+  // 沒有寫回 Firestore（見 doRefreshFinancials_ 的說明）。這裡用同一套
+  // 純函式對這一檔股票重算一次（兩支函式回傳的是攤平陣列，不是分組的
+  // 陣列的陣列，傳入單一分組就直接是這檔股票的結果，不用再取 [0]），
+  // 顯示的才是跟訓練/因子計算實際用到的同一份數字，不是只有原始公告值。
+  const quarterlyWithStreaks = quarterlyDocs.length ? financialsLib.computeFundamentalStreaks_([quarterlyDocs]) : [];
+  const monthlyWithStreaks = monthlyDocs.length ? financialsLib.computeRevenueGrowthStreaks_([monthlyDocs]) : [];
+
+  return {
+    code: code,
+    factorRows: factorRows,
+    rawHistory: rawHistory,
+    rawFinancials: { quarterly: quarterlyWithStreaks, monthly: monthlyWithStreaks }
   };
 });
 

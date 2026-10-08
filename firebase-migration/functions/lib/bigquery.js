@@ -139,12 +139,19 @@ function buildHistoryRangeSql_(sourceRef, startStr, endStr, opts) {
  * 需要的幾檔代號，不是全市場），跟今日戰報的全市場查詢完全無關，不會有記憶體
  * 問題，所以不需要跟 `buildHistoryRangeSql_` 共用同一支函式、也不需要
  * `stocksOnly` 這種全市場專用的篩選。
+ *
+ * `endStr`（2026-10-08 新增，選填）：原本只有「從某天開始」（給
+ * getStockDetail／Watchlist 那種「抓到今天為止」的用法），因子檢視器
+ * （`getStockFactorDetail`）需要限制在使用者指定的區間內，不是無限
+ * 抓到今天，所以補一個可選的上界。留空時行為跟修改前完全一樣（既有
+ * 呼叫端都沒傳這個參數）。
  */
-function buildHistoryRowsForCodesSql_(sourceRef, stockIds, startStr) {
+function buildHistoryRowsForCodesSql_(sourceRef, stockIds, startStr, endStr) {
   var cols = bqColumnNames_().join(', ');
   var idList = stockIds.map(function (id) { return "'" + String(id).replace(/'/g, '') + "'"; }).join(', ');
   var sql = 'SELECT ' + cols + ' FROM `' + sourceRef + '` WHERE stock_id IN (' + idList + ')';
   if (startStr) sql += " AND date_str >= '" + startStr + "'";
+  if (endStr) sql += " AND date_str <= '" + endStr + "'";
   return sql;
 }
 
@@ -604,6 +611,27 @@ function buildFundamentalFeatureViewSql_(baseFeatureViewRef, financialRatiosTabl
   ].join('\n');
 }
 
+/**
+ * 2026-10-08 新增：「因子檢視器」（`getStockFactorDetail`）用——查某一檔
+ * 股票在指定區間，`factor_features_fundamental` view 裡逐日算出來的全部
+ * 因子值（原本 48 個候選因子＋10 個財報基本面因子）。跟
+ * `buildHistoryRangeSql_`／`buildHistoryRowsForCodesSql_` 查的是「原始
+ * History」不同，這裡查的是「已經算好因子」的 view，直接回答「這檔股票
+ * 這一天的某個因子到底是不是 NULL、算出來是多少」，不用使用者自己回算
+ * 或靠翻 log 猜測——這次財報因子訓練一路踩到的幾個覆蓋率 bug（Input
+ * data doesn't contain any rows／mean imputation 對全 NULL 欄位報錯）
+ * 都是這種「資料到底長什麼樣子」的疑問，有這個工具以後可以直接查，不用
+ * 每次都重新部署一次診斷用的 SQL。
+ *
+ * `stockId` 呼叫端要先用 `sanitizeStockId_` 清洗過（見 index.js
+ * `getStockFactorDetail`），這裡用 `escapeVal_` 跳脫成字串字面值，不另外
+ * 驗證格式——格式驗證是呼叫端的責任，不在這支函式裡重複做一次。
+ */
+function buildFactorDetailSql_(viewRef, stockId, startStr, endStr) {
+  return 'SELECT * FROM `' + viewRef + '` WHERE stock_id = ' + escapeVal_(stockId) +
+    " AND date >= '" + startStr + "' AND date <= '" + endStr + "' ORDER BY date";
+}
+
 module.exports = {
   BQ_COLUMN_MAP: BQ_COLUMN_MAP,
   bqColumnNames_: bqColumnNames_,
@@ -630,5 +658,6 @@ module.exports = {
   chunkStructRowsBySize_: chunkStructRowsBySize_,
   buildSyncFinancialRatiosSql_: buildSyncFinancialRatiosSql_,
   buildSyncFinancialRevenueSql_: buildSyncFinancialRevenueSql_,
+  buildFactorDetailSql_: buildFactorDetailSql_,
   buildFundamentalFeatureViewSql_: buildFundamentalFeatureViewSql_
 };
