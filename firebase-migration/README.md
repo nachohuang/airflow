@@ -2344,3 +2344,85 @@ prop（型別 `[{date, reason}]`），由 `AdminView.vue` 傳入——那邊「�
 版算出來的結果一致（這份清單的回測/因子迴歸都有明確的數字可以比對，
 照搬的時候比對起來比較有把握），基本面因子是全新邏輯，没有旧版本可以
 比對正確性，應該獨立驗證，不要兩件事混在一次變更裡。
+
+## 2026-10-08：策略研究（一）——Backtest.gs 回測功能遷移到 Firebase
+
+照上面「建議的下一步」的順序，先搬 `Backtest.gs`（自成一體、預設的
+`rule_v17` 策略不需要因子迴歸模型），`FactorRegression.gs` 留給下一階段。
+
+### 架構對應
+
+- `functions/lib/backtest.js`（新檔案）：純函式邏輯，從 `Backtest.gs`
+  複製 `simulateTradeForward_`／`validateBacktestRange_`／
+  `computeBacktestLoadEndStr_`／`simulateBacktestForStrategy_` 過來，不碰
+  BigQuery／Firestore，`functions/test/backtest.test.js` 8 個測試不需要
+  雲端憑證就能跑。刻意直接重用 `analysis.js` 的 `diagnoseRow_`／
+  `SCREENING_STRATEGIES`——回測用的因子計算跟進場訊號判斷跟「戰報與個股」
+  是同一套邏輯，不是另一套近似規則，回測結果才真的能反映「照這套策略
+  下單，過去表現如何」。
+- `functions/index.js` 新增 I/O glue：`fetchHistoryRangeRows_`（BigQuery
+  讀取區間資料）、`loadBacktestFactorRows_`（往前多抓
+  `ANALYSIS_LOOKBACK_DAYS` 天暖機、呼叫 `analysis.computeFactors_`）、
+  `runBacktestCore_`／`runBacktestAllStrategiesCore_`（對應 apps-script 版
+  `runBacktestV17_`／`runBacktestAllStrategies_` 的核心邏輯，不含
+  auth／job 狀態）。因子模型套用狀態直接重用既有的
+  `fetchAppliedFactorModels_()`（原本就有，`runDailyAnalysis_` 已經在用），
+  不需要另外新建。
+- `exports.runBacktest`（單一策略）／`exports.runBacktestAllStrategies`
+  （一次跑全部策略比較，資料只抓一次，不會因為策略數而乘倍查詢費用）
+  兩個新 onCall，跟「補抓區間」「執行完整排程」同一套 `jobs/{jobKey}`
+  狀態追蹤模式（見上面「每日股價資料抓取」一節 `writeJobStatus_` 的完整
+  說明）：兩個 function 共用 `jobs/backtest` 這個 key，用 `mode` 欄位
+  （`'single'`／`'all'`）區分，前端用 `onSnapshot` 監聽同一份文件、根據
+  `mode` 顯示對應的結果版面。
+- 前端新增 `frontend/src/components/research/ResearchView.vue`，掛進
+  `AppShell.vue` 原本的占位 tab（`{ key: 'research', ready: false }` 改
+  成 `ready: true`）。按鈕永遠可以按、不因為 `status === 'running'` 鎖住
+  （跟「補抓區間」同一個理由：平台逾時強制中止不會走到失敗分支，這是
+  單人工具不需要防併發搶按鈕）。
+
+### 設計決定
+
+- **沒有搬 apps-script 版的背景 job 狀態機**（`startBacktestV17Job`／
+  `getBacktestV17JobStatus`／`processBacktestV17JobTick_`／
+  `clearBacktestV17Job_`，靠 Script Properties 存狀態、分批 tick 執行）
+  ——那是 Apps Script 單次執行 6 分鐘上限逼出來的設計，Cloud Functions
+  單次呼叫可以宣告自己的 `timeoutSeconds`，一次同步跑完就夠，不需要
+  「背景分批」這層機制，也因此不需要「強制清除卡住 job」這顆按鈕
+  （`jobs/backtest` 本來就不是硬鎖，新呼叫自動覆寫掉卡住的舊狀態）。
+- **trades 欄位名稱改成英文**（`code`／`entryDate`／`finalReturnPct`...），
+  不是 apps-script 版 Sheets 的中文欄名（`證券代號`／`進場日`）——這份
+  結果直接回傳給前端／存進 `jobs/backtest`，跟 `reportPipeline.js` 的
+  `reportDocs` 同一個「新系統直接用英文欄名」慣例。
+- **沒有新建 `backtest_results` Firestore collection 存歷史回測結果**
+  ——apps-script 版本身也沒有把回測結果持久化到 Sheet，只存在 Script
+  Properties 的 job 狀態裡（跑完下一次就覆蓋），Firebase 版用
+  `jobs/backtest`（每次覆蓋）維持跟原本行為一致，不是遷移時漏做。
+  `schema.md` 原本把 `backtest_results` 標記「Phase 3，等背景 job 邏輯
+  一起遷移」——現在確認不需要這份 collection。
+- **`memory: '2GiB'`**（`BACKTEST_RUNTIME_OPTS_`，蓋掉 `RUNTIME_OPTS_`
+  預設的 `1GiB`）：回測要讀的資料量比戰報本身大（戰報只抓
+  `ANALYSIS_LOOKBACK_DAYS` 150 天暖機，回測區間另外還要加上進場區間
+  本身（最多 `BACKTEST_MAX_RANGE_DAYS` 60 天）跟出場追蹤緩衝
+  （`BACKTEST_MAX_HOLD_DAYS` 40 個交易日，換算日曆天數抓寬到約 64 天），
+  總共可能讀到 270 天以上的全市場資料，保守抓到 2GiB——這個開發環境
+  沒辦法實際跑一次量測真實記憶體用量，先用保守值，正式環境真的遇到
+  OOM 再調整。
+- **`errorToHttpsError_`**：`runBacktestCore_` 沿用 apps-script 版「驗證
+  失敗回傳 `{error}` 物件、不拋例外」的設計，在 onCall 邊界統一轉成
+  `HttpsError('failed-precondition', ...)`，跟這個 Firebase 版其他 onCall
+  一致（前端 catch 認的是拋出來的例外）。但
+  `runBacktestAllStrategiesCore_` 回傳的 `results[key].error`（某一個
+  策略因為沒套用因子模型跑不了，其他策略正常）**不**轉換，維持原樣當
+  正常資料的一部分——這是刻意的部分失敗設計，不是整批失敗。
+
+### 還沒做的事
+
+- `factor_model_rank`／`hybrid` 這兩個策略需要先套用一版抗跌力因子
+  迴歸模型才能跑回測——`FactorRegression.gs` 還沒遷移，目前跑這兩個
+  策略會回報「需要先套用模型，請先切換回 rule_v17」的錯誤（`rule_v17`
+  正常可用）。下一階段：遷移 `FactorRegression.gs`（BigQuery ML LASSO
+  迴歸，726 行，見上面「策略研究：開工前的比對分析」一節）。
+- 因子掃描（`factor_scan_results` collection，掃描當前候選名單在各種
+  因子組合下的表現分佈，不是回測歷史區間）還沒開始遷移，同樣留給
+  `FactorRegression.gs` 那個階段一起處理。

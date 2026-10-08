@@ -336,6 +336,7 @@ module.exports = {
   sanitizeStockId_: sanitizeStockId_,
   groupBy: groupBy,
   sortRows: sortRows,
+  mean_: mean_,
   rollingMean: rollingMean,
   rollingStd: rollingStd,
   rollingSum: rollingSum,

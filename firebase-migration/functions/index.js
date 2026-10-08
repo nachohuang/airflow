@@ -42,6 +42,8 @@ const scheduleLib = require('./lib/schedule');
 const aiDiagnosisLib = require('./lib/aiDiagnosis');
 const aiUsageLib = require('./lib/aiUsage');
 const twseFetchLib = require('./lib/twseFetch');
+const backtestLib = require('./lib/backtest');
+const analysisLib = require('./lib/analysis');
 
 admin.initializeApp();
 
@@ -102,6 +104,103 @@ async function fetchAppliedFactorModels_() {
     applied[data.labelKey] = { timestamp: data.timestamp, r2: data.r2, weights: data.weights };
   });
   return applied;
+}
+
+/**
+ * 2026-10-08 新增：策略研究（回測）第一支——查 BigQuery 指定區間（不是像
+ * `fetchHistoryRows_` 那樣固定「最近 ANALYSIS_LOOKBACK_DAYS 天」，回測要讀
+ * 任意一段過去的區間）的原始 History 列，轉成 computeFactors_ 期待的中文
+ * 欄名列。跟 `fetchHistoryRows_` 共用同一個 `stocksOnly: true` 規則（排除
+ * 權證/ETF），差別只在日期區間是呼叫端給的，不是「到今天為止」。 */
+async function fetchHistoryRangeRows_(bigQueryConfig, fromDateStr, toDateStr) {
+  if (!bigQueryConfig || !bigQueryConfig.projectId) {
+    throw new Error('config/app 的 bigQuery.projectId 是空的，請先完成 BigQuery 設定。');
+  }
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const sourceRef = bigquery.sourceRefForRead_(bigQueryConfig);
+  const sql = bigquery.buildHistoryRangeSql_(sourceRef, fromDateStr, toDateStr, { stocksOnly: true });
+  const [rows] = await client.query({ query: sql });
+  return rows.map(bigquery.mapBqRowToHistoryRow_).filter(function (r) { return r !== null; });
+}
+
+/**
+ * 回測用：抓一次「這段回測範圍（含追蹤緩衝）」的 History，算好因子——跟
+ * apps-script 版 `loadBacktestFactorRows_` 同一個用途，Firebase 版沒有
+ * native/materialized 兩條路徑的分別（一律走 BigQuery，見 README「每天
+ * 累積的股價及市場資料在哪裡遷移」的 Phase 2 結論），只有一條路徑。
+ * `loadStartStr` 往前多抓 `ANALYSIS_LOOKBACK_DAYS` 天當暖機期間——rolling
+ * 因子（MA60/IBF_20D 等）要跟正式戰報用同一套回看天數，算出來的訊號才會
+ * 跟「戰報與個股」看到的完全一致，不是另一套近似值。portfolioMap 給空
+ * 物件：回測把每一個訊號都當成「當天新進場」，不是既有持股。 */
+async function loadBacktestFactorRows_(bigQueryConfig, startStr, loadEndStr) {
+  const warmupStart = new Date(startStr + 'T00:00:00');
+  warmupStart.setDate(warmupStart.getDate() - config.ANALYSIS_LOOKBACK_DAYS);
+  const loadStartStr = utilsLib.normalizeDateStr(warmupStart);
+  const rawRows = await fetchHistoryRangeRows_(bigQueryConfig, loadStartStr, loadEndStr);
+  if (rawRows.length === 0) return [];
+  return analysisLib.computeFactors_(rawRows, {});
+}
+
+/** 單一策略回測的核心邏輯（不含 onCall 的 auth／job 狀態追蹤，見
+ *  `exports.runBacktest`）——對應 apps-script 版 `runBacktestV17_`。 */
+async function runBacktestCore_(bigQueryConfig, appliedFactorModels, startStr, endStr, targetProfit, strategyKey) {
+  targetProfit = targetProfit || backtestLib.BACKTEST_TARGET_DEFAULT;
+  strategyKey = analysisLib.SCREENING_STRATEGIES[strategyKey] ? strategyKey : analysisLib.SCREENING_STRATEGY_DEFAULT;
+  const strategyDef = analysisLib.SCREENING_STRATEGIES[strategyKey];
+
+  const rangeCheck = backtestLib.validateBacktestRange_(startStr, endStr);
+  if (rangeCheck.error) return rangeCheck;
+
+  if (strategyDef.needsFactorModel && !appliedFactorModels.downsideResistance) {
+    return { error: '篩選邏輯「' + strategyDef.label + '」需要先套用一版抗跌力因子迴歸模型，尚未遷移因子迴歸模型功能，請先切換回 rule_v17。' };
+  }
+
+  const loadEndStr = backtestLib.computeBacktestLoadEndStr_(endStr);
+  const rows = await loadBacktestFactorRows_(bigQueryConfig, startStr, loadEndStr);
+  if (rows.length === 0) {
+    return { error: '這段日期區間（含暖機資料）沒有 History 資料，請先確認資料已抓取。' };
+  }
+  if (strategyDef.needsFactorModel) analysisLib.computePredictedResistanceRanks_(rows, appliedFactorModels);
+
+  return backtestLib.simulateBacktestForStrategy_(rows, startStr, endStr, targetProfit, strategyKey);
+}
+
+/**
+ * 「一次跑全部策略比對」的核心邏輯——對應 apps-script 版
+ * `runBacktestAllStrategies_`：只抓一次資料，對同一批 rows 反覆呼叫
+ * `simulateBacktestForStrategy_` 跑不同策略，BigQuery 查詢費用只花一次，
+ * 不是乘以策略數。需要因子模型的版本（factor_model_rank／hybrid）在因子
+ * 迴歸模型功能遷移完成之前，一律回傳「需要先套用模型」的錯誤，不影響
+ * rule_v17 照常跑出結果。 */
+async function runBacktestAllStrategiesCore_(bigQueryConfig, appliedFactorModels, startStr, endStr, targetProfit) {
+  targetProfit = targetProfit || backtestLib.BACKTEST_TARGET_DEFAULT;
+
+  const rangeCheck = backtestLib.validateBacktestRange_(startStr, endStr);
+  if (rangeCheck.error) return rangeCheck;
+
+  const loadEndStr = backtestLib.computeBacktestLoadEndStr_(endStr);
+  const rows = await loadBacktestFactorRows_(bigQueryConfig, startStr, loadEndStr);
+  if (rows.length === 0) {
+    return { error: '這段日期區間（含暖機資料）沒有 History 資料，請先確認資料已抓取。' };
+  }
+
+  const hasResistanceModel = !!appliedFactorModels.downsideResistance;
+  if (hasResistanceModel) analysisLib.computePredictedResistanceRanks_(rows, appliedFactorModels);
+
+  const results = {};
+  Object.keys(analysisLib.SCREENING_STRATEGIES).forEach(function (key) {
+    const def = analysisLib.SCREENING_STRATEGIES[key];
+    if (def.needsFactorModel && !hasResistanceModel) {
+      results[key] = {
+        strategyKey: key, strategyLabel: def.label,
+        error: '需要先套用一版抗跌力因子迴歸模型，尚未遷移因子迴歸模型功能，請先切換回 rule_v17。'
+      };
+      return;
+    }
+    results[key] = backtestLib.simulateBacktestForStrategy_(rows, startStr, endStr, targetProfit, key);
+  });
+
+  return { startDay: startStr, endDay: endStr, targetProfit: targetProfit, results: results };
 }
 
 /**
@@ -703,6 +802,110 @@ exports.runFullScheduleNow = onCall(
     }
   }
 );
+
+/**
+ * 2026-10-08 新增：策略研究（回測）的 onCall 入口——`exports.runBacktest`
+ * （單一策略）跟 `exports.runBacktestAllStrategies`（一次跑全部策略比對）
+ * 共用 `jobs/backtest` 這個 key 追蹤狀態（`mode` 欄位區分是哪一種），跟
+ * `runHistoryBackfill`／`runFullScheduleNow` 同一套模式（見
+ * `writeJobStatus_` 的完整說明）：前端監聽這份文件顯示進度，按鈕不會被
+ * 鎖住，連線中斷／App 切到背景都不影響真正的執行狀態。
+ *
+ * `memory: '2GiB'`（蓋掉 `RUNTIME_OPTS_` 的 `1GiB`）——回測要讀的資料量比
+ * 戰報本身大不少：戰報只抓 `ANALYSIS_LOOKBACK_DAYS`（150）天，回測區間
+ * 另外再加上最多 `BACKTEST_MAX_RANGE_DAYS`（60）天的進場區間跟
+ * `BACKTEST_MAX_HOLD_DAYS`（40，換算日曆天數約 64 天）的出場追蹤緩衝，
+ * 總共可能讀到 270 天以上的全市場資料，戰報那邊 `1GiB` 的額度是針對
+ * 150 天實測出來的（約 270~290 MiB 用量，見 `RUNTIME_OPTS_` 的說明），
+ * 這裡資料量接近兩倍，保守抓到 `2GiB`——這個開發環境沒辦法實際跑一次
+ * 回測量測真實記憶體用量，先用保守值，真的在正式環境遇到 OOM 再調整。
+ *
+ * `errorToHttpsError_`：`runBacktestCore_`／`runBacktestAllStrategiesCore_`
+ * 沿用 apps-script 版「驗證失敗回傳 `{error}` 物件」的設計（不是拋例外），
+ * 這裡在 onCall 的邊界把「完全沒有跑起來」的 `{error}` 轉成
+ * `HttpsError('failed-precondition', ...)`，跟這個 Firebase 版其他 onCall
+ * 一致的慣例（前端的 catch 區塊認的是拋出來的例外，不是回傳值裡的
+ * `error` 欄位）——但 `runBacktestAllStrategiesCore_` 回傳的
+ * `results[key].error`（某一個策略因為沒有套用因子模型而跑不了，其他
+ * 策略正常）**不**轉換，維持原樣當正常資料的一部分回傳，這是刻意的
+ * 部分失敗設計，不是「整批失敗」。
+ */
+function errorToHttpsError_(result) {
+  if (result && result.error) throw new HttpsError('failed-precondition', result.error);
+  return result;
+}
+
+var BACKTEST_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '2GiB', timeoutSeconds: 540 });
+
+exports.runBacktest = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  if (!data.startDate || !data.endDate) {
+    throw new HttpsError('invalid-argument', '請提供 startDate／endDate（yyyy-MM-dd）。');
+  }
+  const startTime = Date.now();
+  await writeJobStatus_('backtest', {
+    status: 'running', startedAt: startTime, mode: 'single',
+    params: { startDate: data.startDate, endDate: data.endDate, targetProfit: data.targetProfit || null, strategyKey: data.strategyKey || null },
+    error: null
+  });
+  try {
+    const appConfig = await fetchAppConfig_();
+    if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+      throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+    }
+    const appliedFactorModels = await fetchAppliedFactorModels_();
+    const result = errorToHttpsError_(
+      await runBacktestCore_(appConfig.bigQuery, appliedFactorModels, data.startDate, data.endDate, data.targetProfit, data.strategyKey)
+    );
+    const durationMs = Date.now() - startTime;
+    const summaryMsg = data.startDate + '~' + data.endDate + '　' +
+      (result.summary ? result.summary.signalCount + ' 筆訊號、勝率 ' + result.summary.winRate + '%' : result.warning);
+    await logRun_('v17.0回測', '成功', summaryMsg, durationMs);
+    await writeJobStatus_('backtest', { status: 'succeeded', finishedAt: Date.now(), mode: 'single', result: result, error: null });
+    return result;
+  } catch (e) {
+    await logRun_('v17.0回測', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('backtest', { status: 'failed', finishedAt: Date.now(), mode: 'single', error: String(e.message || e) });
+    throw e;
+  }
+});
+
+exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  if (!data.startDate || !data.endDate) {
+    throw new HttpsError('invalid-argument', '請提供 startDate／endDate（yyyy-MM-dd）。');
+  }
+  const startTime = Date.now();
+  await writeJobStatus_('backtest', {
+    status: 'running', startedAt: startTime, mode: 'all',
+    params: { startDate: data.startDate, endDate: data.endDate, targetProfit: data.targetProfit || null },
+    error: null
+  });
+  try {
+    const appConfig = await fetchAppConfig_();
+    if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+      throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+    }
+    const appliedFactorModels = await fetchAppliedFactorModels_();
+    const result = errorToHttpsError_(
+      await runBacktestAllStrategiesCore_(appConfig.bigQuery, appliedFactorModels, data.startDate, data.endDate, data.targetProfit)
+    );
+    const durationMs = Date.now() - startTime;
+    const summaryMsg = Object.keys(result.results || {}).map(function (k) {
+      const r = result.results[k];
+      return r.strategyLabel + '：' + (r.summary ? '勝率 ' + r.summary.winRate + '%' : (r.error || r.warning));
+    }).join('　');
+    await logRun_('v17.0回測', '成功', summaryMsg, durationMs);
+    await writeJobStatus_('backtest', { status: 'succeeded', finishedAt: Date.now(), mode: 'all', result: result, error: null });
+    return result;
+  } catch (e) {
+    await logRun_('v17.0回測', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('backtest', { status: 'failed', finishedAt: Date.now(), mode: 'all', error: String(e.message || e) });
+    throw e;
+  }
+});
 
 /**
  * `generateDailyReport`（onRequest，方便部署後用 curl 直接驗證）／

@@ -148,13 +148,23 @@ Firestore 版本一樣要在 Cloud Function 層做，Firestore Security Rules �
 
 ---
 
-## 7. `backtest_results/{runId}`、`factor_scan_results/{runId}`、`factor_model_history/{runId}`
+## 7. `factor_scan_results/{runId}`、`factor_model_history/{runId}`
 
-三張都是「背景工作跑完的結果快取」，結構直接對應 `BACKTEST` /
+兩張都是「背景工作跑完的結果快取」，結構直接對應
 `FACTOR_SCAN` / `FACTOR_MODEL_COLUMNS` 現行欄位定義，文件 ID 用執行批次的
-時間戳記或 UUID。這三張非即時關鍵、也不常查詢，Phase 2 不急著遷，排在
-Phase 3 跟對應的背景工作邏輯一起搬（因為欄位是那幾支背景工作自己寫出來的，
-邏輯沒搬完之前，資料格式都還可能因為順便重構而調整）。
+時間戳記或 UUID。這兩張非即時關鍵、也不常查詢，Phase 2 不急著遷，排在
+Phase 3 跟對應的背景工作邏輯（`FactorRegression.gs`）一起搬（因為欄位是
+那幾支背景工作自己寫出來的，邏輯沒搬完之前，資料格式都還可能因為順便
+重構而調整）。`factor_model_history` 已經在用（`fetchAppliedFactorModels_`
+讀取已套用的因子模型，`runDailyAnalysis_`／回測都會查詢），只是寫入端
+（迴歸模型訓練本身）還沒遷移。
+
+2026-10-08：原本列在這裡的 `backtest_results/{runId}` **不需要建立**
+——`Backtest.gs` 遷移到 Firebase 後確認：apps-script 版本身也沒有把回測
+結果持久化到 Sheet，只存在 Script Properties 的背景 job 狀態裡（跑完
+下一次就覆蓋），Firebase 版用 `jobs/backtest`（同樣每次覆蓋，不是歷史
+紀錄）維持跟原本行為一致，見 `firebase-migration/README.md`「策略研究
+（一）——Backtest.gs 回測功能遷移到 Firebase」一節。
 
 ---
 
