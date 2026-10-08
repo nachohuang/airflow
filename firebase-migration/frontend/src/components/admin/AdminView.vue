@@ -867,7 +867,7 @@ const runLogLatestByCategory = computed(function () {
         </p>
       </div>
 
-      <HistoryCalendarCard />
+      <HistoryCalendarCard :skip-dates="skipDates" />
 
       <div class="form-card">
         <h3>BigQuery 設定</h3>
