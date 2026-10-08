@@ -237,9 +237,24 @@ const factorRegJobStatusLabel = computed(function () {
   return labels[factorRegJob.value.status] || factorRegJob.value.status;
 });
 
+// 2026-10-08 修正：使用者實測按「開始訓練」後畫面立刻顯示執行狀態
+// 「done」、完全沒有任何歷史紀錄——除錯日誌顯示 callable 呼叫本身
+//「Load failed」（連線層級錯誤，請求可能根本沒送達後端）。這支跟
+// FinancialsCoverageCard.vue runBackfillNow 遇到的情況看似相同、其實
+// 不一樣：那邊已經證實後端不受前端斷線影響、照樣跑完，所以「連線錯誤
+// 不顯示」是對的；這裡「立刻」顯示舊狀態（不是先變成「執行中」再卡住）
+// 代表後端很可能完全沒收到這次請求（不是收到了但前端斷線看不到後續），
+// 照搬同一套「連線錯誤一律不顯示」的邏輯反而會讓使用者以為有送出、
+// 其實什麼都沒發生。改成送出失敗時先記下點擊時間，幾秒後檢查
+// jobs/factorRegression 的 startedAt 有沒有真的更新成這次點擊之後的
+// 時間——沒有才顯示錯誤，真的送達後端（startedAt 變新）就不顯示，
+// 兩種情況都顧到。
+let factorRegClickedAt = 0;
+
 async function runFactorRegressionNow() {
   factorRegStarting.value = true;
   factorRegStartError.value = '';
+  factorRegClickedAt = Date.now();
   try {
     await callFn('runFactorRegression', {
       l1Reg: Number(factorRegForm.value.l1Reg) || undefined
@@ -248,6 +263,15 @@ async function runFactorRegressionNow() {
     const code = e.code || '';
     if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
       factorRegStartError.value = e.message || String(e);
+    } else {
+      const clickedAt = factorRegClickedAt;
+      setTimeout(function () {
+        const job = factorRegJob.value;
+        const reachedBackend = job && job.startedAt && job.startedAt >= clickedAt;
+        if (!reachedBackend) {
+          factorRegStartError.value = '送出失敗，請求可能沒有送達後端（連線中斷），下面的執行狀態如果不是「執行中」就代表真的沒送出，請重新點一次「開始訓練」。';
+        }
+      }, 6000);
     }
   } finally {
     factorRegStarting.value = false;
