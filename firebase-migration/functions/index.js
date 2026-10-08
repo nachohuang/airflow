@@ -640,6 +640,45 @@ var RUNTIME_OPTS_ = { memory: '1GiB', timeoutSeconds: 180 };
  */
 var LIGHT_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '512MiB', cpu: 0.25, concurrency: 1 });
 
+/**
+ * 2026-10-08 擴大適用範圍：上面訂的規則是「只套用在真的單純讀寫
+ * Firestore、不碰 BigQuery／外部 API／LLM 的函式上」——這條規則本身是
+ * 「碰不碰 BigQuery」這個粗略的二分法，不是真的照每支函式實際查詢的
+ * 資料量來判斷。使用者今天實測遇到配額問題持續惡化（同一次部署，一次
+ * 修好一批函式、同時又撞壞另一批，像打地鼠），要求「依據實際用量給予
+ * 最適配置」——重新檢查每一支目前還在用 `RUNTIME_OPTS_` 的函式實際
+ * 查詢/處理的資料量後，以下 9 支雖然會查 BigQuery 或打 TWSE OpenAPI，
+ * 但資料量跟「算戰報」（150 天 × 全市場 150~290 萬列）或「回測/因子
+ * 掃描」（可能讀全部歷史）完全不是同一個量級，查詢本身都是有界的小量：
+ *
+ * - `getHistoryOverview`／`getHistoryDailyCounts`：BigQuery 聚合查詢
+ *   （`MIN`/`MAX`/`COUNT`/`GROUP BY date`），運算在 BigQuery 那一端做完，
+ *   Node 端只收到幾十列的彙總結果，不是把原始列整批拉進記憶體。
+ * - `getStockDetail`／`getStockFactorDetail`：只查單一檔股票（`240`／
+ *   `365` 天上限），再怎麼大也是幾百列。
+ * - `searchStockCodes`：只查最近 10 天、3 個欄位、`LIMIT 500`。
+ * - `runIndustryMapRefresh`：TWSE+TPEX 全市場公司基本資料（一千多~兩千
+ *   列）＋比對涵蓋率只讀「最新一天」的 History（同量級），跟「讀 150 天」
+ *   差了兩個數量級。
+ * - `runFinancialsRefresh`：TWSE OpenAPI 三個「目前最新一期」全市場
+ *   快照（各一千多列）＋讀回目前累積的 `financials_monthly`／
+ *   `financials_quarterly`（實測約 8700／1000 筆，見 Admin 頁面「財報
+ *   因子資料完整性月曆」），量級跟 `industry_map` 同一等級。
+ * - `runManualHistoryFetch`：單一天的 TWSE 三端點合併，不是一段區間。
+ * - `cleanupFinancialsNonListedCodes`：單純掃過 `financials_monthly`
+ *   （同上，約 8700 筆）做篩選＋批次刪除。
+ *
+ * 這 9 支改成跟其他已經在用的輕量 CRUD 函式一樣套用
+ * `LIGHT_RUNTIME_OPTS_`，單支從 1 vCPU 降到 0.25 vCPU，9 支加總起來讓出
+ * 約 6.75 vCPU 的配額餘裕——在 20 vCPU 硬上限、20 幾支函式共用的情況下
+ * 是有意義的改善。其他真的會把大量資料整批拉進 Node 記憶體、或要重算
+ * rolling window 的函式（`generateDailyReport`系列、`runBacktest`系列、
+ * `runFactorRegression`、`runFactorCorrelationScan`、
+ * `runHistoryBackfill`、`runFinancialsBackfillMops`、三支 AI 診斷）維持
+ * 不動——這些不是「順手也降一降」的對象，降了有實際 OOM／逾時風險，
+ * 這個開發環境也沒辦法實際部署驗證冷啟動/尖峰用量，沒把握的情況下不
+ * 賭更激進的數字。 */
+
 /** `skip_dates` collection 的文件 ID（就是日期字串 `yyyy-MM-dd`，見
  *  firestore/schema.md §5），組成 Set 給 `scheduleLib.shouldRunDailyReport_`
  *  用——collection 很小（偶爾才加一筆臨時停跑日），直接整個撈回來，不用查詢。 */
@@ -1125,7 +1164,7 @@ async function doRefreshIndustryMap_(bigQueryConfig) {
   };
 }
 
-exports.runIndustryMapRefresh = onCall(RUNTIME_OPTS_, async function (request) {
+exports.runIndustryMapRefresh = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const startTime = Date.now();
   await writeJobStatus_('industryMapRefresh', { status: 'running', startedAt: startTime, error: null });
@@ -1445,7 +1484,7 @@ async function ensureFundamentalFeatureView_(bigQueryConfig) {
   await client.query({ query: bigquery.buildFundamentalFeatureViewSql_(baseViewRef, ratiosTableRef, revenueTableRef, outputViewRef) });
 }
 
-exports.runFinancialsRefresh = onCall(RUNTIME_OPTS_, async function (request) {
+exports.runFinancialsRefresh = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const startTime = Date.now();
   await writeJobStatus_('financialsRefresh', { status: 'running', startedAt: startTime, error: null });
@@ -1771,7 +1810,7 @@ exports.runManualReportRecompute = onCall(RUNTIME_OPTS_, async function (request
  *  今天（台北時間）——對應 apps-script 版「立即更新今日資料」按鈕
  *  （`runManualFetchToday`）。回傳這一天的抓取結果，方便 Admin 頁面顯示／
  *  部署後用 curl 直接驗證有沒有接線成功。 */
-exports.runManualHistoryFetch = onCall(RUNTIME_OPTS_, async function (request) {
+exports.runManualHistoryFetch = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   const dateStr = data.date || utilsLib.todayStrTaipei_();
@@ -1888,7 +1927,7 @@ exports.runHistoryBackfill = onCall(
  *  的日期範圍／交易日數／股票數／總列數——跟 apps-script 版 `getHistoryOverview`
  *  同一個用途，查的是「App 實際讀到的來源」而不是固定查 `history_raw`，
  *  這樣畫面上的數字才會跟戰報實際算出來的結果對得上。 */
-exports.getHistoryOverview = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getHistoryOverview = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const appConfig = await fetchAppConfig_();
   if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
@@ -1916,7 +1955,7 @@ exports.getHistoryOverview = onCall(RUNTIME_OPTS_, async function (request) {
  * 版沒有對應功能可以照抄，這是全新設計的檢查工具。跟 `getHistoryOverview`
  * 一樣查 `sourceRefForRead_`（這個 App 實際在用的來源），不是固定查
  * `history_raw`，月曆上看到的缺口才會跟戰報實際讀到的資料一致。 */
-exports.getHistoryDailyCounts = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getHistoryDailyCounts = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   const month = String(data.month || '').trim();
@@ -2220,7 +2259,7 @@ function buildHoldingInfo_(portfolioMap, code, latestClose) {
  *  Firestore／collectionGroup 三種 I/O 混在一起，所以用一支 onCall 一次
  *  打包回傳，不拆成多支個別呼叫——前端要顯示的是同一個頁面，沒有理由讓
  *  使用者等好幾次 round trip。 */
-exports.getStockDetail = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getStockDetail = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   if (!data.code) throw new HttpsError('invalid-argument', '股票代號不可為空');
@@ -2275,7 +2314,7 @@ exports.getStockDetail = onCall(RUNTIME_OPTS_, async function (request) {
  * `factor_features_fundamental` 這兩個 view 是最新定義，不會查到部署
  * 改掉之前的舊版本。
  */
-exports.getStockFactorDetail = onCall(RUNTIME_OPTS_, async function (request) {
+exports.getStockFactorDetail = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   const code = utilsLib.sanitizeStockId_(data.code);
@@ -2345,7 +2384,7 @@ exports.getStockFactorDetail = onCall(RUNTIME_OPTS_, async function (request) {
  *  任何一檔股票打開詳情頁。回傳最多 20 筆 {code, name}，依最新資料的代號
  *  去重（BigQuery 查回來的是原始列，同一檔代號會有很多天，這裡只取最新
  *  那筆的名稱）。 */
-exports.searchStockCodes = onCall(RUNTIME_OPTS_, async function (request) {
+exports.searchStockCodes = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   const q = String(data.query || '').trim();
@@ -2695,7 +2734,7 @@ async function cleanupMopsBackfillOtcRows_(bigQueryConfig) {
 // 這支連續好幾次因為配額衝突沒部署成功（這次是真的健康檢查失敗，不是
 // 被跳過，getFinancialsCoverage／runFinancialsBackfillMops 這兩支這次
 // 已經確認部署成功了），再改一次原始碼重試。
-exports.cleanupFinancialsNonListedCodes = onCall(RUNTIME_OPTS_, async function (request) {
+exports.cleanupFinancialsNonListedCodes = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   try {
     const appConfig = await fetchAppConfig_();

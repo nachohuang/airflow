@@ -3197,3 +3197,43 @@ client 讀回來是 `BigQueryDate` 物件（`{ value: 'yyyy-MM-dd' }`，實測
 
 唯讀查詢，不寫入或改動任何資料，不用 `jobs/{jobKey}` 監聽模式，一次
 `callFn` 直接拿結果即可。
+
+## 2026-10-08：擴大 LIGHT_RUNTIME_OPTS_ 適用範圍（依實際用量重新分級）
+
+今天的部署反覆撞上「Quota exceeded for total allowable CPU per project
+per region」——這個專案在 `us-central1` 的 Cloud Run CPU 配額硬上限是
+20,000 milli vCPU（20 顆），申請提高被 GCP 拒絕。`LIGHT_RUNTIME_OPTS_`
+原本的適用規則是「只套用在真的單純讀寫 Firestore、不碰 BigQuery／外部
+API／LLM 的函式上」——這是「碰不碰 BigQuery」的粗略二分法，不是真的
+照每支函式實際查詢的資料量判斷。用這條規則重新部署全部函式時，一次
+部署會「修好一批、同時撞壞另一批」（像打地鼠），因為大多數函式（含
+一堆單純讀寫一兩筆 Firestore 文件的 CRUD）預設都吃滿 1 vCPU，20 幾支
+函式疊起來遠超過 20 vCPU 的上限。
+
+使用者要求「依據實際用量給予最適配置」，重新檢查每一支還在用
+`RUNTIME_OPTS_`（1 vCPU）的函式實際查詢/處理的資料量，把其中 9 支改成
+`LIGHT_RUNTIME_OPTS_`（0.25 vCPU）——這 9 支雖然會查 BigQuery 或打 TWSE
+OpenAPI，但資料量都是有界的小量，跟「算戰報」（150 天 × 全市場
+150~290 萬列）或「回測/因子掃描」（可能讀全部歷史）完全不是同一個
+量級：
+
+- `getHistoryOverview`／`getHistoryDailyCounts`：BigQuery 聚合查詢，
+  Node 端只收到幾十列彙總結果。
+- `getStockDetail`／`getStockFactorDetail`：只查單一檔股票（240／365
+  天上限）。
+- `searchStockCodes`：只查最近 10 天、3 欄、`LIMIT 500`。
+- `runIndustryMapRefresh`：全市場公司基本資料（一千多~兩千列）＋只讀
+  「最新一天」的 History 比對涵蓋率。
+- `runFinancialsRefresh`：TWSE OpenAPI 三個「最新一期」全市場快照＋讀回
+  目前累積的 `financials_monthly`／`financials_quarterly`（實測約
+  8700／1000 筆）。
+- `runManualHistoryFetch`：單一天的 TWSE 三端點合併。
+- `cleanupFinancialsNonListedCodes`：掃過 `financials_monthly`（同上）
+  篩選＋批次刪除。
+
+9 支從 1 vCPU 降到 0.25 vCPU，加總讓出約 6.75 vCPU 的配額餘裕。其他真的
+會把大量資料整批拉進 Node 記憶體、或要重算 rolling window 的函式
+（`generateDailyReport` 系列、`runBacktest` 系列、`runFactorRegression`、
+`runFactorCorrelationScan`、`runHistoryBackfill`、
+`runFinancialsBackfillMops`、三支 AI 診斷）維持不動——這個開發環境沒辦法
+實際部署驗證冷啟動／尖峰用量，沒把握的情況下不賭更激進的數字。
