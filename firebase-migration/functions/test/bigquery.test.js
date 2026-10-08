@@ -330,15 +330,24 @@ const bq = require('../lib/bigquery');
 }
 
 // --- buildFundamentalFeatureViewSql_ ---
+// 2026-10-08 修正：原本用相關子查詢（`fr.report_date = (SELECT MAX(...)
+// WHERE fr2.stock_id = base.stock_id ...)`）寫在 JOIN 的 ON 子句裡，
+// 使用者實際執行訓練時被 BigQuery 拒絕：「Unsupported subquery with
+// table in join predicate.」——改用 ARRAY_AGG(... ORDER BY ... LIMIT 1)
+// 在獨立 CTE 裡算「point-in-time 最後一期」，JOIN 的 ON 子句只剩一般
+// 的不等式／等值條件，不再有參照外層資料表的相關子查詢。
 {
   const sql = bq.buildFundamentalFeatureViewSql_('proj.ds.factor_features', 'proj.ds.financial_ratios', 'proj.ds.financial_revenue', 'proj.ds.factor_features_fundamental');
   assert.ok(sql.indexOf('CREATE OR REPLACE VIEW `proj.ds.factor_features_fundamental`') !== -1);
   assert.ok(sql.indexOf('FROM `proj.ds.factor_features` base') !== -1, '疊在既有 factor_features view 之上，不是重算一次');
-  assert.ok(sql.indexOf('fr2.report_date <= base.date') !== -1, '財報因子要用「公告日 <= 這一天」做點對點正確的 join，避免未來函數');
-  assert.ok(sql.indexOf('rev2.report_date <= base.date') !== -1, '月營收因子同一個點對點正確性要求');
+  assert.ok(sql.indexOf('fr.report_date <= base.date') !== -1, '財報因子要用「公告日 <= 這一天」做點對點正確的 join，避免未來函數');
+  assert.ok(sql.indexOf('rev.report_date <= base.date') !== -1, '月營收因子同一個點對點正確性要求');
+  assert.ok(sql.indexOf('ARRAY_AGG(fr ORDER BY fr.report_date DESC LIMIT 1)') !== -1, '用 ARRAY_AGG 取代相關子查詢（BigQuery 不支援 JOIN ON 子句裡參照外層資料表的相關子查詢）');
+  assert.ok(sql.indexOf('ARRAY_AGG(rev ORDER BY rev.report_date DESC LIMIT 1)') !== -1);
+  assert.ok(sql.indexOf('(SELECT MAX(') === -1, '不應該再出現舊版那種 JOIN ON 子句裡的相關子查詢寫法');
   assert.ok(sql.indexOf('fundamental_gross_margin_streak') !== -1);
   assert.ok(sql.indexOf('fundamental_revenue_growth_streak') !== -1);
-  console.log('Test buildFundamentalFeatureViewSql_ (layers on top of base view, point-in-time join condition, exposes all 10 fundamental columns) passed.');
+  console.log('Test buildFundamentalFeatureViewSql_ (layers on top of base view, point-in-time as-of join via ARRAY_AGG not correlated subquery-in-JOIN, exposes all 10 fundamental columns) passed.');
 }
 
 console.log('All bigquery.js tests passed.');

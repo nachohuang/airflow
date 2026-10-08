@@ -3036,3 +3036,27 @@ LASSO 選中這批因子，權重會被 `computeWeightedFactorScore_` 既有的�
   問題，會隨季報資料逐季累積而改善。
 - 還是只接了 10 個基本面因子，另外 38 個因子（產業資金流向／動能時機）
   不在這次範圍內，見上方「還沒做的事」。
+
+### 2026-10-08 追加：buildFundamentalFeatureViewSql_ 的 BigQuery SQL 錯誤
+
+使用者實際按「開始訓練」才第一次讓這段 SQL 真正連上 BigQuery 執行
+（這個開發環境連不到 BigQuery，部署流程這幾個小時也一直卡在 Cloud Run
+配額／IAM 權限問題，見下面兩節，到這之前這段 SQL 從寫出來就沒機會真的
+跑過）——結果被 BigQuery 拒絕：
+
+```
+Unsupported subquery with table in join predicate.
+```
+
+原因：`buildFundamentalFeatureViewSql_`（見「余博邏輯延伸的基本面因子」
+一節）原本在 `LEFT JOIN ... ON` 子句裡用相關子查詢直接參照外層 `base`
+的欄位（`fr.report_date = (SELECT MAX(...) WHERE fr2.stock_id =
+base.stock_id AND fr2.report_date <= base.date)`）——這是 BigQuery
+Standard SQL 的已知限制，JOIN 的 ON 子句不支援參照外層資料表的相關
+子查詢，在這個開發環境裡沒辦法連線測試，寫的時候沒發現。
+
+修正：改用 `ARRAY_AGG(... ORDER BY report_date DESC LIMIT 1)[OFFSET(0)]`
+在獨立的 CTE 裡算「point-in-time 最後一期財報」，JOIN 的 ON 子句只剩
+一般的不等式／等值條件，不再有參照外層資料表的相關子查詢——
+point-in-time 正確性的語意完全不變（條件還是 `report_date <=
+base.date`），只是換一種 BigQuery 支援的寫法表達。

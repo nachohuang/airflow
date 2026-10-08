@@ -530,34 +530,58 @@ function buildSyncFinancialRevenueSql_(tableRef, rows) {
  * （`fundamental_` 前綴）要加進 `config.js` 的 `FACTOR_CANDIDATE_COLUMNS`
  * 才會真的被 LASSO 考慮進去。
  */
+/**
+ * 2026-10-08 修正：原本的寫法在 `LEFT JOIN ... ON` 的條件裡用相關子查詢
+ * （`fr.report_date = (SELECT MAX(...) WHERE fr2.stock_id = base.stock_id
+ * AND fr2.report_date <= base.date)`）直接參照外層 `base` 的欄位，這段
+ * SQL 從寫出來到現在都沒有機會真的連上 BigQuery 執行過（這個開發環境
+ * 連不到 BigQuery，部署流程也一直卡在其他問題，直到今天使用者實際按
+ * 「開始訓練」才第一次真正執行到這段 SQL）——實際執行會被 BigQuery
+ * 拒絕：`Unsupported subquery with table in join predicate.`，這是
+ * BigQuery Standard SQL 的已知限制，JOIN 的 ON 子句裡不能放「參照到
+ * 外層資料表」的相關子查詢。
+ *
+ * 改用 `ARRAY_AGG(... ORDER BY report_date DESC LIMIT 1)[OFFSET(0)]`
+ * 先在獨立的 CTE 裡把「每個 (stock_id, date) 組合，日期 <= 這一天的
+ * 最後一期財報」算出來（用一般的不等式 JOIN + GROUP BY，不是相關子
+ * 查詢），再用普通的等值 JOIN 接回 base——語意完全不變（point-in-time
+ * 正確性：JOIN 條件還是 `report_date <= base.date`，只是算「最後一筆」
+ * 的方式換了，不是用 SQL 本身做不到的寫法），BigQuery 也能正常執行。
+ */
 function buildFundamentalFeatureViewSql_(baseFeatureViewRef, financialRatiosTableRef, financialRevenueTableRef, outputViewRef) {
   return [
     'CREATE OR REPLACE VIEW `' + outputViewRef + '` AS',
+    'WITH base_fr AS (',
+    '  SELECT base.stock_id, base.date,',
+    '    ARRAY_AGG(fr ORDER BY fr.report_date DESC LIMIT 1)[OFFSET(0)] AS fr',
+    '  FROM `' + baseFeatureViewRef + '` base',
+    '  JOIN `' + financialRatiosTableRef + '` fr',
+    '    ON fr.stock_id = base.stock_id AND fr.report_date <= base.date',
+    '  GROUP BY base.stock_id, base.date',
+    '),',
+    'base_rev AS (',
+    '  SELECT base.stock_id, base.date,',
+    '    ARRAY_AGG(rev ORDER BY rev.report_date DESC LIMIT 1)[OFFSET(0)] AS rev',
+    '  FROM `' + baseFeatureViewRef + '` base',
+    '  JOIN `' + financialRevenueTableRef + '` rev',
+    '    ON rev.stock_id = base.stock_id AND rev.report_date <= base.date',
+    '  GROUP BY base.stock_id, base.date',
+    ')',
     'SELECT',
     '  base.*,',
-    '  fr.gross_margin_pct AS fundamental_gross_margin_pct,',
-    '  fr.operating_margin_pct AS fundamental_operating_margin_pct,',
-    '  fr.net_margin_pct AS fundamental_net_margin_pct,',
-    '  fr.roe_pct AS fundamental_roe_pct,',
-    '  fr.gross_margin_streak AS fundamental_gross_margin_streak,',
-    '  fr.operating_margin_streak AS fundamental_operating_margin_streak,',
-    '  fr.net_margin_streak AS fundamental_net_margin_streak,',
-    '  fr.roe_streak AS fundamental_roe_streak,',
-    '  rev.revenue_yoy_pct AS fundamental_revenue_yoy_pct,',
-    '  rev.revenue_growth_streak AS fundamental_revenue_growth_streak',
+    '  base_fr.fr.gross_margin_pct AS fundamental_gross_margin_pct,',
+    '  base_fr.fr.operating_margin_pct AS fundamental_operating_margin_pct,',
+    '  base_fr.fr.net_margin_pct AS fundamental_net_margin_pct,',
+    '  base_fr.fr.roe_pct AS fundamental_roe_pct,',
+    '  base_fr.fr.gross_margin_streak AS fundamental_gross_margin_streak,',
+    '  base_fr.fr.operating_margin_streak AS fundamental_operating_margin_streak,',
+    '  base_fr.fr.net_margin_streak AS fundamental_net_margin_streak,',
+    '  base_fr.fr.roe_streak AS fundamental_roe_streak,',
+    '  base_rev.rev.revenue_yoy_pct AS fundamental_revenue_yoy_pct,',
+    '  base_rev.rev.revenue_growth_streak AS fundamental_revenue_growth_streak',
     'FROM `' + baseFeatureViewRef + '` base',
-    'LEFT JOIN `' + financialRatiosTableRef + '` fr',
-    '  ON fr.stock_id = base.stock_id',
-    '  AND fr.report_date = (',
-    '    SELECT MAX(fr2.report_date) FROM `' + financialRatiosTableRef + '` fr2',
-    '    WHERE fr2.stock_id = base.stock_id AND fr2.report_date <= base.date',
-    '  )',
-    'LEFT JOIN `' + financialRevenueTableRef + '` rev',
-    '  ON rev.stock_id = base.stock_id',
-    '  AND rev.report_date = (',
-    '    SELECT MAX(rev2.report_date) FROM `' + financialRevenueTableRef + '` rev2',
-    '    WHERE rev2.stock_id = base.stock_id AND rev2.report_date <= base.date',
-    '  )'
+    'LEFT JOIN base_fr ON base_fr.stock_id = base.stock_id AND base_fr.date = base.date',
+    'LEFT JOIN base_rev ON base_rev.stock_id = base.stock_id AND base_rev.date = base.date'
   ].join('\n');
 }
 
