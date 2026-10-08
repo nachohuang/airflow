@@ -2560,7 +2560,9 @@ async function cleanupMopsBackfillOtcRows_(bigQueryConfig) {
 
 // 2026-10-08 補充：同一個「rerun_failed_jobs 被 Firebase CLI 誤判成無
 // 變更而跳過」問題，見 exports.runFinancialsBackfillMops 上方的說明——
-// 這支也連續好幾次被跳過，再補一次強制重新部署。
+// 這支連續好幾次因為配額衝突沒部署成功（這次是真的健康檢查失敗，不是
+// 被跳過，getFinancialsCoverage／runFinancialsBackfillMops 這兩支這次
+// 已經確認部署成功了），再改一次原始碼重試。
 exports.cleanupFinancialsNonListedCodes = onCall(RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   try {
