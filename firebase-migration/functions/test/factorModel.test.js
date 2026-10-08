@@ -43,6 +43,43 @@ const factorModel = require('../lib/factorModel');
     0, '全部因子權重都是 0 時，缺值也不該讓分數變成 null（應該是 0，不是 null）'
   );
 
+  // 2026-10-08 再新增：權重不是精確 0、但絕對值小於 NEGLIGIBLE_WEIGHT_EPSILON_
+  // 的因子（BATCH_GRADIENT_DESCENT 訓練出來的典型結果，不是封閉解座標下降法，
+  // 幾乎不會把係數壓到精確的 0）——一樣要被當成「可忽略」跳過，不能只比對
+  // `=== 0`，否則使用者實測遇到的「整個回測區間零訊號」完全沒被修好。
+  assert.strictEqual(
+    factorModel.computeWeightedFactorScore_(
+      { Inst_Participation: 2, Trend_Score: 3, Fundamental_Roe_Pct: null },
+      { inst_participation: 2, trend_score: 1, fundamental_roe_pct: 3e-7 }
+    ),
+    7, '權重極小（低於門檻）但不是精確 0 的因子，缺值也不該否決整個分數'
+  );
+  assert.strictEqual(
+    factorModel.computeWeightedFactorScore_(
+      { Inst_Participation: 2, Trend_Score: 3, Fundamental_Roe_Pct: null },
+      { inst_participation: 2, trend_score: 1, fundamental_roe_pct: -3e-7 }
+    ),
+    7, '負的極小權重也要同樣處理（用絕對值比較，不是只擋正數那一邊）'
+  );
+  // 權重大於門檻（即使很小，但不是「可忽略」等級）的因子缺值，仍然要整個否決——
+  // 門檻不能設得太寬，不然會連真的有一點訊號的因子都悄悄放過。
+  assert.strictEqual(
+    factorModel.computeWeightedFactorScore_(
+      { Inst_Participation: 2, Fundamental_Roe_Pct: null },
+      { inst_participation: 2, fundamental_roe_pct: 0.01 }
+    ),
+    null, '權重明顯大於可忽略門檻時，缺值依然要整個否決'
+  );
+  // NaN 權重（零變異欄位在某些數值流程下可能產生）：不管值是多少都不該讓 NaN
+  // 污染整個加總，效果等同於「這個因子沒有可用資訊」，跳過即可。
+  assert.strictEqual(
+    factorModel.computeWeightedFactorScore_(
+      { Inst_Participation: 2, Fundamental_Roe_Pct: 5 },
+      { inst_participation: 2, fundamental_roe_pct: NaN }
+    ),
+    4, 'NaN 權重要跳過，不能讓 sum 被污染成 NaN'
+  );
+
   // 混合情況：權重是 0 的因子缺值被跳過，但權重不是 0 的另一個因子缺值仍然要
   // 整個否決——兩種因子同時出現時，不能讓「有一個權重是 0」誤判成整列都安全。
   assert.strictEqual(

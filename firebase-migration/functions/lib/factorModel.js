@@ -32,9 +32,22 @@ var config = require('./config');
  * 0——「跳過它」跟「它值的多少改變最終結果」在這個情況下是同一件事，不是上面那段
  * 「悄悄假設缺值貢獻為 0」的風險（那段風險的前提是權重不是 0，缺值被當成 0 貢獻
  * 才會把分數算得比實際情況更可信；權重真的是 0 時，就算有真實值，貢獻也還是
- * 0，沒有「被低估」的問題）。所以只在 `weights[bqName] === 0` 時才跳過 null 檢查，
- * 其他權重不是 0 的因子維持原本「缺值就整個否決」的保守邏輯不變。
+ * 0，沒有「被低估」的問題）。
+ *
+ * 2026-10-08 再修正：原本只在 `weights[bqName] === 0`（精確等於 0）時才跳過 null
+ * 檢查，但使用者實測套用新模型後，`factor_model_rank`／`hybrid` 還是整個回測區間
+ * 零訊號——這份訓練用的是 `optimize_strategy='BATCH_GRADIENT_DESCENT'`
+ * （見 `lib/factorRegression.js buildTrainModelSql_` 的說明），不是封閉解的座標
+ * 下降法，L1 正規化把「零資訊」因子的係數壓到極小但不精確等於 0 的浮點數（例如
+ * `0.0000003`）是預期中的常見結果，不是異常——`=== 0` 這個精確比較幾乎抓不到這種
+ * 情況，於是跟修正前一樣，這幾個覆蓋率近乎 0 的新因子的 null 值還是會把整個分數
+ * 否決掉。改成「權重的絕對值小於 `NEGLIGIBLE_WEIGHT_EPSILON_`」就跳過 null
+ * 檢查——其他因子（`bias60`／`inst_part_ma5` 等）經確認權重量級明顯大於這個門檻
+ * （R² 看得出模型確實從這些因子學到了一些訊號，不會是跟雜訊同一個量級），不會被
+ * 誤判成「可忽略」而被不小心放寬了保守的 null 否決邏輯。
  */
+var NEGLIGIBLE_WEIGHT_EPSILON_ = 1e-6;
+
 function computeWeightedFactorScore_(row, weights) {
   if (!weights) return null;
   var sum = 0;
@@ -44,7 +57,10 @@ function computeWeightedFactorScore_(row, weights) {
     var analysisField = config.BQ_FEATURE_TO_ANALYSIS_FIELD[bqName];
     if (!analysisField) continue; // 理論上不會發生（權重欄位都來自候選因子清單），保守跳過
     var w = weights[bqName];
-    if (w === 0) continue; // 權重是 0，這個因子不管缺不缺值對加總都沒有影響
+    // isNaN(w) 也視為可忽略一起跳過（NaN 權重不管乘上什麼值都只會污染 sum 變成
+    // NaN，跟「這個因子沒有可用資訊」是同一個結論，不是另一種需要否決整個分數的
+    // 情況）；`Math.abs(NaN) < epsilon` 恆為 false，不能只靠下面這個比較涵蓋到。
+    if (isNaN(w) || Math.abs(w) < NEGLIGIBLE_WEIGHT_EPSILON_) continue; // 權重可忽略，這個因子不管缺不缺值對加總都沒有實質影響
     var v = row[analysisField];
     if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
     sum += w * v;
@@ -66,6 +82,7 @@ function computePredictedFactorScores_(row, appliedModels) {
 }
 
 module.exports = {
+  NEGLIGIBLE_WEIGHT_EPSILON_: NEGLIGIBLE_WEIGHT_EPSILON_,
   computeWeightedFactorScore_: computeWeightedFactorScore_,
   computePredictedFactorScores_: computePredictedFactorScores_
 };
