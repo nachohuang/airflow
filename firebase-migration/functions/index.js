@@ -870,6 +870,9 @@ function errorToHttpsError_(result) {
 
 var BACKTEST_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '2GiB', timeoutSeconds: 540 });
 
+// 2026-10-08：跟 getFinancialsCoverage 上方同一個「Firebase CLI 把
+// rerun_failed_jobs 的重跑誤判成內容沒變而跳過」問題，這支（接了
+// loadBacktestFactorRows_ 新增的基本面因子）卡住了，改一次原始碼重試。
 exports.runBacktest = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
@@ -1472,6 +1475,9 @@ exports.runFinancialsRefresh = onCall(RUNTIME_OPTS_, async function (request) {
  * 日後如果又遇到「rerun 之後 conclusion: success，但功能看起來沒生效」
  * 的狀況，先去 log 裡找這支函式名稱後面是不是印 `Skipped (No changes
  * detected)`，不是只看整個 workflow run 的 conclusion。
+ *
+ * 2026-10-08 再次補充：又撞到同樣的狀況（這次是跟基本面因子接進即時
+ * 預測分數那個 commit 一起卡住），再改一次原始碼重試。
  */
 exports.getFinancialsCoverage = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
