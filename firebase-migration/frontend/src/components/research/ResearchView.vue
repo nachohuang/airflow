@@ -498,7 +498,10 @@ async function applyModel(timestamp) {
                 <div v-for="l in run.labels" :key="l.labelKey">
                   {{ FACTOR_LABEL_NAMES[l.labelKey] || l.labelKey }}：
                   <template v-if="l.status && l.status.indexOf('失敗') !== -1">{{ l.status }}</template>
-                  <template v-else>R²={{ l.r2 == null ? 'N/A' : Number(l.r2).toFixed(4) }}</template>
+                  <template v-else>
+                    R²={{ l.r2 == null ? 'N/A' : Number(l.r2).toFixed(4) }}
+                    （候選因子 {{ (l.featureColumns || []).length }} 個，關鍵影響因子：{{ topWeightedFeatures(l.weights, 5).join('、') || '無' }}）
+                  </template>
                 </div>
               </td>
               <td>
@@ -514,6 +517,15 @@ async function applyModel(timestamp) {
         </table>
       </div>
       <p v-else class="hint">目前沒有任何訓練紀錄。</p>
+      <p class="hint">
+        候選因子清單（目前固定 48 個，不是每次訓練可以自己選的參數）定義在
+        <code>functions/lib/config.js</code> 的 <code>FACTOR_CANDIDATE_COLUMNS</code>
+        ——每次訓練都是同一份候選清單，差別在 LASSO 最後選中哪些、權重多少
+        （見上面每一列的「關鍵影響因子」），不是這次訓練用了不同的因子組合。
+        要新增因子（例如財報面的毛利率/營益率/ROE 連續上升），要先改這份
+        清單＋在 BigQuery 因子特徵 view 加對應的計算邏輯，不是前端能調的
+        設定。
+      </p>
     </div>
   </section>
 </template>
