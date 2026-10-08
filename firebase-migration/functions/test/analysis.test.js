@@ -311,4 +311,49 @@ function buildSyntheticHistory(days) {
   console.log('Test 12 (computePredictedResistanceRanks_) passed.');
 }
 
+// --- 13. computeFactors_：financialsIndex 選填參數，接進基本面因子 ---
+// 2026-10-08 新增：余博邏輯延伸的基本面因子接進「今日戰報/回測」即時
+// 預測分數，見 lib/analysis.js computeFactors_ 的 financialsIndex 參數
+// 說明跟 lib/financials.js buildAsOfIndex_／lookupAsOf_ 的 point-in-time
+// 查詢邏輯。
+{
+  const financialsLib = require('../lib/financials');
+  const factorModel = require('../lib/factorModel');
+  const rows = buildSyntheticHistory(5); // 日期 2026-01-01 ~ 2026-01-05
+
+  // 13a：不帶 financialsIndex（既有呼叫端，例如 parity 測試）——完全不補欄位，
+  // 不是補 null，行為要跟這個參數加進來之前一模一樣。
+  const withoutIndex = analysis.computeFactors_(rows.map(function (r) { return Object.assign({}, r); }), {});
+  assert.ok(!withoutIndex[0].hasOwnProperty('Fundamental_Roe_Pct'), '沒帶 financialsIndex 不應該補上 Fundamental_* 欄位');
+
+  // 13b：帶 financialsIndex——2026-01-03 公告一期季報，2026-01-01/02 應該查不到
+  // （point-in-time，不能偷看未來），2026-01-03 起維持這期的值。
+  const quarterlyRows = [{ code: '2330', period: '2026-01-03', grossMarginPct: 30, roePct: 5, roeStreak: 2 }];
+  const monthlyRows = [{ code: '2330', reportDate: '2026-01-02', revenueYoyPct: 12, revenueGrowthStreak: 3 }];
+  const financialsIndex = {
+    quarterlyByCode: financialsLib.buildAsOfIndex_(quarterlyRows, function (r) { return r.period; }),
+    monthlyByCode: financialsLib.buildAsOfIndex_(monthlyRows, function (r) { return r.reportDate; })
+  };
+  const withIndex = utils.sortRows(
+    analysis.computeFactors_(rows.map(function (r) { return Object.assign({}, r); }), {}, financialsIndex),
+    [[function (r) { return r['日期']; }, 'asc']]
+  );
+  assert.strictEqual(withIndex[0].Fundamental_Roe_Pct, null, '公告日之前要是 null');
+  assert.strictEqual(withIndex[1].Fundamental_Roe_Pct, null);
+  assert.strictEqual(withIndex[2].Fundamental_Roe_Pct, 5, '公告日當天開始要查得到');
+  assert.strictEqual(withIndex[2].Fundamental_Gross_Margin_Pct, 30);
+  assert.strictEqual(withIndex[2].Fundamental_Roe_Streak, 2);
+  assert.strictEqual(withIndex[4].Fundamental_Roe_Pct, 5, '之後幾天要維持同一期的值');
+  assert.strictEqual(withIndex[1].Fundamental_Revenue_Yoy_Pct, 12, '月營收公告日是 2026-01-02，比季報早一天');
+  assert.strictEqual(withIndex[0].Fundamental_Revenue_Yoy_Pct, null);
+
+  // 13c：端到端——config.BQ_FEATURE_TO_ANALYSIS_FIELD 對照表要能把
+  // fundamental_roe_pct 的權重正確映射到 computeWeightedFactorScore_ 用得上
+  // 的欄位，不是只停在 computeFactors_ 這一層。
+  const score = factorModel.computeWeightedFactorScore_(withIndex[2], { fundamental_roe_pct: 2 });
+  assert.strictEqual(score, 10, '5 (Fundamental_Roe_Pct) * 2 (權重) = 10');
+
+  console.log('Test 13 (computeFactors_ financialsIndex: backward-compatible when omitted, as-of lookup, wired into computeWeightedFactorScore_) passed.');
+}
+
 console.log('All analysis.js tests passed.');

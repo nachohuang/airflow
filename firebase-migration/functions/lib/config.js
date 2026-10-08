@@ -89,7 +89,22 @@ var CONFIG = {
     bias60: 'BIAS_60',
     dividend_yield: '殖利率(%)',
     pe_ratio: '本益比',
-    pb_ratio: '股價淨值比'
+    pb_ratio: '股價淨值比',
+    // 2026-10-08 新增：余博邏輯延伸的基本面因子接進即時預測分數，見
+    // lib/analysis.js computeFactors_ 的 financialsIndex 參數——這 10 個
+    // 欄位现在才有對應的 JS 計算邏輯，之前（config.js 下面
+    // FUNDAMENTAL_CANDIDATE_COLUMNS 那段註解）刻意不加進這張表、讓
+    // computeWeightedFactorScore_ 跳過，就是因為還沒有這段計算。
+    fundamental_gross_margin_pct: 'Fundamental_Gross_Margin_Pct',
+    fundamental_operating_margin_pct: 'Fundamental_Operating_Margin_Pct',
+    fundamental_net_margin_pct: 'Fundamental_Net_Margin_Pct',
+    fundamental_roe_pct: 'Fundamental_Roe_Pct',
+    fundamental_gross_margin_streak: 'Fundamental_Gross_Margin_Streak',
+    fundamental_operating_margin_streak: 'Fundamental_Operating_Margin_Streak',
+    fundamental_net_margin_streak: 'Fundamental_Net_Margin_Streak',
+    fundamental_roe_streak: 'Fundamental_Roe_Streak',
+    fundamental_revenue_yoy_pct: 'Fundamental_Revenue_Yoy_Pct',
+    fundamental_revenue_growth_streak: 'Fundamental_Revenue_Growth_Streak'
   },
 
   // ---- 2026-10-08 新增：FactorRegression.gs（因子迴歸模型）用的常數 ----
@@ -174,12 +189,16 @@ CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
 // `lib/financials.js`（解析＋計算）跟 `lib/bigquery.js
 // buildFundamentalFeatureViewSql_`（點對點正確的 JOIN，疊在
 // `factor_features` view 之上，不是直接改那支 view 本身）的完整說明。
-// 跟產業資金流向因子一樣，刻意沒有加進 `BQ_FEATURE_TO_ANALYSIS_FIELD`
-// ——這批因子是 BigQuery 端用「公告日 <= 這一天」的相關子查詢算出來的，
-// `computeFactors_`（JS）目前沒有對應的計算邏輯，即時預測分數暫時用
-// 不上這批因子（LASSO 選中、權重不是 0 也只是被
-// `computeWeightedFactorScore_` 的既有防呆邏輯跳過，不會出錯），
-// 跟現有 38 個因子同一個範圍界線。
+//
+// 2026-10-08 補充：這 10 個因子已經接進 `BQ_FEATURE_TO_ANALYSIS_FIELD`
+// （見上方），`computeFactors_` 透過 `financialsIndex` 參數（
+// `lib/financials.js buildAsOfIndex_`／`lookupAsOf_`，JS 版「公告日 <=
+// 這一天」point-in-time 查詢，語意跟 BigQuery 那段 SQL 完全對應）算出
+// 對應值，即時預測分數現在用得上這批因子了。還是跟產業資金流向因子
+// （`industry_flow_*`／`industry_rel_mkt_*`，36 個）、
+// `inst_accum_divergence_20d`／`days_since_new_low` 這 38 個因子不同
+// 範圍界線——那批目前仍然沒有對應的 JS 計算邏輯，還是只能訓練用，不在
+// 這次的範圍內。
 CONFIG.FUNDAMENTAL_CANDIDATE_COLUMNS = [
   'fundamental_gross_margin_pct', 'fundamental_operating_margin_pct',
   'fundamental_net_margin_pct', 'fundamental_roe_pct',

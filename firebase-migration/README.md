@@ -2784,11 +2784,12 @@ FactorScan.gs）都已經搬完，這裡是最後一塊——搬完之後 `facto
 
 ### 還沒做的事
 
-- **還沒接進「今日戰報/回測」的即時預測分數**——跟產業資金流向因子
-  同一個範圍界線（見「策略研究（四）」那節）：這批因子目前只用於
-  BigQuery 端的訓練，`computeFactors_`（JS）沒有對應的計算邏輯，LASSO
-  選中、權重不是 0 也只是被 `computeWeightedFactorScore_` 的既有防呆
-  邏輯跳過，不會出錯但也不會真的貢獻進即時預測分數。
+- ~~還沒接進「今日戰報/回測」的即時預測分數~~——**2026-10-08 已接上**，
+  見下方「月營收歷史回補」之後新增的「基本面因子接進即時預測分數」一節。
+  產業資金流向因子（`industry_flow_*`／`industry_rel_mkt_*`，36 個）、
+  `inst_accum_divergence_20d`／`days_since_new_low` 這 38 個因子**還是**
+  跟原本一樣只用於訓練，`computeFactors_`（JS）沒有對應的計算邏輯，不在
+  這次範圍內。
 - **欄位名稱、民國年/西元年格式、「出表日期」是否真的存在這個欄位**
   都是依 TWSE 官方報表長年公開的標準格式整理出來的最佳猜測，這個開發
   環境完全沒辦法連線核對——部署後第一次執行「重新整理財報因子」如果
@@ -2967,3 +2968,71 @@ Big5 編碼的純 HTML，逐產業別各自一個 `<table>`，欄位依**位置�
    順便修正手機排版：起訖年月輸入框跟按鈕原本用 `flex-wrap` 擠在同一
    列，iOS Safari 的 `input type="month"` 原生控制項寬度不固定，換行後
    跟按鈕重疊，改成每個欄位各自一整列。
+
+## 2026-10-08：基本面因子接進「今日戰報/回測」即時預測分數
+
+使用者問「可以做啊，因為還是要看回歸跟回測的效果，我再用比較好的」
+——回應上面「還沒做的事」那個延遲已久的項目：10 個基本面因子（四率
+四升＋月營收連續成長）之前只進了 BigQuery 端的訓練，`computeFactors_`
+（JS，即時戰報/回測在用的那支）沒有對應的計算邏輯，套用中的模型如果
+LASSO 選中這批因子，權重會被 `computeWeightedFactorScore_` 既有的防呆
+邏輯（`config.BQ_FEATURE_TO_ANALYSIS_FIELD` 找不到對應欄位就跳過）悄悄
+吃掉，不會出錯但也不會真的貢獻分數。
+
+### 研究先行
+
+先用 Explore agent 盤點現狀，確認三件事：
+1. 「BQ 訓練出來的權重 → JS 算分數」這個模式其實已經存在
+   （`computeWeightedFactorScore_`／`BQ_FEATURE_TO_ANALYSIS_FIELD`），
+   只是只接了原本 10 個基礎因子，不是要從零做。
+2. 模型分數目前只影響 `factor_model_rank`／`hybrid` 這兩個策略的進場
+   訊號篩選，**不影響預設策略 `rule_v17` 的排序**（那個只看寫死權重
+   45/30/15/10 的 `Armor_Score`）——接上這批因子之後，如果使用者平常
+   用預設策略，戰報排序不會變，只有另外兩個策略的篩選結果會變。
+3. 缺的那塊是「point-in-time 查詢」：BigQuery 那邊用 SQL 相關子查詢
+   算「公告日 <= 這一天的最後一期」（見 `buildFundamentalFeatureViewSql_`
+   的說明），`computeFactors_` 從來沒拿到過 `financials_quarterly`／
+   `financials_monthly` 資料，streak 計算本身已經是純 JS、可以重用
+   （`lib/financials.js`），缺的是這段 as-of 查詢邏輯的 JS 版本。
+
+### 架構對應
+
+- `lib/financials.js`（新增純函式）：`buildAsOfIndex_(rows, getDateStr)`
+  把一批列依代號分組＋依日期排序，`lookupAsOf_(byCode, code, dateStr)`
+  對單一（代號、日期）二分搜尋「日期 <= dateStr 的最後一筆」——跟
+  BigQuery 那段 `WHERE report_date <= base.date` 的相關子查詢同一個
+  point-in-time 語意，只是換成在記憶體裡對已排序陣列做，不是 SQL。
+  查不到（代號不存在、或這檔股票還沒公告過任何財報）回傳 `null`，不會
+  退而求其次抓最早一筆——那樣等於用未來的資料回答過去的問題。
+- `lib/analysis.js computeFactors_`：新增第三個選填參數
+  `financialsIndex`（`{quarterlyByCode, monthlyByCode}`）。帶了這個
+  參數，對每一列用 `lookupAsOf_` 查出當下最新一期的毛利率/營益率/
+  淨利率/ROE（+ 四個 streak）跟月營收 YoY/連續成長期數，補上
+  `Fundamental_*` 這 10 個欄位；不帶（既有呼叫端，例如 parity 測試用
+  apps-script 原版比對）完全不補，行為跟加這個參數之前一模一樣——
+  刻意不改動既有 38 個因子欄位的計算邏輯，parity 測試原封不動通過。
+- `lib/config.js BQ_FEATURE_TO_ANALYSIS_FIELD`：補上這 10 個欄位的
+  `fundamental_xxx` → `Fundamental_Xxx` 對照，`computeWeightedFactorScore_`
+  從今天起真的會把這批因子的權重算進預測分數。
+- `index.js`：新增 `fetchFinancialsAsOfIndex_()`（讀
+  `financials_quarterly`／`financials_monthly`，建好 as-of 索引），接進
+  `runDailyAnalysis_`（跟 `fetchHistoryRows_`／`fetchPortfolioLots_`／
+  `fetchAppliedFactorModels_` 一起平行抓）跟 `loadBacktestFactorRows_`
+  （回測也要抓，不然回測結果會因為少算這 10 個因子而跟正式戰報對不
+  上）。`lib/reportPipeline.js buildReport_` 多一個選填的
+  `financialsIndex` 參數直接轉傳給 `computeFactors_`。
+
+### 已知限制
+
+- **財報資料目前還很稀疏**：季報財務比率只有 Q2 這一期（見「月營收
+  歷史回補」那節——季報沒有找到對應的 MOPS 歷史頁面格式，沒辦法像
+  月營收一樣回補），大多數股票在大多數交易日查到的
+  `Fundamental_*` 欄位會是 `null`（還沒到那期財報的公告日，或那檔
+  股票從來沒有過財報資料）。`computeWeightedFactorScore_` 是嚴格
+  null 傳播（任一因子缺值，整個預測分數就是 `null`，不是跳過那一項
+  繼續加總），所以如果套用中的模型對基本面因子給了不小的權重，現階段
+  可能會讓大多數股票的預測分數直接變成 `null`，在 `factor_model_rank`／
+  `hybrid` 篩選裡被排除——這是資料本質的限制，不是這次接線邏輯的
+  問題，會隨季報資料逐季累積而改善。
+- 還是只接了 10 個基本面因子，另外 38 個因子（產業資金流向／動能時機）
+  不在這次範圍內，見上方「還沒做的事」。

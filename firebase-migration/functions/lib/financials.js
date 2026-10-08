@@ -387,6 +387,57 @@ function computeRevenueGrowthStreaks_(sortedRowsByCode) {
   return out;
 }
 
+/**
+ * 2026-10-08 新增：把余博邏輯延伸的基本面因子接進「今日戰報/回測」即時
+ * 預測分數——跟 `lib/bigquery.js buildFundamentalFeatureViewSql_` 同一個
+ * 「公告日 <= 這一天」point-in-time 語意，但這裡是給 JS 端
+ * `analysis.js computeFactors_` 逐股逐日查「當下最新一期財報」用，不是
+ * SQL。先用 `buildAsOfIndex_` 把一批列依代號分組＋依日期由舊到新排序，
+ * 再用 `lookupAsOf_` 對單一（代號、日期）做「這個代號裡，日期 <= 查詢
+ * 日期的最後一筆」二分搜尋——語意上完全對應 BigQuery 那段
+ * `WHERE fr2.stock_id = base.stock_id AND fr2.report_date <= base.date`
+ * 的相關子查詢，只是換成在記憶體裡用已排序陣列做。
+ */
+
+/** 把一批列依 `code` 分組，組內依 `getDateStr(row)` 回傳的日期字串
+ *  （'yyyy-MM-dd'）由舊到新排序。`getDateStr` 回傳 falsy 的列直接捨棄
+ *  （沒有可比較的日期，沒辦法參與 as-of 查詢）。季報財務比率要傳
+ *  `function(r){return r.period;}`（`period` 本身就是公告日，見
+ *  `parseIncomeStatementRows_` 的說明），月營收要傳
+ *  `function(r){return r.reportDate;}`（`period` 是 'yyyy-MM' 所屬月份，
+ *  不是公告日）——兩邊欄位語意不同，刻意不替呼叫端預設猜一個。 */
+function buildAsOfIndex_(rows, getDateStr) {
+  var byCode = {};
+  (rows || []).forEach(function (r) {
+    var d = getDateStr(r);
+    if (!d) return;
+    if (!byCode[r.code]) byCode[r.code] = [];
+    byCode[r.code].push({ reportDate: d, data: r });
+  });
+  Object.keys(byCode).forEach(function (code) {
+    byCode[code].sort(function (a, b) { return a.reportDate < b.reportDate ? -1 : (a.reportDate > b.reportDate ? 1 : 0); });
+  });
+  return byCode;
+}
+
+/** 對單一代號查「日期 <= dateStr 的最後一筆」（`byCode` 是
+ *  `buildAsOfIndex_` 的回傳值）——二分搜尋，`byCode[code]` 本身已經排序
+ *  好，不用每次查詢都線性掃過。代號不存在、或代號底下所有紀錄的日期都
+ *  晚於 `dateStr`（例如這檔股票還沒公告過任何財報）回傳 `null`，不是
+ *  拋錯或退而求其次抓「最早一筆」——那樣等於用未來的資料回答過去的
+ *  問題，違反 point-in-time 正確性。 */
+function lookupAsOf_(byCode, code, dateStr) {
+  var records = byCode[code];
+  if (!records || records.length === 0) return null;
+  var lo = 0, hi = records.length - 1, result = null;
+  while (lo <= hi) {
+    var mid = (lo + hi) >> 1;
+    if (records[mid].reportDate <= dateStr) { result = records[mid]; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return result ? result.data : null;
+}
+
 module.exports = {
   detectFieldKey_: detectFieldKey_,
   parseTwseDate_: parseTwseDate_,
@@ -396,6 +447,8 @@ module.exports = {
   parseMonthlyRevenueRows_: parseMonthlyRevenueRows_,
   parseIncomeStatementRows_: parseIncomeStatementRows_,
   parseBalanceSheetRows_: parseBalanceSheetRows_,
+  buildAsOfIndex_: buildAsOfIndex_,
+  lookupAsOf_: lookupAsOf_,
   joinIncomeAndEquity_: joinIncomeAndEquity_,
   validateFinancialRows_: validateFinancialRows_,
   computeIncreaseStreak_: computeIncreaseStreak_,

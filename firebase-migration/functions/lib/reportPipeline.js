@@ -25,9 +25,12 @@ var utils = require('./utils');
  *   會篩 status === 'holding'）。
  * screeningStrategyKey：'rule_v17'／'factor_model_rank'／'hybrid'，來自 Firestore
  *   `config/app` 的 screeningStrategy 欄位。
- * appliedFactorModels：{return1m, downsideResistance} 或 {}——目前還沒有 Firestore 版
- *   的因子模型資料來源（factor_model_history 留給 Phase 3 後續跟因子迴歸模型邏輯一起
- *   遷移，見 README「還沒做的事」），rule_v17（預設策略）不需要這個，傳 {} 即可。
+ * appliedFactorModels：{return1m, downsideResistance} 或 {}——rule_v17（預設策略）
+ *   不需要這個，傳 {} 即可，factor_model_rank／hybrid 需要先套用一版抗跌力模型。
+ * financialsIndex（2026-10-08 新增，選填）：{quarterlyByCode, monthlyByCode}，直接
+ *   轉傳給 `analysis.computeFactors_`（見該函式的說明）——不帶就不補基本面因子欄位，
+ *   套用中的模型如果用到那批權重，對應貢獻會是 0（被 computeWeightedFactorScore_
+ *   的既有防呆邏輯跳過），不是整個分數變 null，這是呼叫端沒傳索引時的既有行為。
  *
  * 回傳 { latestDate, reportDocs, diagnostics }：
  *   latestDate：這份戰報的交易日（historyRows 裡最新的日期），沒有資料時是 null。
@@ -35,7 +38,7 @@ var utils = require('./utils');
  *     已經帶 `id`（= code，給呼叫端當 Firestore 文件 ID 用）。
  *   diagnostics：篩選漏斗統計（computeScreeningStats_ 的回傳值），不管有沒有訊號都附上。
  */
-function buildReport_(historyRows, lotDocs, screeningStrategyKey, appliedFactorModels) {
+function buildReport_(historyRows, lotDocs, screeningStrategyKey, appliedFactorModels, financialsIndex) {
   var portfolioMap = portfolio.buildPortfolioMap_(lotDocs);
   var strategyKey = analysis.SCREENING_STRATEGIES[screeningStrategyKey] ? screeningStrategyKey : analysis.SCREENING_STRATEGY_DEFAULT;
   var strategyDef = analysis.SCREENING_STRATEGIES[strategyKey];
@@ -46,7 +49,7 @@ function buildReport_(historyRows, lotDocs, screeningStrategyKey, appliedFactorM
     return { latestDate: null, reportDocs: [], diagnostics: emptyDiagnostics, screeningStrategy: strategyKey };
   }
 
-  var computed = analysis.computeFactors_(historyRows, portfolioMap);
+  var computed = analysis.computeFactors_(historyRows, portfolioMap, financialsIndex);
   var latestDateStr = null;
   computed.forEach(function (r) {
     var d = utils.normalizeDateStr(r['日期']);

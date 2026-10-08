@@ -112,6 +112,26 @@ async function fetchAppliedFactorModels_() {
 }
 
 /**
+ * 2026-10-08 新增：把余博邏輯延伸的基本面因子接進「今日戰報/回測」即時
+ * 預測分數——讀 `financials_quarterly`／`financials_monthly`（累積寫入
+ * 那兩個 collection，不是從 BigQuery 讀，見 `doRefreshFinancials_` 的
+ * 說明），交給 `financialsLib.buildAsOfIndex_` 建好 as-of 索引，傳給
+ * `analysis.computeFactors_`（見該函式 `financialsIndex` 參數的說明）。
+ * 資料量级是「公司數 × 期數」，跟 `getFinancialsCoverage` 同一個「不需要
+ * 另外做分頁/快取」的理由，整份讀回來就好。
+ */
+async function fetchFinancialsAsOfIndex_() {
+  const [quarterlyDocs, monthlyDocs] = await Promise.all([
+    fetchAllDocs_('financials_quarterly'),
+    fetchAllDocs_('financials_monthly')
+  ]);
+  return {
+    quarterlyByCode: financialsLib.buildAsOfIndex_(quarterlyDocs, function (r) { return r.period; }),
+    monthlyByCode: financialsLib.buildAsOfIndex_(monthlyDocs, function (r) { return r.reportDate; })
+  };
+}
+
+/**
  * 2026-10-08 新增：策略研究（回測）第一支——查 BigQuery 指定區間（不是像
  * `fetchHistoryRows_` 那樣固定「最近 ANALYSIS_LOOKBACK_DAYS 天」，回測要讀
  * 任意一段過去的區間）的原始 History 列，轉成 computeFactors_ 期待的中文
@@ -136,14 +156,21 @@ async function fetchHistoryRangeRows_(bigQueryConfig, fromDateStr, toDateStr) {
  * `loadStartStr` 往前多抓 `ANALYSIS_LOOKBACK_DAYS` 天當暖機期間——rolling
  * 因子（MA60/IBF_20D 等）要跟正式戰報用同一套回看天數，算出來的訊號才會
  * 跟「戰報與個股」看到的完全一致，不是另一套近似值。portfolioMap 給空
- * 物件：回測把每一個訊號都當成「當天新進場」，不是既有持股。 */
+ * 物件：回測把每一個訊號都當成「當天新進場」，不是既有持股。
+ *
+ * 2026-10-08 補充：連帶抓一次 `fetchFinancialsAsOfIndex_()`，讓回測用的
+ * 基本面因子跟正式戰報同一套（否則回測結果會因為少算 10 個因子而跟
+ * 戰報對不上）。 */
 async function loadBacktestFactorRows_(bigQueryConfig, startStr, loadEndStr) {
   const warmupStart = new Date(startStr + 'T00:00:00');
   warmupStart.setDate(warmupStart.getDate() - config.ANALYSIS_LOOKBACK_DAYS);
   const loadStartStr = utilsLib.normalizeDateStr(warmupStart);
-  const rawRows = await fetchHistoryRangeRows_(bigQueryConfig, loadStartStr, loadEndStr);
+  const [rawRows, financialsIndex] = await Promise.all([
+    fetchHistoryRangeRows_(bigQueryConfig, loadStartStr, loadEndStr),
+    fetchFinancialsAsOfIndex_()
+  ]);
   if (rawRows.length === 0) return [];
-  return analysisLib.computeFactors_(rawRows, {});
+  return analysisLib.computeFactors_(rawRows, {}, financialsIndex);
 }
 
 /** 單一策略回測的核心邏輯（不含 onCall 的 auth／job 狀態追蹤，見
@@ -354,12 +381,13 @@ async function writeReportDocs_(result) {
  *  同一個設計）。 */
 async function runDailyAnalysis_() {
   const appConfig = await fetchAppConfig_();
-  const [historyRows, lotDocs, appliedFactorModels] = await Promise.all([
+  const [historyRows, lotDocs, appliedFactorModels, financialsIndex] = await Promise.all([
     fetchHistoryRows_(appConfig.bigQuery),
     fetchPortfolioLots_(),
-    fetchAppliedFactorModels_()
+    fetchAppliedFactorModels_(),
+    fetchFinancialsAsOfIndex_()
   ]);
-  const result = reportPipeline.buildReport_(historyRows, lotDocs, appConfig.screeningStrategy, appliedFactorModels);
+  const result = reportPipeline.buildReport_(historyRows, lotDocs, appConfig.screeningStrategy, appliedFactorModels, financialsIndex);
   await writeReportDocs_(result);
   return result;
 }

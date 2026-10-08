@@ -27,6 +27,7 @@ var expandingMax = utils.expandingMax;
 var expandingMaxFromIndex = utils.expandingMaxFromIndex;
 var percentRank = utils.percentRank;
 var computeWeightedFactorScore_ = require('./factorModel').computeWeightedFactorScore_;
+var financialsLib = require('./financials');
 
 /**
  * 可切換的「新進場訊號」篩選邏輯版本（不影響既有持股的止盈/止損判斷，那段邏輯固定不變，
@@ -151,8 +152,17 @@ function diagnoseRow_(row, portfolioMap, strategyKey) {
  * 核心計算：對輸入的 History 列（未必是全部歷史，可以是任意子集）
  * 依 證券代號 分組計算所有 rolling 因子與 Armor_Score，並回傳補齊欄位後的列陣列（依原順序不保證）。
  * portfolioMap: {code: {cost, buyDate}}。
+ *
+ * financialsIndex（2026-10-08 新增，選填）：
+ * `{quarterlyByCode, monthlyByCode}`，由呼叫端用
+ * `financialsLib.buildAsOfIndex_` 分別對 `financials_quarterly`／
+ * `financials_monthly` 建好的 as-of 索引（見該函式的說明）。帶了這個參數
+ * 才會補上 `Fundamental_*` 這 10 個欄位（余博邏輯延伸的基本面因子，見
+ * `config.BQ_FEATURE_TO_ANALYSIS_FIELD` 上方的說明）；不帶（既有呼叫端，
+ * 例如 parity 測試用 apps-script 原版比對）就完全不補，行為跟這個參數
+ * 加進來之前一模一樣，不影響既有的 38 個因子欄位。
  */
-function computeFactors_(rows, portfolioMap) {
+function computeFactors_(rows, portfolioMap, financialsIndex) {
   rows.forEach(function (r) {
     r['證券代號'] = zfill4(String(r['證券代號']).trim());
     config.HISTORY_NUMERIC_COLUMNS.forEach(function (c) { r[c] = toNumber(r[c]); });
@@ -227,6 +237,22 @@ function computeFactors_(rows, portfolioMap) {
       group[i].Daily_Return = dailyReturn[i];
       group[i].Is_Drop = isDrop[i];
       group[i].Is_Inst_Buy_On_Drop = isInstBuyOnDrop[i];
+
+      if (financialsIndex) {
+        var dateStr = normalizeDateStr(group[i]['日期']);
+        var q = financialsIndex.quarterlyByCode ? financialsLib.lookupAsOf_(financialsIndex.quarterlyByCode, code, dateStr) : null;
+        var m = financialsIndex.monthlyByCode ? financialsLib.lookupAsOf_(financialsIndex.monthlyByCode, code, dateStr) : null;
+        group[i].Fundamental_Gross_Margin_Pct = q ? q.grossMarginPct : null;
+        group[i].Fundamental_Operating_Margin_Pct = q ? q.operatingMarginPct : null;
+        group[i].Fundamental_Net_Margin_Pct = q ? q.netMarginPct : null;
+        group[i].Fundamental_Roe_Pct = q ? q.roePct : null;
+        group[i].Fundamental_Gross_Margin_Streak = q ? q.grossMarginStreak : null;
+        group[i].Fundamental_Operating_Margin_Streak = q ? q.operatingMarginStreak : null;
+        group[i].Fundamental_Net_Margin_Streak = q ? q.netMarginStreak : null;
+        group[i].Fundamental_Roe_Streak = q ? q.roeStreak : null;
+        group[i].Fundamental_Revenue_Yoy_Pct = m ? m.revenueYoyPct : null;
+        group[i].Fundamental_Revenue_Growth_Streak = m ? m.revenueGrowthStreak : null;
+      }
     }
   });
 

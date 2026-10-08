@@ -181,3 +181,27 @@ const fin = require('../lib/financials');
   assert.deepStrictEqual(result.map(function (r) { return r.revenueGrowthStreak; }), [1, 0, 1, 2]);
   console.log('Test computeRevenueGrowthStreaks_ (consecutive months of positive YoY revenue growth) passed.');
 }
+
+// --- 11. buildAsOfIndex_ / lookupAsOf_ ---
+// 2026-10-08 新增：把基本面因子接進「今日戰報/回測」即時預測分數用的
+// point-in-time 查詢，跟 lib/bigquery.js buildFundamentalFeatureViewSql_
+// 的「公告日 <= 這一天」SQL 語意要完全對應。
+{
+  var rows = [
+    { code: '1101', period: '2026-05-14', grossMarginPct: 20 },
+    { code: '1101', period: '2026-08-14', grossMarginPct: 25 },
+    { code: '1102', period: '2026-05-14', grossMarginPct: 10 }
+  ];
+  var idx = fin.buildAsOfIndex_(rows, function (r) { return r.period; });
+
+  assert.strictEqual(fin.lookupAsOf_(idx, '1101', '2026-05-14').grossMarginPct, 20, '剛好等於公告日當天要查得到');
+  assert.strictEqual(fin.lookupAsOf_(idx, '1101', '2026-07-01').grossMarginPct, 20, '公告日之後、下一期公告之前，要維持上一期的值');
+  assert.strictEqual(fin.lookupAsOf_(idx, '1101', '2026-08-14').grossMarginPct, 25, '新一期公告當天要更新');
+  assert.strictEqual(fin.lookupAsOf_(idx, '1101', '2026-12-31').grossMarginPct, 25);
+  assert.strictEqual(fin.lookupAsOf_(idx, '1101', '2026-05-13'), null, '公告日之前要是 null，不能偷看未來（也不能退而求其次抓最早一筆）');
+  assert.strictEqual(fin.lookupAsOf_(idx, '9999', '2026-08-14'), null, '查無此代號要是 null，不拋錯');
+  assert.strictEqual(fin.lookupAsOf_(idx, '1102', '2026-08-14').grossMarginPct, 10, '不同代號的索引要互相獨立');
+
+  assert.deepStrictEqual(fin.buildAsOfIndex_([{ code: '1101', period: null, grossMarginPct: 1 }], function (r) { return r.period; }), {}, '沒有日期的列要被捨棄，不是當成 0/空字串排進去');
+  console.log('Test buildAsOfIndex_ / lookupAsOf_ (point-in-time as-of lookup per code, matches SQL <= semantics) passed.');
+}
