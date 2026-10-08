@@ -584,6 +584,18 @@ async function runDailyCatchupFetch_(appConfig, skipDates) {
  *  調大記憶體配置就解決，不需要像 apps-script 版那樣另外維護一套 SQL 實作。
  *  1GiB 大約是實測用量（267~291 MiB）的 3~4 倍，留足餘裕應付資料量隨股票數
  *  微幅成長。 */
+// 2026-10-08 再次補充：這次有 13 支函式（addToWatchlist／applyFactorModel／
+// cleanupFinancialsNonListedCodes／deletePortfolioLot／getAiKeyStatus／
+// getAiUsageSummary／getClosedPortfolioHistory／getPortfolio／getWatchlist／
+// removeFromWatchlist／runAiDiagnosis／runManualReportRecompute／
+// savePortfolioItem）同一批撞上 Cloud Run CPU 配額健康檢查失敗，用
+// `rerun_failed_jobs` 重跑整個 deploy job 後，GitHub Actions 顯示
+// `conclusion: success`，但實際 log 裡這 13 支全部印的是
+// `Skipped (No changes detected)`，不是 `Successful update operation`——
+// 跟前面好幾次遇到的同一個 Firebase CLI 誤判 bug，rerun 用的是同一個
+// commit 的原始碼雜湊，CLI 認定「沒變更」直接跳過，完全沒有真的重新
+// 嘗試部署，這 13 支目前仍然是壞的。這段註解本身就是刻意用來改變原始碼
+// 雜湊，逼 Firebase CLI 這次真的對全部函式重新嘗試部署。
 var RUNTIME_OPTS_ = { memory: '1GiB', timeoutSeconds: 180 };
 
 /**
