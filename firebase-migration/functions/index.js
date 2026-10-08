@@ -2469,10 +2469,13 @@ var FINANCIALS_BACKFILL_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { timeo
  * 這筆是哪個來源抓到的）。
  *
  * 2026-10-08 補充：commit d6d94e8 把 `MOPS_BACKFILL_MARKETS_` 改成只抓
- * 上市之後，這支連續兩次部署都撞上 Cloud Run 配額健康檢查失敗，
+ * 上市之後，這支連續好幾次部署都撞上 Cloud Run 配額健康檢查失敗，
  * `rerun_failed_jobs` 重跑時又被 Firebase CLI 誤判成「內容沒變」而跳過
  * （見 `getFinancialsCoverage` 上方那段更完整的說明）——這段註解一樣是
- * 刻意改變原始碼雜湊，逼這支真的重新部署一次，不是單純的裝飾文字。
+ * 刻意改變原始碼雜湊，逼這支真的重新部署一次，不是單純的裝飾文字。這次
+ * 配額衝突特別嚴重（單次部署撞到快 30 支既有函式），已經確認
+ * `rerun_failed_jobs` 對這個特定問題完全沒用（會一直被跳過），每次都要
+ * 真的改一次原始碼才會重新嘗試部署。
  */
 exports.runFinancialsBackfillMops = onCall(FINANCIALS_BACKFILL_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
@@ -2556,7 +2559,8 @@ async function cleanupMopsBackfillOtcRows_(bigQueryConfig) {
 }
 
 // 2026-10-08 補充：同一個「rerun_failed_jobs 被 Firebase CLI 誤判成無
-// 變更而跳過」問題，見 exports.runFinancialsBackfillMops 上方的說明。
+// 變更而跳過」問題，見 exports.runFinancialsBackfillMops 上方的說明——
+// 這支也連續好幾次被跳過，再補一次強制重新部署。
 exports.cleanupFinancialsNonListedCodes = onCall(RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   try {
