@@ -32,33 +32,64 @@ function detectFieldKey_(sampleRow, substrings) {
 }
 
 /**
- * TWSE OpenAPI 的日期欄位常見兩種格式：西元 'yyyy-MM-dd'／'yyyy/MM/dd'，
- * 或民國年 'yyy/MM/dd'（例如 "115/03/31" 代表 2026-03-31）。這個開發環境
- * 沒辦法連線核對這三份端點實際回傳哪一種，寫一個同時處理兩種格式的
- * 保守判斷：年份欄位 >= 1911 當西元年，< 1000 當民國年（+1911 轉西元），
- * 1000~1910 這個區間理論上不會出現（不是合理的西元或民國年），遇到就
- * 回傳 null 讓呼叫端知道這筆日期解析不出來，不是悄悄算出一個錯誤日期。
- * 回傳 'yyyy-MM-dd' 字串，解析失敗回傳 null。
+ * TWSE OpenAPI 的日期欄位常見幾種格式：西元 'yyyy-MM-dd'／'yyyy/MM/dd'、
+ * 民國年 'yyy/MM/dd'（例如 "115/03/31" 代表 2026-03-31），或完全沒有
+ * 分隔符的民國年 7 碼字串（例如 "1150111" 代表民國 115 年 01 月 11
+ * 日）——2026-10-08 用 WebSearch 查到 data.gov.tw 鏡像站「上市公司每月
+ * 營業收入彙總表」資料集的範例「出表日期」欄位值就是這種 7 碼格式（這是
+ * 鏡像站的範例，不是直接連線 `openapi.twse.com.tw` 核對到的，TWSE 自己
+ * 的 JSON API 格式可能一致也可能不一致，保留原本的分隔符格式判斷當
+ * 備援，不是只認這一種）。同時處理這幾種格式的保守判斷：年份欄位 >= 1911
+ * 當西元年，< 1000 當民國年（+1911 轉西元），1000~1910 這個區間理論上
+ * 不會出現，遇到就回傳 null 讓呼叫端知道這筆日期解析不出來，不是悄悄
+ * 算出一個錯誤日期。回傳 'yyyy-MM-dd' 字串，解析失敗回傳 null。
  */
 function parseTwseDate_(raw) {
   var s = String(raw || '').trim();
+
   var m = s.match(/^(\d{2,4})[-/](\d{1,2})[-/](\d{1,2})$/);
-  if (!m) return null;
-  var y = parseInt(m[1], 10);
-  var mo = parseInt(m[2], 10);
-  var d = parseInt(m[3], 10);
-  if (y < 1000) y += 1911;
-  if (y < 1911 || y > 2200 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-  return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  if (m) {
+    var y = parseInt(m[1], 10);
+    var mo = parseInt(m[2], 10);
+    var d = parseInt(m[3], 10);
+    if (y < 1000) y += 1911;
+    if (y < 1911 || y > 2200 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+
+  // 無分隔符的民國年 7 碼（yyyMMDD，例如 "1150111"）——固定寬度 3+2+2，
+  // 跟 normalizeYearMonth_ 處理 5 碼民國年月同一個「不能用貪婪 regex
+  // 硬吃」的理由。
+  var m2 = s.match(/^(\d{3})(\d{2})(\d{2})$/);
+  if (m2) {
+    var y2 = parseInt(m2[1], 10) + 1911;
+    var mo2 = parseInt(m2[2], 10);
+    var d2 = parseInt(m2[3], 10);
+    if (mo2 < 1 || mo2 > 12 || d2 < 1 || d2 > 31) return null;
+    return y2 + '-' + String(mo2).padStart(2, '0') + '-' + String(d2).padStart(2, '0');
+  }
+
+  return null;
 }
 
 /**
  * 解析 TWSE t187ap05_L（上市公司每月營業收入彙總表）的原始列，轉成
- * `{code, name, period, revenue, revenueYoyPct}` 陣列。`period` 是
- * 'yyyy-MM'（資料年月），`revenueYoyPct` 優先用官方已經算好的「去年同月
- * 增減(%)」欄位（TWSE 這份報表本來就有這一欄，不用自己重算一次，官方
- * 數字比我們用當月營收/去年當月營收自己除出來的更不容易因為單位換算
- * 出錯），查不到才退而求其次，用「當月營收」跟「去年當月營收」自己算。
+ * `{code, name, period, reportDate, reportDateIsEstimated, revenue,
+ *   revenueYoyPct}` 陣列。`period` 是 'yyyy-MM'（資料年月，財報所屬月份）
+ * ，`reportDate` 是 'yyyy-MM-dd'（實際公開可得日期，訓練時間對齊要用
+ * 這個，不是 `period`，見 `parseIncomeStatementRows_` 同一個「避免未來
+ * 函數」的理由）。
+ *
+ * 2026-10-08：原本以為這份報表沒有公告日期欄位，用「月底+10天」估算，
+ * 後來用 WebSearch 查到 data.gov.tw 鏡像站「上市公司每月營業收入彙總表」
+ * 資料集的欄位清單跟範例資料，確認其實有「出表日期」這個官方欄位（這是
+ * 鏡像站的資料，不是直接連線 `openapi.twse.com.tw` 核對到的，優先信任
+ * 官方欄位，抓不到才退回估算當備援，不是只認其中一種）。
+ *
+ * `revenueYoyPct` 優先用官方已經算好的「去年同月增減(%)」欄位（TWSE 這份
+ * 報表本來就有這一欄，不用自己重算一次，官方數字比我們用當月營收/去年
+ * 當月營收自己除出來的更不容易因為單位換算出錯），查不到才退而求其次，
+ * 用「當月營收」跟「去年當月營收」自己算。
  */
 function parseMonthlyRevenueRows_(rawRows) {
   if (!Array.isArray(rawRows) || rawRows.length === 0) {
@@ -68,6 +99,7 @@ function parseMonthlyRevenueRows_(rawRows) {
   var codeKey = detectFieldKey_(sample, ['公司代號', '證券代號']);
   var nameKey = detectFieldKey_(sample, ['公司名稱', '證券名稱']);
   var periodKey = detectFieldKey_(sample, ['資料年月']);
+  var reportDateKey = detectFieldKey_(sample, ['出表日期']);
   var revenueKey = detectFieldKey_(sample, ['當月營收']);
   var yoyKey = detectFieldKey_(sample, ['去年同月增減', '去年同月增减']);
   var lastYearRevenueKey = detectFieldKey_(sample, ['去年當月營收', '去年同月營收']);
@@ -81,6 +113,8 @@ function parseMonthlyRevenueRows_(rawRows) {
     var revenue = parseFloat(String(r[revenueKey] || '').replace(/,/g, ''));
     var periodRaw = String(r[periodKey] || '').trim(); // 常見格式 '11503'（民國年月）或 '2026-03'
     var period = normalizeYearMonth_(periodRaw);
+    var officialReportDate = reportDateKey ? parseTwseDate_(r[reportDateKey]) : null;
+    var reportDate = officialReportDate || (period ? estimateMonthlyRevenueReportDate_(period) : null);
     var revenueYoyPct = null;
     if (yoyKey && r[yoyKey] !== undefined && r[yoyKey] !== '') {
       revenueYoyPct = parseFloat(String(r[yoyKey]).replace(/,/g, ''));
@@ -92,10 +126,25 @@ function parseMonthlyRevenueRows_(rawRows) {
       code: code,
       name: nameKey ? String(r[nameKey] || '').trim() : '',
       period: period,
+      reportDate: reportDate,
+      reportDateIsEstimated: !officialReportDate,
       revenue: isNaN(revenue) ? null : revenue,
       revenueYoyPct: (revenueYoyPct === null || isNaN(revenueYoyPct)) ? null : revenueYoyPct
     };
   }).filter(function (r) { return r.code.length === 4 && r.period && r.revenue !== null; });
+}
+
+/** 月營收資料如果真的沒有「出表日期」欄位（或偵測失敗），用「月底 + 10
+ *  個日曆天」估算實際公開可得日期——對齊 TWSE 月營收法定公告期限（當月
+ *  結束後 10 日內公告），是沒辦法連線核對官方確切公告日時的保守備援，
+ *  比直接用月份本身（等於假設 3/1 就知道 3 月營收）更不容易製造未來
+ *  函數。優先順序見 `parseMonthlyRevenueRows_` 的說明：有官方「出表
+ *  日期」欄位一律優先用那個，這支只在抓不到那個欄位時當備援。 */
+function estimateMonthlyRevenueReportDate_(period) {
+  var parts = period.split('-').map(Number);
+  var lastDay = new Date(Date.UTC(parts[0], parts[1], 0)); // 下個月第 0 天 = 這個月最後一天
+  lastDay.setUTCDate(lastDay.getUTCDate() + 10);
+  return lastDay.toISOString().slice(0, 10);
 }
 
 /**
@@ -338,6 +387,7 @@ module.exports = {
   parseTwseDate_: parseTwseDate_,
   normalizeYearMonth_: normalizeYearMonth_,
   estimateFiscalQuarterFromReportDate_: estimateFiscalQuarterFromReportDate_,
+  estimateMonthlyRevenueReportDate_: estimateMonthlyRevenueReportDate_,
   parseMonthlyRevenueRows_: parseMonthlyRevenueRows_,
   parseIncomeStatementRows_: parseIncomeStatementRows_,
   parseBalanceSheetRows_: parseBalanceSheetRows_,

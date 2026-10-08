@@ -6,9 +6,13 @@ const fin = require('../lib/financials');
   assert.strictEqual(fin.parseTwseDate_('2026-03-31'), '2026-03-31', '西元年格式');
   assert.strictEqual(fin.parseTwseDate_('115/03/31'), '2026-03-31', '民國年格式（115 -> 2026）');
   assert.strictEqual(fin.parseTwseDate_('2026/03/31'), '2026-03-31', '斜線分隔的西元年格式');
+  // 2026-10-08：WebSearch 查到 data.gov.tw 鏡像站「上市公司每月營業收入
+  // 彙總表」資料集範例，「出表日期」欄位值是無分隔符的民國年 7 碼字串
+  // （例如 "1150111" 代表民國 115 年 01 月 11 日），補上這個格式的處理。
+  assert.strictEqual(fin.parseTwseDate_('1150111'), '2026-01-11', '無分隔符的民國年 7 碼格式（yyyMMDD）');
   assert.strictEqual(fin.parseTwseDate_('not a date'), null, '解析不出來要回傳 null，不是硬湊一個日期');
   assert.strictEqual(fin.parseTwseDate_(''), null);
-  console.log('Test parseTwseDate_ (Western / ROC calendar / unparseable) passed.');
+  console.log('Test parseTwseDate_ (Western / ROC calendar with separators / ROC 7-digit no separator / unparseable) passed.');
 }
 
 // --- 2. normalizeYearMonth_ ---
@@ -26,18 +30,23 @@ const fin = require('../lib/financials');
 // 混用不同結構的列不是真實資料會出現的樣子）。
 {
   var rawWithYoy = [
-    { '公司代號': '1101', '公司名稱': '台泥', '資料年月': '11503', '當月營收': '1,000,000', '去年同月增減(%)': '12.5' },
-    { '公司代號': 'XX', '公司名稱': '代號不合法', '資料年月': '11503', '當月營收': '1', '去年同月增減(%)': '0' } // 代號不是 4 碼，要被濾掉
+    { '公司代號': '1101', '公司名稱': '台泥', '出表日期': '1150411', '資料年月': '11503', '當月營收': '1,000,000', '去年同月增減(%)': '12.5' },
+    { '公司代號': 'XX', '公司名稱': '代號不合法', '出表日期': '1150411', '資料年月': '11503', '當月營收': '1', '去年同月增減(%)': '0' } // 代號不是 4 碼，要被濾掉
   ];
   var parsed = fin.parseMonthlyRevenueRows_(rawWithYoy);
   assert.strictEqual(parsed.length, 1);
-  assert.deepStrictEqual(parsed[0], { code: '1101', name: '台泥', period: '2026-03', revenue: 1000000, revenueYoyPct: 12.5 });
+  assert.deepStrictEqual(parsed[0], {
+    code: '1101', name: '台泥', period: '2026-03', reportDate: '2026-04-11', reportDateIsEstimated: false,
+    revenue: 1000000, revenueYoyPct: 12.5
+  });
 
   var rawWithoutYoy = [
-    { '公司代號': '1102', '公司名稱': '亞泥', '資料年月': '11503', '當月營收': '500,000', '去年當月營收': '400,000' }
+    { '公司代號': '1102', '公司名稱': '亞泥', '資料年月': '11503', '當月營收': '500,000', '去年當月營收': '400,000' } // 沒有「出表日期」欄位
   ];
   var parsed2 = fin.parseMonthlyRevenueRows_(rawWithoutYoy);
   assert.ok(Math.abs(parsed2[0].revenueYoyPct - 25) < 1e-9, '沒有官方 YoY 欄位時要自己用當月/去年當月營收算出 25%');
+  assert.strictEqual(parsed2[0].reportDateIsEstimated, true, '沒有「出表日期」欄位時要標記這是估計值');
+  assert.strictEqual(parsed2[0].reportDate, fin.estimateMonthlyRevenueReportDate_('2026-03'), '退回「月底+10天」估算');
   console.log('Test parseMonthlyRevenueRows_ (uses official YoY column, falls back to computing it, filters invalid codes) passed.');
 }
 
@@ -91,6 +100,13 @@ const fin = require('../lib/financials');
   assert.strictEqual(fin.estimateFiscalQuarterFromReportDate_('2026-05-14'), '2026-Q1');
   assert.strictEqual(fin.estimateFiscalQuarterFromReportDate_(null), null);
   console.log('Test estimateFiscalQuarterFromReportDate_ (infers fiscal quarter from report date minus typical lag) passed.');
+}
+
+// --- 4d. estimateMonthlyRevenueReportDate_ ---
+{
+  assert.strictEqual(fin.estimateMonthlyRevenueReportDate_('2026-03'), '2026-04-10', '3 月最後一天 3/31 + 10 天 = 4/10');
+  assert.strictEqual(fin.estimateMonthlyRevenueReportDate_('2026-02'), '2026-03-10', '跨月份邊界（2 月只有 28 天）也要算對');
+  console.log('Test estimateMonthlyRevenueReportDate_ (month-end + 10-day legal disclosure deadline estimate) passed.');
 }
 
 // --- 5. parseBalanceSheetRows_ ---

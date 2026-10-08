@@ -2802,3 +2802,47 @@ FactorScan.gs）都已經搬完，這裡是最後一塊——搬完之後 `facto
   訊號，需要在接下來幾週／幾季重複執行「重新整理財報因子」，累積出
   至少 2~3 期的歷史才看得出差異，這是資料本質的限制，不是程式邏輯
   的問題。
+
+### 2026-10-08 追加：用 WebSearch 查到 data.gov.tw 鏡像站資料，修正兩個猜測
+
+部署後使用者要求「看一下 API 文件，能否選擇要抓的資料時間；另外看看
+BigQuery 中是否已有累積相關資料」。這個開發環境連不到
+`openapi.twse.com.tw`（連 `WebFetch` 對任何網域都是 DNS 解析失敗，不是
+只有 TWSE 被擋），但 `WebSearch` 查到 `data.gov.tw`（政府資料開放平臺，
+跟 TWSE OpenAPI 同一份原始資料的官方鏡像）的資料集說明頁，間接確認了
+幾件事：
+
+1. **沒有日期區間查詢參數**：三個資料集（編號 18420「上市公司每月營業
+   收入彙總表」、91998「上市公司綜合損益表(一般業)」及對應的資產負債表）
+   的 API 說明都只是整份回傳，沒有列出可以指定日期/期間的查詢參數；
+   TWSE 自己的說明也明講「如需歷史資料，請至公開資訊觀測站瀏覽」——
+   證實這些 opendata 端點就是「目前最新一期」快照，不是歷史歸檔，
+   之前的設計假設（累積寫入 Firestore，見上面「跟 industry_map 不同的
+   資料累積方式」）方向是對的。
+2. **BigQuery 裡沒有既有的累積資料**——用 Agent 搜過整個 repo（apps-script
+   跟 Firebase 兩邊），`BigQuerySync.gs`／`lib/bigquery.js` 裡所有曾經
+   建立過的 BigQuery 表只有 `history_raw`／`history_external`／
+   `history_materialized`／`industry_map`／`factor_features_snapshot`，
+   從來沒有任何財報/營收相關的表——`financial_ratios`／
+   `financial_revenue` 是這個 session 才第一次建立，apps-script 版
+   從未累積過這份資料。
+3. **修正了兩個猜測**（之前因為連不上線只能照 TWSE 報表長年的標準格式
+   猜測，這次用 `WebSearch` 查到鏡像站的範例資料核對到）：
+   - 月營收資料集（t187ap05_L）其實**有**「出表日期」官方公告日欄位，
+     不是像原本以為的只有「資料年月」——原本用「月底+10天」估算，現在
+     改成優先偵測並使用官方欄位，估算只在真的抓不到這個欄位時當備援
+     （`parseMonthlyRevenueRows_`／`estimateMonthlyRevenueReportDate_`
+     的呼叫順序對調）。
+   - 「出表日期」欄位的範例值格式是**無分隔符的民國年 7 碼字串**
+     （例如 `"1150111"` 代表民國 115 年 01 月 11 日），不是原本只處理的
+     `'yyy/MM/dd'` 這種有分隔符格式——`parseTwseDate_` 補上這個格式的
+     解析（固定寬度 3+2+2 碼，不能用貪婪 regex 硬吃，跟 `normalizeYearMonth_`
+     處理 5 碼民國年月同一個理由）。
+
+**仍然要提醒的保留限制**：這些資訊來自 `data.gov.tw` 鏡像站的資料集
+說明跟範例，不是直接連線 `openapi.twse.com.tw` 核對到的即時回應——
+鏡像站的格式跟即時 API 的 JSON 回應有可能一致，也有可能有細節出入
+（例如欄位名稱的全形/半形括號、是否補零），`parseTwseDate_`／
+`detectFieldKey_` 都保留了原本的備援路徑（分隔符格式／關鍵字模糊比對），
+不是只認新查到的這一種格式，但最終還是需要部署後實際執行一次「重新
+整理財報因子」才能 100% 確認。

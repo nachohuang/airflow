@@ -1250,18 +1250,6 @@ async function ensureFeatureView_(bigQueryConfig) {
  * 結果快照」，兩層職責不同。
  */
 
-/** 月營收資料沒有「出表日期」這種公告日欄位（只有「資料年月」，財報
- *  所屬的月份），用「月底 + 10 個日曆天」估算實際公開可得日期——對齊
- *  TWSE 月營收法定公告期限（當月結束後 10 日內公告），這是沒辦法連線
- *  核對官方確切公告日時的保守估計，比直接用月份本身（等於假設 3/1 就
- *  知道 3 月營收）更不容易製造未來函數。 */
-function estimateMonthlyRevenueReportDate_(period) {
-  const parts = period.split('-').map(Number);
-  const lastDay = new Date(Date.UTC(parts[0], parts[1], 0)); // 下個月第 0 天 = 這個月最後一天
-  lastDay.setUTCDate(lastDay.getUTCDate() + 10);
-  return lastDay.toISOString().slice(0, 10);
-}
-
 /** 把一批財報列（`code`／`period` 都有）依代號分組、組內依 period 由舊
  *  到新排序——`computeFundamentalStreaks_`／`computeRevenueGrowthStreaks_`
  *  期待的輸入形狀（陣列的陣列）。 */
@@ -1336,9 +1324,12 @@ async function doRefreshFinancials_(bigQueryConfig) {
   const incomeRaw = datasets[1].rows;
   const balanceRaw = datasets[2].rows;
 
-  const revenueRows = financialsLib.parseMonthlyRevenueRows_(revenueRaw).map(function (r) {
-    return Object.assign({}, r, { reportDate: estimateMonthlyRevenueReportDate_(r.period) });
-  });
+  // 2026-10-08 修正：parseMonthlyRevenueRows_ 現在自己會優先偵測官方
+  // 「出表日期」欄位、抓不到才退回估算（見該函式的說明），這裡不用再
+  // 另外 map 一次覆蓋——原本這裡不管有沒有偵測到官方欄位都強制用估算值
+  // 覆蓋掉，是遷移過程中發現 data.gov.tw 鏡像站資料集範例確認這份報表
+  // 其實有「出表日期」欄位之前的暫時寫法。
+  const revenueRows = financialsLib.parseMonthlyRevenueRows_(revenueRaw);
   const incomeRows = financialsLib.parseIncomeStatementRows_(incomeRaw);
   const balanceRows = financialsLib.parseBalanceSheetRows_(balanceRaw);
   const quarterlyRows = financialsLib.joinIncomeAndEquity_(incomeRows, balanceRows);
