@@ -100,6 +100,55 @@ async function runAll() {
     starting.value = false;
   }
 }
+
+// ---- 因子相關性掃描（functions/lib/factorScan.js）----
+// 2026-10-08：跟上面的回測是完全獨立的研究工具，不需要先套用因子迴歸
+// 模型——純粹算幾個候選因子跟「未來 5 日報酬率」的相關係數，拿來看哪個
+// 因子比較有可能有效。跟回測同一套 jobs/{jobKey} 監聽模式，但用自己的
+// jobs/factorScan key（不是共用 jobs/backtest，兩個是不同的操作）。
+const scanForm = ref({ startDate: '', endDate: '' });
+const scanStarting = ref(false);
+const scanStartError = ref('');
+const scanJob = ref(null);
+let unsubscribeScanJob = null;
+
+onMounted(function () {
+  unsubscribeScanJob = onSnapshot(doc(db, 'jobs', 'factorScan'), function (snap) {
+    scanJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeScanJob) unsubscribeScanJob();
+});
+
+const scanJobStatusLabel = computed(function () {
+  if (!scanJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[scanJob.value.status] || scanJob.value.status;
+});
+
+function correlationColor(correlation) {
+  if (correlation === null || correlation === undefined) return 'var(--text-h)';
+  return correlation >= 0 ? 'var(--green)' : 'var(--red)';
+}
+
+async function runFactorScan() {
+  scanStarting.value = true;
+  scanStartError.value = '';
+  try {
+    await callFn('runFactorCorrelationScan', {
+      startDate: scanForm.value.startDate || undefined,
+      endDate: scanForm.value.endDate || undefined
+    }, 540000); // 跟後端 BACKTEST_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 540 對齊（這支共用同一組 runtime 設定）
+  } catch (e) {
+    const code = e.code || '';
+    if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
+      scanStartError.value = e.message || String(e);
+    }
+  } finally {
+    scanStarting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -211,6 +260,60 @@ async function runAll() {
           </div>
         </div>
       </template>
+    </div>
+
+    <div class="form-card">
+      <h3>📊 因子相關性掃描</h3>
+      <p class="hint">
+        跟上面的回測是獨立的研究工具，不需要先套用因子迴歸模型——算幾個候選
+        因子（法人連續買超天數、法人參與度、趨勢分數、逢低接手率、安全邊際
+        分數）跟「未來 5 日報酬率」的 Pearson 相關係數，看哪個因子比較有可能
+        有效。日期區間都可以留空，代表讀全部 History 資料。
+      </p>
+      <div class="schedule-time-inputs">
+        <input v-model="scanForm.startDate" type="date" placeholder="開始日期（留空＝全部）">
+        <span>~</span>
+        <input v-model="scanForm.endDate" type="date" placeholder="結束日期（留空＝全部）">
+      </div>
+      <div class="form-actions">
+        <button type="button" :disabled="scanStarting" @click="runFactorScan">
+          {{ scanStarting ? '送出中...' : '開始掃描' }}
+        </button>
+      </div>
+      <p v-if="scanStartError" class="error-box">{{ scanStartError }}</p>
+
+      <div v-if="scanJob" style="margin-top:8px;">
+        <div class="run-log-status-card-top">
+          <span>執行狀態</span>
+          <span class="signal-badge" :style="{ color: jobStatusColor(scanJobStatusLabel) }">{{ scanJobStatusLabel }}</span>
+        </div>
+        <p class="hint">
+          <template v-if="scanJob.status === 'running'">還在執行中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+        </p>
+        <p v-if="scanJob.status === 'failed' && scanJob.error" class="error-box">{{ scanJob.error }}</p>
+
+        <template v-if="scanJob.status === 'succeeded' && scanJob.result">
+          <p v-if="scanJob.result.warning" class="hint">{{ scanJob.result.warning }}</p>
+          <template v-else>
+            <p class="hint">樣本數：{{ scanJob.result.sampleSize }}</p>
+            <div class="table-wrap">
+              <table class="history-table">
+                <thead><tr><th>因子</th><th>相關係數</th></tr></thead>
+                <tbody>
+                  <tr v-for="c in scanJob.result.correlations" :key="c.factor">
+                    <td>{{ c.factor }}</td>
+                    <td>
+                      <span class="signal-badge" :style="{ color: correlationColor(c.correlation) }">
+                        {{ c.correlation === null ? 'N/A' : c.correlation.toFixed(4) }}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </template>
+      </div>
     </div>
   </section>
 </template>

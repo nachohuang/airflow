@@ -45,6 +45,7 @@ const twseFetchLib = require('./lib/twseFetch');
 const backtestLib = require('./lib/backtest');
 const analysisLib = require('./lib/analysis');
 const industryMapLib = require('./lib/industryMap');
+const factorScanLib = require('./lib/factorScan');
 
 admin.initializeApp();
 
@@ -1108,6 +1109,60 @@ exports.getIndustryMapSample = onCall(LIGHT_RUNTIME_OPTS_, async function (reque
   const snap = await admin.firestore().collection('industry_map').get();
   const rows = snap.docs.map(function (d) { return d.data(); });
   return { totalCount: rows.length, sample: industryMapLib.pickRandomSample_(rows, 10) };
+});
+
+/**
+ * 2026-10-08 新增：因子相關性掃描，從 apps-script/src/FactorScan.gs 搬過來
+ * （純函式邏輯見 lib/factorScan.js）——跟 `FactorRegression.gs`（BigQuery ML
+ * LASSO 迴歸，還沒遷移）是兩個獨立的研究工具：這支純粹是 JS 算幾個候選因子
+ * 跟「未來 5 日報酬率」的 Pearson 相關係數，不碰 BigQuery ML，拿現有的
+ * `fetchHistoryRangeRows_`（backtest 那邊已經建好）就能重用，不需要新的
+ * BigQuery 查詢邏輯。`schema.md` 原本把這個功能跟 `FactorRegression.gs`
+ * 綁在同一個「Phase 3」階段，這裡先把這支獨立搬完——規模小（116 行，全
+ * 純函式）、風險低（重用的是已經驗證過的 computeFactors_ 系列工具函式），
+ * `FactorRegression.gs` 本身（726 行、BQML 訓練）留給下一階段。
+ *
+ * `startStr`／`endStr` 都可以留空，代表讀「全部」History 資料——跟
+ * apps-script 版一致，但 Firebase 版沒有 Apps Script 6 分鐘執行上限，可以
+ * 一次同步跑完；`BACKTEST_RUNTIME_OPTS_`（2GiB／540s）沿用給這支用，因為
+ * 「全部歷史資料」理論上可能比回測固定的區間還大，這個開發環境沒辦法
+ * 實際量測，先保守沿用已經在用的較高規格。
+ */
+async function runFactorScanCore_(bigQueryConfig, startStr, endStr) {
+  const rawRows = await fetchHistoryRangeRows_(bigQueryConfig, startStr || null, endStr || null);
+  if (rawRows.length === 0) return { sampleSize: 0, correlations: [], warning: '這段期間沒有 History 資料，請先確認資料已抓取。' };
+  const computed = factorScanLib.computeFactorScanFields_(rawRows);
+  return factorScanLib.computeFactorCorrelations_(computed);
+}
+
+exports.runFactorCorrelationScan = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const startTime = Date.now();
+  await writeJobStatus_('factorScan', {
+    status: 'running', startedAt: startTime,
+    params: { startDate: data.startDate || null, endDate: data.endDate || null },
+    error: null
+  });
+  try {
+    const appConfig = await fetchAppConfig_();
+    if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+      throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+    }
+    const result = await runFactorScanCore_(appConfig.bigQuery, data.startDate, data.endDate);
+    const durationMs = Date.now() - startTime;
+    const summaryMsg = '樣本數 ' + result.sampleSize +
+      (result.correlations.length ? '，' + result.correlations.map(function (c) {
+        return c.factor + '=' + (c.correlation === null ? 'N/A' : c.correlation.toFixed(3));
+      }).join('、') : '') + (result.warning ? '（' + result.warning + '）' : '');
+    await logRun_('因子掃描', '成功', summaryMsg, durationMs);
+    await writeJobStatus_('factorScan', { status: 'succeeded', finishedAt: Date.now(), result: result, error: null });
+    return result;
+  } catch (e) {
+    await logRun_('因子掃描', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('factorScan', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+    throw e;
+  }
 });
 
 /**

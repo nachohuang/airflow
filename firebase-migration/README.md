@@ -2538,3 +2538,55 @@ prop（型別 `[{date, reason}]`），由 `AdminView.vue` 傳入——那邊「�
   `remaining` 已經歸零，原本的寫法還是會走進「切 lot」那個分支，對下一筆
   lot 生出一個 `soldShares: 0` 的假 `partialLot`——加上 `remaining > 0`
   的迴圈條件後修正，測試案例已經涵蓋這個情境。
+
+## 2026-10-08：策略研究（三）——FactorScan.gs 因子相關性掃描遷移到 Firebase
+
+照「策略研究：開工前的比對分析」那節的建議，下一步是搬
+`FactorRegression.gs`／`FactorScan.gs`。重新盤點後發現這兩支其實完全
+獨立、規模差異很大：`FactorScan.gs` 只有 116 行、純 JS 運算（跟
+BigQuery ML 無關），`FactorRegression.gs` 是 726 行的 BigQuery ML LASSO
+訓練管線。照這個 session 一貫的順序（先搬小的、風險低的，建立信心跟
+測試基礎，再碰大的），這裡先搬 `FactorScan.gs`，`FactorRegression.gs`
+本身留給下一階段。
+
+### 架構對應
+
+- `functions/lib/factorScan.js`（新檔案）：純函式邏輯，從
+  `FactorScan.gs` 複製 `computeStreak_`／`computeFactorScanFields_`
+  過來，新增 `computeFactorCorrelations_`（抽出
+  `runFactorCorrelationScan` 裡「過濾有效樣本＋算相關係數＋排序」這段
+  不需要 I/O 的部分，方便測試）。意外發現：`computeFactorScanFields_`
+  用到的 `pctChange`／`rollingSum`／`rollingMean`／`rollingMin`／
+  `diffN`／`shiftN`／`pearsonCorrelation` 這些工具函式**全部已經存在**
+  `lib/utils.js`（之前某個階段已經為了別的用途搬過），這支port幾乎只是
+  把 `FactorScan.gs` 的運算邏輯接上既有工具函式，不需要重新刻一套。
+- `functions/index.js` 新增 `runFactorScanCore_`（直接重用 backtest 那邊
+  已經建好的 `fetchHistoryRangeRows_`，不需要新的 BigQuery 查詢邏輯）跟
+  `exports.runFactorCorrelationScan`（onCall），跟回測同一套
+  `jobs/{jobKey}` 狀態追蹤模式（這裡是獨立的 `jobs/factorScan`，不是
+  共用 `jobs/backtest`）。
+- 前端 `ResearchView.vue` 新增「📊 因子相關性掃描」卡片：日期區間輸入
+  （留空＝全部 History 資料，跟 apps-script 版一致）、執行狀態卡片、
+  相關係數表格（正相關綠色、負相關紅色）。
+
+### 設計決定
+
+- **沒有搬背景 job 狀態機**——跟這次遷移其他功能一致的理由：Cloud
+  Functions 一次同步呼叫就能跑完，不需要 Apps Script 6 分鐘上限逼出來
+  的分批機制。
+- **日期區間可以留空代表「全部歷史資料」，沿用 `BACKTEST_RUNTIME_OPTS_`
+  （2GiB／540s）**：跟回測不同，這支沒有像 `BACKTEST_MAX_RANGE_DAYS`
+  那樣的區間上限（apps-script 版本來就允許留空掃全部），理論上資料量
+  可能比回測固定區間更大，這個開發環境沒辦法實際量測，先沿用已經在用
+  的較高規格，正式環境真的遇到 OOM／逾時再調整或補上合理的區間上限。
+- **這支因子跟 `computeFactors_`（戰報用）即使同名也不是同一套定義**
+  ——例如 `Trend_Score` 這裡用 `diff(1)` 算均線斜率，`computeFactors_`
+  用 `diff(3)`，apps-script 原始碼就特別註解這是刻意的差異，不是筆誤，
+  照原樣保留，不要「順手」統一成同一個算法（這支是獨立的研究工具，
+  目的是找出可能有效的因子方向，不是要跟正式戰報的判斷邏輯一致）。
+
+### 還沒做的事
+
+- `FactorRegression.gs`（BigQuery ML LASSO 迴歸，726 行）本身還沒遷移
+  ——`factor_model_rank`／`hybrid` 這兩個策略仍然不能用，因子相關性
+  掃描只是獨立的研究輔助工具，不會自動把結果接進正式的因子模型訓練。
