@@ -231,21 +231,29 @@ const FACTOR_FIELDS = [
     factorRegressionLib.buildFeatureSnapshotSql_(viewRef, snapshotRef)
   );
 
-  // 候選因子清單本身兩邊是否一致（48 個：10 基礎+2 動能時機+24 產業資金流向+12
-  // 產業相對大盤強度），先單獨斷言一次，buildTrainModelSql_ 的字串比對才有意義
-  // ——如果清單本身就不一致，SQL 字串當然也會不一致，但那樣看不出問題出在
-  // 候選因子清單還是 SQL 組字串邏輯本身。JSON 字串比較（不用 deepStrictEqual）
-  // ——跟上面 Parity 5 同一個理由：vm context 建出來的陣列 prototype 來自不同
-  // realm，deepStrictEqual 連 prototype 也比，內容明明一樣也會誤判不相等。
+  // 候選因子清單本身兩邊是否一致——apps-script 原版是 48 個（10 基礎+2
+  // 動能時機+24 產業資金流向+12 產業相對大盤強度），Firebase 版
+  // 2026-10-08 之後額外 push 了 10 個「四率四升」基本面候選因子（見
+  // config.js FUNDAMENTAL_CANDIDATE_COLUMNS 的說明，apps-script 版沒有
+  // 對應邏輯，這是全新因子，不是照搬），所以只比對前 48 個（跟原版同一
+  // 個順序/內容），後面額外的 10 個另外單獨斷言。JSON 字串比較（不用
+  // deepStrictEqual）——跟上面 Parity 5 同一個理由：vm context 建出來的
+  // 陣列 prototype 來自不同 realm，deepStrictEqual 連 prototype 也比，
+  // 內容明明一樣也會誤判不相等。
+  const portedCandidateColumns = configLib.FACTOR_CANDIDATE_COLUMNS.slice(0, 48);
   assert.strictEqual(
-    JSON.stringify(context.CONFIG.FACTOR_CANDIDATE_COLUMNS), JSON.stringify(configLib.FACTOR_CANDIDATE_COLUMNS),
-    'FACTOR_CANDIDATE_COLUMNS 兩邊要完全一致（含順序）'
+    JSON.stringify(context.CONFIG.FACTOR_CANDIDATE_COLUMNS), JSON.stringify(portedCandidateColumns),
+    '照搬自 apps-script 的前 48 個候選因子兩邊要完全一致（含順序）'
+  );
+  assert.strictEqual(
+    JSON.stringify(configLib.FACTOR_CANDIDATE_COLUMNS.slice(48)), JSON.stringify(configLib.FUNDAMENTAL_CANDIDATE_COLUMNS),
+    '第 49 個之後要剛好是 FUNDAMENTAL_CANDIDATE_COLUMNS（全新因子，apps-script 沒有對應內容可比對）'
   );
 
   const modelRef = 'proj.ds.factor_model_return1m';
   assert.strictEqual(
     context.buildTrainModelSql_(modelRef, snapshotRef, 'label_return_1m', context.CONFIG.FACTOR_CANDIDATE_COLUMNS, 0.05),
-    factorRegressionLib.buildTrainModelSql_(modelRef, snapshotRef, 'label_return_1m', configLib.FACTOR_CANDIDATE_COLUMNS, 0.05)
+    factorRegressionLib.buildTrainModelSql_(modelRef, snapshotRef, 'label_return_1m', portedCandidateColumns, 0.05)
   );
 
   assert.strictEqual(context.buildEvaluateSql_(modelRef), factorRegressionLib.buildEvaluateSql_(modelRef));

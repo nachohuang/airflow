@@ -389,6 +389,178 @@ function buildSyncIndustryMapSql_(tableRef, rows) {
   return 'CREATE OR REPLACE TABLE `' + tableRef + '` AS\nSELECT * FROM UNNEST([\n    ' + structs + '\n  ])';
 }
 
+var FINANCIAL_RATIOS_TABLE = 'financial_ratios'; // 季報毛利率/營益率/淨利率/ROE，見 buildFinancialRatiosStructSql_
+var FINANCIAL_REVENUE_TABLE = 'financial_revenue'; // 月營收 YoY，見 buildFinancialRevenueStructSql_
+var FUNDAMENTAL_FEATURE_VIEW = 'factor_features_fundamental'; // 疊加財報因子後的訓練用 view，見 buildFundamentalFeatureViewSql_
+
+function financialRatiosTableRef_(bigQueryConfig) {
+  return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + FINANCIAL_RATIOS_TABLE;
+}
+function financialRevenueTableRef_(bigQueryConfig) {
+  return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + FINANCIAL_REVENUE_TABLE;
+}
+function fundamentalFeatureViewRef_(bigQueryConfig) {
+  return bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + FUNDAMENTAL_FEATURE_VIEW;
+}
+
+/** SQL 數字字面值：null/undefined/NaN 一律輸出 `NULL`（不加引號，這是
+ *  FLOAT64/INT64 欄位，不是字串），跟 `escapeVal_`（给字串欄位用）分開，
+ *  避免把數字欄位誤輸出成帶引號的字串常值。 */
+function numOrNull_(v) {
+  return (v === null || v === undefined || typeof v !== 'number' || isNaN(v)) ? 'NULL' : String(v);
+}
+
+/** 把「rows 依 rowToStructSql(row) 轉成的 STRUCT 字面值長度」切成多個
+ *  chunk，每個 chunk 的 SQL 文字長度控制在 maxChars 以內——跟
+ *  `chunkRowsBySize_`（`history_raw` 專用）同一個「列數可能隨著重複執行
+ *  累積到不小，不能假設資料量小」的教訓（見該函式的完整說明：
+ *  `financial_ratios`／`financial_revenue` 是跨多次「重新整理財報因子」
+ *  累積出來的歷史，不是像 `industry_map` 那樣每次都是全市場一次性覆蓋
+ *  的靜態快照，列數會隨時間成長），這裡是通用版本，不綁定特定欄位結構。 */
+function chunkStructRowsBySize_(rows, rowToStructSql, maxChars) {
+  maxChars = maxChars || 700000;
+  var chunks = [];
+  var current = [];
+  var currentLen = 0;
+  (rows || []).forEach(function (row) {
+    var sql = rowToStructSql(row);
+    var addLen = sql.length + (current.length > 0 ? 2 : 0);
+    if (current.length > 0 && currentLen + addLen > maxChars) {
+      chunks.push(current);
+      current = [row];
+      currentLen = sql.length;
+    } else {
+      current.push(row);
+      currentLen += addLen;
+    }
+  });
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+/** 單筆季報財務比率列（`lib/financials.js joinIncomeAndEquity_`／
+ *  `computeFundamentalStreaks_` 的輸出，已經轉成 `reportDate`／
+ *  `grossMarginPct` 等欄名）的 STRUCT 字面值。 */
+function financialRatioStructSql_(r) {
+  return 'STRUCT(' + escapeVal_(r.code) + ' AS stock_id, DATE(' + escapeVal_(r.reportDate) + ') AS report_date, ' +
+    numOrNull_(r.grossMarginPct) + ' AS gross_margin_pct, ' + numOrNull_(r.operatingMarginPct) + ' AS operating_margin_pct, ' +
+    numOrNull_(r.netMarginPct) + ' AS net_margin_pct, ' + numOrNull_(r.roePct) + ' AS roe_pct, ' +
+    numOrNull_(r.grossMarginStreak) + ' AS gross_margin_streak, ' + numOrNull_(r.operatingMarginStreak) + ' AS operating_margin_streak, ' +
+    numOrNull_(r.netMarginStreak) + ' AS net_margin_streak, ' + numOrNull_(r.roeStreak) + ' AS roe_streak)';
+}
+
+var FINANCIAL_RATIOS_COLUMNS_DDL_ = 'stock_id STRING, report_date DATE, gross_margin_pct FLOAT64, ' +
+  'operating_margin_pct FLOAT64, net_margin_pct FLOAT64, roe_pct FLOAT64, gross_margin_streak INT64, ' +
+  'operating_margin_streak INT64, net_margin_streak INT64, roe_streak INT64';
+
+/** 把累積到的季報財務比率整份覆蓋同步進 BigQuery `financial_ratios`
+ *  表——`CREATE OR REPLACE TABLE`，不是逐筆 append，所以呼叫端每次都要
+ *  傳「目前累積到的完整歷史」（見 `lib/financials.js` 開頭的說明：TWSE
+ *  OpenAPI 這幾個端點是目前快照，不是歷史歸檔，累積歷史的責任在 Firestore
+ *  那一層，這裡只是把累積好的結果同步一份給 BigQuery 查）。回傳 SQL
+ *  陣列（第一句 `CREATE OR REPLACE TABLE ... AS SELECT`，後續是
+ *  `INSERT INTO ... SELECT`），呼叫端依序執行——不用 `chunkRowsBySize_`
+ *  那樣額外包 transaction，因為這是「整份重新覆蓋」不是「增量 UPSERT」，
+ *  其中一個 chunk 失敗、下一次重新整理會自然重新覆蓋，不會留下用一半的
+ *  髒資料跟正式資料混在一起看不出來。 */
+function buildSyncFinancialRatiosSql_(tableRef, rows) {
+  if (!rows || rows.length === 0) {
+    return ['CREATE OR REPLACE TABLE `' + tableRef + '` (' + FINANCIAL_RATIOS_COLUMNS_DDL_ + ')'];
+  }
+  var chunks = chunkStructRowsBySize_(rows, financialRatioStructSql_);
+  return chunks.map(function (chunk, i) {
+    var structsSql = chunk.map(financialRatioStructSql_).join(',\n    ');
+    var body = 'SELECT * FROM UNNEST([\n    ' + structsSql + '\n  ])';
+    return i === 0
+      ? 'CREATE OR REPLACE TABLE `' + tableRef + '` AS\n' + body
+      : 'INSERT INTO `' + tableRef + '`\n' + body;
+  });
+}
+
+/** 單筆月營收列（`lib/financials.js computeRevenueGrowthStreaks_` 的
+ *  輸出）的 STRUCT 字面值。`reportDate` 是估算的「實際公開可得日期」
+ *  （月底+10 個日曆天，對齊 TWSE 月營收法定公告期限，見
+ *  `lib/financials.js` 的完整說明），不是財報所屬月份本身。 */
+function financialRevenueStructSql_(r) {
+  return 'STRUCT(' + escapeVal_(r.code) + ' AS stock_id, DATE(' + escapeVal_(r.reportDate) + ') AS report_date, ' +
+    numOrNull_(r.revenueYoyPct) + ' AS revenue_yoy_pct, ' + numOrNull_(r.revenueGrowthStreak) + ' AS revenue_growth_streak)';
+}
+
+var FINANCIAL_REVENUE_COLUMNS_DDL_ = 'stock_id STRING, report_date DATE, revenue_yoy_pct FLOAT64, revenue_growth_streak INT64';
+
+/** 跟 `buildSyncFinancialRatiosSql_` 同一個模式，月營收版本。 */
+function buildSyncFinancialRevenueSql_(tableRef, rows) {
+  if (!rows || rows.length === 0) {
+    return ['CREATE OR REPLACE TABLE `' + tableRef + '` (' + FINANCIAL_REVENUE_COLUMNS_DDL_ + ')'];
+  }
+  var chunks = chunkStructRowsBySize_(rows, financialRevenueStructSql_);
+  return chunks.map(function (chunk, i) {
+    var structsSql = chunk.map(financialRevenueStructSql_).join(',\n    ');
+    var body = 'SELECT * FROM UNNEST([\n    ' + structsSql + '\n  ])';
+    return i === 0
+      ? 'CREATE OR REPLACE TABLE `' + tableRef + '` AS\n' + body
+      : 'INSERT INTO `' + tableRef + '`\n' + body;
+  });
+}
+
+/**
+ * 在既有的（apps-script parity 驗證過、原封不動不碰的）`factor_features`
+ * view 之上，再疊一層「財報基本面因子」——刻意不直接修改
+ * `lib/factorRegression.js buildFeatureViewSql_` 本身：那支函式逐行
+ * 對照 apps-script 原始碼做過字串完全相等的驗證（見 test/parity.test.js
+ * Parity 6），直接在裡面插入新邏輯風險是「改壞一段已經驗證過在正式環境
+ * 可以跑的 SQL」，報酬（省一次 CREATE VIEW）完全不值得冒這個險。這裡
+ * 另外建一個 view，用點對點（point-in-time）正確的方式把財報因子接上去：
+ * 對每一個 (stock_id, date)，LEFT JOIN「這個 date 當天已經公開可得、
+ * 最新一期」的財務比率/月營收資料（用 `report_date <= date` 的相關子查詢
+ * 取最大值），不是直接 JOIN 同一天的資料（財報季度要等出表日期公告後
+ * 才算「市場知道」，用季度期末日或當月月份直接對齊會製造未來函數——
+ * 回測/訓練會「提前看到」財報季結束但還沒公告的資訊，見
+ * `lib/financials.js parseIncomeStatementRows_` 的說明）。
+ *
+ * 找不到任何財報資料的 (stock_id, date)（例如新上市不滿一期、或財報來源
+ * 本身缺漏）這幾個新欄位一律是 NULL，不特別 COALESCE 成中性值——跟
+ * `buildFeatureViewSql_` 原本的 `dividend_yield`／`pe_ratio`／`pb_ratio`
+ * 同一個處理方式（這幾個原本就可能是 NULL，`buildTrainModelSql_` 的
+ * `WHERE ... IS NOT NULL` 本來就會把這些列排除在訓練之外，不是這次才
+ * 出現的新行為）。
+ *
+ * 訓練（`runFactorRegressionCore_`）之後改成對這個疊加後的 view 做
+ * snapshot／訓練，不是原本的 `factor_features`，10 個新因子欄位名稱
+ * （`fundamental_` 前綴）要加進 `config.js` 的 `FACTOR_CANDIDATE_COLUMNS`
+ * 才會真的被 LASSO 考慮進去。
+ */
+function buildFundamentalFeatureViewSql_(baseFeatureViewRef, financialRatiosTableRef, financialRevenueTableRef, outputViewRef) {
+  return [
+    'CREATE OR REPLACE VIEW `' + outputViewRef + '` AS',
+    'SELECT',
+    '  base.*,',
+    '  fr.gross_margin_pct AS fundamental_gross_margin_pct,',
+    '  fr.operating_margin_pct AS fundamental_operating_margin_pct,',
+    '  fr.net_margin_pct AS fundamental_net_margin_pct,',
+    '  fr.roe_pct AS fundamental_roe_pct,',
+    '  fr.gross_margin_streak AS fundamental_gross_margin_streak,',
+    '  fr.operating_margin_streak AS fundamental_operating_margin_streak,',
+    '  fr.net_margin_streak AS fundamental_net_margin_streak,',
+    '  fr.roe_streak AS fundamental_roe_streak,',
+    '  rev.revenue_yoy_pct AS fundamental_revenue_yoy_pct,',
+    '  rev.revenue_growth_streak AS fundamental_revenue_growth_streak',
+    'FROM `' + baseFeatureViewRef + '` base',
+    'LEFT JOIN `' + financialRatiosTableRef + '` fr',
+    '  ON fr.stock_id = base.stock_id',
+    '  AND fr.report_date = (',
+    '    SELECT MAX(fr2.report_date) FROM `' + financialRatiosTableRef + '` fr2',
+    '    WHERE fr2.stock_id = base.stock_id AND fr2.report_date <= base.date',
+    '  )',
+    'LEFT JOIN `' + financialRevenueTableRef + '` rev',
+    '  ON rev.stock_id = base.stock_id',
+    '  AND rev.report_date = (',
+    '    SELECT MAX(rev2.report_date) FROM `' + financialRevenueTableRef + '` rev2',
+    '    WHERE rev2.stock_id = base.stock_id AND rev2.report_date <= base.date',
+    '  )'
+  ].join('\n');
+}
+
 module.exports = {
   BQ_COLUMN_MAP: BQ_COLUMN_MAP,
   bqColumnNames_: bqColumnNames_,
@@ -408,5 +580,12 @@ module.exports = {
   buildMaxDateSql_: buildMaxDateSql_,
   buildDateBoundsSql_: buildDateBoundsSql_,
   buildDailyCountsSql_: buildDailyCountsSql_,
-  buildSyncIndustryMapSql_: buildSyncIndustryMapSql_
+  buildSyncIndustryMapSql_: buildSyncIndustryMapSql_,
+  financialRatiosTableRef_: financialRatiosTableRef_,
+  financialRevenueTableRef_: financialRevenueTableRef_,
+  fundamentalFeatureViewRef_: fundamentalFeatureViewRef_,
+  chunkStructRowsBySize_: chunkStructRowsBySize_,
+  buildSyncFinancialRatiosSql_: buildSyncFinancialRatiosSql_,
+  buildSyncFinancialRevenueSql_: buildSyncFinancialRevenueSql_,
+  buildFundamentalFeatureViewSql_: buildFundamentalFeatureViewSql_
 };

@@ -47,6 +47,7 @@ const analysisLib = require('./lib/analysis');
 const industryMapLib = require('./lib/industryMap');
 const factorScanLib = require('./lib/factorScan');
 const factorRegressionLib = require('./lib/factorRegression');
+const financialsLib = require('./lib/financials');
 
 admin.initializeApp();
 
@@ -1226,6 +1227,263 @@ async function ensureFeatureView_(bigQueryConfig) {
   await client.query({ query: factorRegressionLib.buildFeatureViewSql_(rawTableRef, industryMapTableRef, viewRef) });
 }
 
+/**
+ * 2026-10-08 新增：余適安（余博）法人選股邏輯延伸的基本面因子（四率四升
+ * ＋月營收連續成長）——全新邏輯，apps-script 版沒有對應程式碼（純函式
+ * 邏輯見 `lib/financials.js`，SQL 組字串見 `lib/bigquery.js
+ * buildSyncFinancialRatiosSql_`／`buildSyncFinancialRevenueSql_`／
+ * `buildFundamentalFeatureViewSql_`）。
+ *
+ * **跟 `industry_map` 不同的資料累積方式**：TWSE 這三個 OpenAPI 端點
+ * （月營收／綜合損益表／資產負債表）回傳的是「目前最新一期」的全市場
+ * 快照，不是歷史歸檔（這個開發環境沒辦法連線確認，但官方「opendata」
+ * 這類端點普遍是這個行為模式，比照保守假設處理）——每次「重新整理財報
+ * 因子」抓到的都只有最新一期，要算「連續 N 期上升」就一定要跨多次執行
+ * 累積歷史，不能像 `industry_map` 那樣每次整份覆蓋。所以 Firestore 這層
+ * 用 `financials_quarterly/{code}_{period}`／`financials_monthly/{code}_{period}`
+ * 累積寫入（`merge: true`，同一期重複抓到會更新但不會新增重複筆數），
+ * 每次重新整理都讀回完整累積歷史重新計算連續上升期數（新進的這一期
+ * 可能延續或打斷既有的連續紀錄，必須看完整歷史，不能只看這次新抓到的
+ * 那一筆）。BigQuery 那一層才是整份覆蓋（`financial_ratios`／
+ * `financial_revenue` 表，見 `buildSyncFinancialRatiosSql_` 的說明）——
+ * Firestore 存「會一直累積變大的歷史」，BigQuery 存「目前累積到的完整
+ * 結果快照」，兩層職責不同。
+ */
+
+/** 月營收資料沒有「出表日期」這種公告日欄位（只有「資料年月」，財報
+ *  所屬的月份），用「月底 + 10 個日曆天」估算實際公開可得日期——對齊
+ *  TWSE 月營收法定公告期限（當月結束後 10 日內公告），這是沒辦法連線
+ *  核對官方確切公告日時的保守估計，比直接用月份本身（等於假設 3/1 就
+ *  知道 3 月營收）更不容易製造未來函數。 */
+function estimateMonthlyRevenueReportDate_(period) {
+  const parts = period.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(parts[0], parts[1], 0)); // 下個月第 0 天 = 這個月最後一天
+  lastDay.setUTCDate(lastDay.getUTCDate() + 10);
+  return lastDay.toISOString().slice(0, 10);
+}
+
+/** 把一批財報列（`code`／`period` 都有）依代號分組、組內依 period 由舊
+ *  到新排序——`computeFundamentalStreaks_`／`computeRevenueGrowthStreaks_`
+ *  期待的輸入形狀（陣列的陣列）。 */
+function groupAndSortFinancialRowsByCode_(rows) {
+  const byCode = {};
+  rows.forEach(function (r) {
+    if (!byCode[r.code]) byCode[r.code] = [];
+    byCode[r.code].push(r);
+  });
+  return Object.keys(byCode).map(function (code) {
+    return byCode[code].sort(function (a, b) { return (a.period || '') < (b.period || '') ? -1 : 1; });
+  });
+}
+
+/** 把一批財報列累積寫進 Firestore（`merge: true`，同一期重複抓到是
+ *  更新不是新增，見上方區塊「跟 industry_map 不同的資料累積方式」的
+ *  說明），文件 ID 是 `code_period`。跟 `writeIndustryMapToFirestore_`
+ *  同一個批次寫入模式（400 筆一批），但不刪除任何既有文件——這裡是
+ *  累積歷史，不是整份覆蓋。 */
+async function upsertFinancialRowsToFirestore_(collectionName, rows) {
+  const db = admin.firestore();
+  const ref = db.collection(collectionName);
+  const updatedAt = Date.now();
+  const BATCH_SIZE = 400;
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    rows.slice(i, i + BATCH_SIZE).forEach(function (r) {
+      const docId = r.code + '_' + r.period;
+      batch.set(ref.doc(docId), Object.assign({}, r, { updatedAt: updatedAt }), { merge: true });
+    });
+    await batch.commit();
+  }
+}
+
+async function fetchAllDocs_(collectionName) {
+  const snap = await admin.firestore().collection(collectionName).get();
+  return snap.docs.map(function (d) { return d.data(); });
+}
+
+/** 把算好連續上升期數的季報財務比率／月營收列同步進 BigQuery（整份
+ *  覆蓋，見 `buildSyncFinancialRatiosSql_` 的說明）。不在這裡建
+ *  `buildFundamentalFeatureViewSql_` 那層 view——刻意跟「寫資料」分開，
+ *  見 `ensureFundamentalFeatureView_` 的說明。 */
+async function syncFinancialsToBigQuery_(bigQueryConfig, quarterlyRows, monthlyRows) {
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const ratiosTableRef = bigquery.financialRatiosTableRef_(bigQueryConfig);
+  const revenueTableRef = bigquery.financialRevenueTableRef_(bigQueryConfig);
+
+  const ratioStatements = bigquery.buildSyncFinancialRatiosSql_(ratiosTableRef, quarterlyRows.map(function (r) {
+    return {
+      code: r.code, reportDate: r.period, grossMarginPct: r.grossMarginPct, operatingMarginPct: r.operatingMarginPct,
+      netMarginPct: r.netMarginPct, roePct: r.roePct, grossMarginStreak: r.grossMarginStreak,
+      operatingMarginStreak: r.operatingMarginStreak, netMarginStreak: r.netMarginStreak, roeStreak: r.roeStreak
+    };
+  }));
+  for (const sql of ratioStatements) await client.query({ query: sql });
+
+  const revenueStatements = bigquery.buildSyncFinancialRevenueSql_(revenueTableRef, monthlyRows.map(function (r) {
+    return { code: r.code, reportDate: r.reportDate, revenueYoyPct: r.revenueYoyPct, revenueGrowthStreak: r.revenueGrowthStreak };
+  }));
+  for (const sql of revenueStatements) await client.query({ query: sql });
+}
+
+/** 實際做事的地方：抓 TWSE 三份官方資料＋解析＋驗證＋累積寫入
+ *  Firestore＋讀回完整歷史重算連續上升期數＋同步進 BigQuery。任何品質
+ *  檢查沒過就整批放棄這次更新（不影響既有累積資料）——跟
+ *  `doRefreshIndustryMap_` 同一個「寧可保留舊資料」原則。由
+ *  `exports.runFinancialsRefresh` 呼叫。 */
+async function doRefreshFinancials_(bigQueryConfig) {
+  const datasets = await fetchTwseOfficialFinancialsDatasets_();
+  const revenueRaw = datasets[0].rows;
+  const incomeRaw = datasets[1].rows;
+  const balanceRaw = datasets[2].rows;
+
+  const revenueRows = financialsLib.parseMonthlyRevenueRows_(revenueRaw).map(function (r) {
+    return Object.assign({}, r, { reportDate: estimateMonthlyRevenueReportDate_(r.period) });
+  });
+  const incomeRows = financialsLib.parseIncomeStatementRows_(incomeRaw);
+  const balanceRows = financialsLib.parseBalanceSheetRows_(balanceRaw);
+  const quarterlyRows = financialsLib.joinIncomeAndEquity_(incomeRows, balanceRows);
+
+  const issues = financialsLib.validateFinancialRows_(revenueRows, '月營收', 500)
+    .concat(financialsLib.validateFinancialRows_(quarterlyRows, '季報財務比率', 500));
+  if (issues.length > 0) {
+    throw new Error('財報資料品質檢查沒通過，已放棄這次更新（不影響既有累積資料）：' + issues.join('；'));
+  }
+
+  await upsertFinancialRowsToFirestore_('financials_monthly', revenueRows);
+  await upsertFinancialRowsToFirestore_('financials_quarterly', quarterlyRows);
+
+  const allMonthly = await fetchAllDocs_('financials_monthly');
+  const allQuarterly = await fetchAllDocs_('financials_quarterly');
+  const streakedMonthly = financialsLib.computeRevenueGrowthStreaks_(groupAndSortFinancialRowsByCode_(allMonthly));
+  const streakedQuarterly = financialsLib.computeFundamentalStreaks_(groupAndSortFinancialRowsByCode_(allQuarterly));
+
+  const bqSync = { attempted: false, ok: false, error: null };
+  if (bigQueryConfig && bigQueryConfig.projectId) {
+    bqSync.attempted = true;
+    try {
+      await syncFinancialsToBigQuery_(bigQueryConfig, streakedQuarterly, streakedMonthly);
+      bqSync.ok = true;
+    } catch (e) {
+      bqSync.error = String(e.message || e);
+    }
+  }
+
+  return {
+    monthlyCount: revenueRows.length,
+    quarterlyCount: quarterlyRows.length,
+    monthlyTotalAccumulated: allMonthly.length,
+    quarterlyTotalAccumulated: allQuarterly.length,
+    bqSync: bqSync
+  };
+}
+
+/** 跟 `ensureIndustryMapSyncedToBigQuery_` 同一個「自動檢核」模式：訓練
+ *  前如果 `financial_ratios`／`financial_revenue` 從來沒有成功同步過，
+ *  先自動跑一次「重新整理財報因子」，不用使用者自己記得要先手動點一次；
+ *  已經成功同步過就跳過（財報不是每天都更新，沒必要每次訓練都重抓）。
+ *  失敗不阻擋後續訓練（吞掉錯誤）——基本面因子當下沒有真實資料可用，
+ *  `buildFundamentalFeatureViewSql_` LEFT JOIN 不到資料時那幾個新欄位
+ *  本來就會是 NULL，不影響其他既有候選因子正常訓練。 */
+async function ensureFinancialsSyncedToBigQuery_(bigQueryConfig) {
+  const snap = await admin.firestore().collection('jobs').doc('financialsRefresh').get();
+  const lastResult = snap.exists ? snap.data() : null;
+  if (lastResult && lastResult.result && lastResult.result.bqSync && lastResult.result.bqSync.ok) return;
+  try {
+    await doRefreshFinancials_(bigQueryConfig);
+  } catch (e) { /* 見上方說明：這裡失敗不阻擋後續訓練繼續進行 */ }
+}
+
+/** 在 `factor_features`（apps-script parity 驗證過、原封不動不碰）之上
+ *  疊一層財報基本面因子，建立/更新 `factor_features_fundamental` view
+ *  ——訓練（`runFactorRegressionCore_`）改成對這個疊加後的 view 做
+ *  snapshot，不是原本的 `factor_features`，見
+ *  `lib/bigquery.js buildFundamentalFeatureViewSql_` 完整的設計說明
+ *  （為什麼不直接改 `buildFeatureViewSql_` 本身）。 */
+async function ensureFundamentalFeatureView_(bigQueryConfig) {
+  await ensureFinancialsSyncedToBigQuery_(bigQueryConfig);
+  const client = new BigQuery({ projectId: bigQueryConfig.projectId });
+  const baseViewRef = bigquery.featureViewRef_(bigQueryConfig);
+  const ratiosTableRef = bigquery.financialRatiosTableRef_(bigQueryConfig);
+  const revenueTableRef = bigquery.financialRevenueTableRef_(bigQueryConfig);
+  const outputViewRef = bigquery.fundamentalFeatureViewRef_(bigQueryConfig);
+  await client.query({ query: bigquery.buildFundamentalFeatureViewSql_(baseViewRef, ratiosTableRef, revenueTableRef, outputViewRef) });
+}
+
+exports.runFinancialsRefresh = onCall(RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const startTime = Date.now();
+  await writeJobStatus_('financialsRefresh', { status: 'running', startedAt: startTime, error: null });
+  try {
+    const appConfig = await fetchAppConfig_();
+    const summary = await doRefreshFinancials_(appConfig.bigQuery || {});
+    const durationMs = Date.now() - startTime;
+    const msg = '本次新抓 ' + summary.monthlyCount + ' 筆月營收、' + summary.quarterlyCount + ' 筆季報財務比率' +
+      '（累積總筆數：月營收 ' + summary.monthlyTotalAccumulated + '、季報 ' + summary.quarterlyTotalAccumulated + '）' +
+      (summary.bqSync.attempted ? '，BigQuery 同步：' + (summary.bqSync.ok ? '成功' : '失敗（' + summary.bqSync.error + '）') : '');
+    await logRun_('財報因子', '成功', msg, durationMs);
+    await writeJobStatus_('financialsRefresh', { status: 'succeeded', finishedAt: Date.now(), result: summary, error: null });
+    return summary;
+  } catch (e) {
+    await logRun_('財報因子', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('financialsRefresh', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+    throw new HttpsError('internal', String(e.message || e));
+  }
+});
+
+/**
+ * Admin 頁面「財報因子資料完整性月曆」用：這個月月營收／季報財務比率
+ * 各自涵蓋了多少檔股票——跟 `getHistoryDailyCounts`（股價資料月曆）
+ * 同一個用途，但這裡直接查 Firestore（資料量级是「公司數 × 期數」，
+ * 遠小於股價資料的「天數 × 股票數」，不需要 BigQuery）。月營收用
+ * `period`（'yyyy-MM'）分組，季報財務比率用 `fiscalPeriod`（'yyyy-Qn'，
+ * 財報所屬季度，不是公告日——見 `lib/financials.js
+ * parseIncomeStatementRows_` 的說明，公告日拿來分組會因為同一季不同
+ * 公司公告日期分散而看不出「這一季涵蓋了多少公司」）。
+ */
+exports.getFinancialsCoverage = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const [monthlyDocs, quarterlyDocs] = await Promise.all([
+    fetchAllDocs_('financials_monthly'),
+    fetchAllDocs_('financials_quarterly')
+  ]);
+
+  const monthlyByPeriod = {};
+  monthlyDocs.forEach(function (d) {
+    if (!monthlyByPeriod[d.period]) monthlyByPeriod[d.period] = new Set();
+    monthlyByPeriod[d.period].add(d.code);
+  });
+  const quarterlyByPeriod = {};
+  let fiscalPeriodIsEstimated = false;
+  quarterlyDocs.forEach(function (d) {
+    const key = d.fiscalPeriod || '未知';
+    if (d.fiscalPeriodIsEstimated) fiscalPeriodIsEstimated = true;
+    if (!quarterlyByPeriod[key]) quarterlyByPeriod[key] = new Set();
+    quarterlyByPeriod[key].add(d.code);
+  });
+
+  return {
+    monthly: Object.keys(monthlyByPeriod).sort().map(function (p) { return { period: p, stockCount: monthlyByPeriod[p].size }; }),
+    quarterly: Object.keys(quarterlyByPeriod).sort().map(function (p) { return { period: p, stockCount: quarterlyByPeriod[p].size }; }),
+    fiscalPeriodIsEstimated: fiscalPeriodIsEstimated
+  };
+});
+
+/** 財報因子的「隨機抽樣」人眼抽查——跟 `getIndustryMapSample` 同一個
+ *  用途跟模式，分別對月營收／季報財務比率各抽 10 筆。 */
+exports.getFinancialsSample = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const [monthlyDocs, quarterlyDocs] = await Promise.all([
+    fetchAllDocs_('financials_monthly'),
+    fetchAllDocs_('financials_quarterly')
+  ]);
+  return {
+    monthlyTotalCount: monthlyDocs.length,
+    quarterlyTotalCount: quarterlyDocs.length,
+    monthlySample: industryMapLib.pickRandomSample_(monthlyDocs, 10),
+    quarterlySample: industryMapLib.pickRandomSample_(quarterlyDocs, 10)
+  };
+});
+
 /** 對單一 label 跑一次訓練＋評估＋取權重，對應 apps-script 版
  *  `trainFactorModel_`。sourceRef 是這次訓練實際要讀的來源（同一次執行
  *  對兩個 label 共用同一份快照表，見 `buildFeatureSnapshotSql_` 的
@@ -1277,9 +1535,15 @@ async function writeFactorModelHistory_(timestamp, result) {
  *  `factor_model_history`——對應 apps-script 版 `runFactorRegression()`。 */
 async function runFactorRegressionCore_(bigQueryConfig, l1Reg) {
   await ensureFeatureView_(bigQueryConfig);
+  await ensureFundamentalFeatureView_(bigQueryConfig);
 
   const client = new BigQuery({ projectId: bigQueryConfig.projectId });
-  const viewRef = bigquery.featureViewRef_(bigQueryConfig);
+  // 2026-10-08 改成對疊加了財報基本面因子的 view 做 snapshot／訓練，不是
+  // 原本的 factor_features——見 ensureFundamentalFeatureView_ 的說明，
+  // factor_features_fundamental 包含 factor_features 原本的全部 48 個
+  // 欄位＋10 個新的 fundamental_* 欄位，buildFeatureSnapshotSql_ 本身
+  // 不用改，只是換了要凍結快照的來源 view。
+  const viewRef = bigquery.fundamentalFeatureViewRef_(bigQueryConfig);
   const snapshotRef = bigquery.featureSnapshotTableRef_(bigQueryConfig);
   await client.query({ query: factorRegressionLib.buildFeatureSnapshotSql_(viewRef, snapshotRef) });
 

@@ -4,6 +4,7 @@ import { collection, doc, onSnapshot, updateDoc, setDoc, deleteDoc, query, order
 import { db } from '../../firebase';
 import { callFn } from '../../composables/useCallable';
 import HistoryCalendarCard from './HistoryCalendarCard.vue';
+import FinancialsCoverageCard from './FinancialsCoverageCard.vue';
 
 /** 跟 functions/lib/analysis.js 的 SCREENING_STRATEGIES 是同一份清單（key／label）
  *  ——那邊是純運算邏輯用的 Node 模組，這裡是獨立的前端套件，不方便直接 import，
@@ -928,6 +929,8 @@ const runLogLatestByCategory = computed(function () {
       </div>
 
       <HistoryCalendarCard :skip-dates="skipDates" />
+
+      <FinancialsCoverageCard />
 
       <div class="form-card">
         <h3>產業對照表（股票代號→產業別）</h3>

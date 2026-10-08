@@ -439,9 +439,11 @@ async function applyModel(timestamp) {
       <p class="hint">
         用 BigQuery ML 的 LASSO 線性迴歸，從全部候選因子（含法人參與度／
         趨勢分數／逢低接手率等 10 個基礎因子＋2 個動能時機因子＋36 個產業
-        資金流向因子）裡找出目前最能預測「後續 1 個月報酬率」跟「相對大盤
-        抗跌力」的組合。訓練出來的某一版套用後，上面的回測（以及正式戰報）
-        的 <code>factor_model_rank</code>／<code>hybrid</code> 策略才會真的
+        資金流向因子＋10 個余博邏輯延伸的基本面因子「四率四升」／月營收
+        連續成長，見下面 Admin 頁面「財報基本面因子」卡片）裡找出目前最能
+        預測「後續 1 個月報酬率」跟「相對大盤抗跌力」的組合。訓練出來的
+        某一版套用後，上面的回測（以及正式戰報）的
+        <code>factor_model_rank</code>／<code>hybrid</code> 策略才會真的
         有模型可以用。建議每週跑一次就夠——因子有效性不會一天一天大幅變動。
       </p>
 
@@ -518,7 +520,7 @@ async function applyModel(timestamp) {
       </div>
       <p v-else class="hint">目前沒有任何訓練紀錄。</p>
       <p class="hint">
-        候選因子清單（目前固定 48 個，不是每次訓練可以自己選的參數）定義在
+        候選因子清單（目前固定 58 個，不是每次訓練可以自己選的參數）定義在
         <code>functions/lib/config.js</code> 的 <code>FACTOR_CANDIDATE_COLUMNS</code>
         ——每次訓練都是同一份候選清單，差別在 LASSO 最後選中哪些、權重多少
         （見上面每一列的「關鍵影響因子」），不是這次訓練用了不同的因子組合。

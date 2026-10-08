@@ -237,6 +237,51 @@ Firestore 版本前端改用 `onSnapshot` 監聽這個 collection，不用再 4 
 
 ---
 
+## 10. `financials_monthly/{code}_{period}`、`financials_quarterly/{code}_{period}`
+
+2026-10-08 新增——余博邏輯延伸的基本面因子（四率四升＋月營收連續成長）
+資料來源，apps-script 版沒有對應的 Sheet，完全是這次 Firebase 版新增的
+collection，見 `firebase-migration/README.md`「余博邏輯延伸的基本面
+因子」一節的完整架構說明。
+
+`financials_monthly/{code}_{period}`（`period` 是 `'yyyy-MM'`）：
+
+| 欄位 | 型別 |
+| :-- | :-- |
+| `code` | `string` |
+| `name` | `string` |
+| `period` | `string`（`'yyyy-MM'`） |
+| `reportDate` | `string`（`'yyyy-MM-dd'`，估算的公開可得日期） |
+| `revenue` | `number` \| `null` |
+| `revenueYoyPct` | `number` \| `null` |
+| `revenueGrowthStreak` | `number` \| `null` |
+| `updatedAt` | `number`（epoch ms） |
+
+`financials_quarterly/{code}_{period}`（`period` 是 `'yyyy-MM-dd'`，
+官方公告日，不是季度期末日或所屬季度——詳見 README 的「點對點正確的
+JOIN」說明）：
+
+| 欄位 | 型別 |
+| :-- | :-- |
+| `code` | `string` |
+| `name` | `string` |
+| `period` | `string`（`'yyyy-MM-dd'`，公告日） |
+| `fiscalPeriod` | `string`（`'yyyy-Qn'`，財報所屬季度，可能是估計值） |
+| `fiscalPeriodIsEstimated` | `boolean` |
+| `revenue`／`grossProfit`／`operatingIncome`／`netIncome` | `number` \| `null` |
+| `grossMarginPct`／`operatingMarginPct`／`netMarginPct`／`roePct` | `number` \| `null` |
+| `grossMarginStreak`／`operatingMarginStreak`／`netMarginStreak`／`roeStreak` | `number` \| `null` |
+| `updatedAt` | `number`（epoch ms） |
+
+兩張表都是**累積寫入**（`merge: true`，不是整份覆蓋）——跟這份文件其他
+「靜態參考資料／整份覆蓋」的表不同，因為 TWSE 來源端點很可能只回傳
+「目前最新一期」，要算連續上升期數就必須跨多次「重新整理財報因子」
+累積歷史，見 README 的完整說明。同步到 BigQuery 的 `financial_ratios`／
+`financial_revenue` 表才是「目前累積到的完整結果」整份覆蓋快照，兩層
+職責不同，不要搞混。
+
+---
+
 ## 尚未涵蓋
 
 `Reports`／`AiDiagnosis` 的**歷史**資料遷移策略（只遷移最新一天還是連歷史都搬）

@@ -2695,3 +2695,110 @@ FactorScan.gs）都已經搬完，這裡是最後一塊——搬完之後 `facto
   上執行會不會报錯/跑多久——需要部署後在正式環境手動按一次「開始訓練」
   才能真正驗證整條管線（抓資料→建 view→訓練→評估→取權重→寫入
   Firestore）跑得通。
+
+## 2026-10-08：余博邏輯延伸的基本面因子（四率四升＋月營收連續成長）
+
+照「開工前的比對分析」那節的「最推薦」項目：把
+`TWSE_OFFICIAL_FINANCIALS_DATASETS_`（已經在抓、但只餵給 AI 診斷當文字
+參考的官方財報資料）解析成結構化的毛利率／營益率／淨利率／ROE／月營收
+趨勢因子，加進因子迴歸模型的候選特徵。這是全新邏輯，apps-script 版沒有
+對應程式碼可以照搬，使用者同時要求「順便加上資料的檢查區塊，例如以
+月曆呈現，還有資料 sanity check 要看得到」。
+
+### 架構對應
+
+- `functions/lib/financials.js`（新檔案）：解析 TWSE 三個「一般業」官方
+  端點（月營收 `t187ap05_L`、綜合損益表 `t187ap06_L_ci`、資產負債表
+  `t187ap07_L_ci`）的純函式邏輯——欄位名稱沒有官方逐欄位文件可查，用
+  關鍵字動態偵測（跟 `industryMap.js` 同一套手法，各自獨立一份），偵測
+  不到就直接拋出清楚的錯誤，列出實際拿到的欄位名稱，不會用錯欄位硬解析
+  出垃圾數字。計算毛利率／營益率／淨利率（綜合損益表）、ROE（損益表
+  淨利／資產負債表權益總計）、連續上升期數（`computeIncreaseStreak_`，
+  任一期缺資料就歸零，不會被誤判成沒中斷）、月營收 YoY 連續成長期數。
+- `functions/lib/bigquery.js` 新增：`buildSyncFinancialRatiosSql_`／
+  `buildSyncFinancialRevenueSql_`（整份覆蓋同步進 BigQuery，用
+  `chunkStructRowsBySize_`——這是通用化、吸取了 `history_raw` 那次「列數
+  可能隨時間累積到不小，不能假設資料量小」教訓的 chunk 邏輯，不是重蹈
+  覆轍）、`buildFundamentalFeatureViewSql_`（**刻意不修改**
+  `buildFeatureViewSql_` 本身，另外疊一層新 view `factor_features_fundamental`
+  在它之上，見下面「設計決定」）。
+- `functions/lib/config.js` 新增 `FUNDAMENTAL_CANDIDATE_COLUMNS`（10 個：
+  4 個比率的原始值＋連續上升期數各一組，加上月營收 YoY／連續成長期數），
+  push 進 `FACTOR_CANDIDATE_COLUMNS`（48 → 58 個）。
+- `functions/index.js` 新增：`doRefreshFinancials_`（抓取＋解析＋驗證＋
+  累積寫入 Firestore＋讀回完整歷史重算連續上升期數＋同步進 BigQuery）、
+  `ensureFinancialsSyncedToBigQuery_`（訓練前自動檢核，跟
+  `ensureIndustryMapSyncedToBigQuery_` 同一個模式）、
+  `ensureFundamentalFeatureView_`（建立/更新疊加後的 view）。新增三個
+  onCall：`exports.runFinancialsRefresh`（刷新，`jobs/financialsRefresh`
+  狀態追蹤）、`exports.getFinancialsCoverage`（涵蓋率月曆資料）、
+  `exports.getFinancialsSample`（隨機抽樣 sanity check）。
+  `runFactorRegressionCore_` 改成對疊加後的 `factor_features_fundamental`
+  view 做 snapshot／訓練，不是原本的 `factor_features`。
+- 前端 `AdminView.vue` 新增「財報基本面因子」卡片
+  （`FinancialsCoverageCard.vue`）：刷新按鈕＋執行狀態、涵蓋率月曆
+  （月營收 12 格、季報 4 格，依年份切換，跟 `HistoryCalendarCard.vue`
+  同一個紅/橘/綠配色邏輯但格狀單位是月/季不是日）、隨機抽樣表格。
+
+### 設計決定
+
+- **TWSE 這幾個端點是目前快照，不是歷史歸檔**：這個開發環境沒辦法連線
+  確認，但官方「opendata」端點普遍是這個行為模式，保守假設處理——
+  Firestore `financials_monthly/{code}_{period}`／
+  `financials_quarterly/{code}_{period}` 用 `merge: true` 累積寫入（不是
+  像 `industry_map` 那樣整份覆蓋），每次刷新都讀回完整累積歷史重新計算
+  連續上升期數（新進的一期可能延續或打斷既有紀錄，必須看完整歷史）。
+  BigQuery 那一層才是整份覆蓋（`financial_ratios`／`financial_revenue`
+  表）——Firestore 存「會一直累積變大的歷史」，BigQuery 存「目前累積
+  到的完整結果快照」，兩層職責不同。
+- **點對點（point-in-time）正確的 JOIN，避免未來函數**：財報資料用
+  「出表日期」（官方公告日）當作「這筆資料實際公開可得」的時間點，不是
+  季度期末日或財報所屬月份——`buildFundamentalFeatureViewSql_` 對每個
+  (stock_id, date) LEFT JOIN「`report_date <= date` 裡最新一筆」的財務
+  比率／月營收資料，不是直接對齊同一天。找不到「出表日期」欄位就直接
+  拋錯，不會用季度期末日頂替（那樣會製造一個使用者察覺不到的系統性
+  偏誤）。月營收沒有對應的公告日欄位，用「月底 + 10 個日曆天」估算
+  （對齊 TWSE 月營收法定公告期限），同樣是保守估計，見
+  `estimateMonthlyRevenueReportDate_` 的說明。
+- **刻意不修改 `buildFeatureViewSql_` 本身，另外疊一層新 view**：那支
+  函式逐行對照 apps-script 原始碼做過字串完全相等的驗證（Parity 6），
+  直接在裡面插入新邏輯的風險是「改壞一段已經驗證過在正式環境可以跑的
+  SQL」，報酬完全不值得冒這個險。`buildFundamentalFeatureViewSql_` 疊在
+  既有的 `factor_features` view 之上，Parity 6 的斷言完全不受影響（仍然
+  通過）。
+- **財報所屬季度（`fiscalPeriod`）優先用官方「年度」／「季別」欄位，
+  沒有才用公告日反推估計**（`estimateFiscalQuarterFromReportDate_`，
+  公告日往前推 60 天所在的季度）：這個欄位只給「涵蓋率月曆」彙總呈現
+  用，不影響訓練的時間對齊邏輯（那一塊只看 `period`／公告日本身）——
+  `fiscalPeriodIsEstimated` 旗標會讓前端明確標出「這是估計值」。
+- **缺值不特別 COALESCE 成中性值**：`fundamental_*` 這 10 個新候選因子
+  跟原本的 `dividend_yield`／`pe_ratio`／`pb_ratio` 同一個處理方式——
+  找不到資料就是 NULL，`buildTrainModelSql_` 的 `WHERE ... IS NOT NULL`
+  本來就會把這些列排除在訓練之外，不是這次才出現的新行為，也不用發明
+  一個「中性值」糊弄過去（毛利率沒有天然的中性值，不像排名因子的 0.5
+  那樣有明確意義）。
+- **候選因子清單跟 apps-script 原版的字串比對（Parity 6）只比對前 48
+  個**：第 49 個之後是全新的 10 個基本面因子，apps-script 沒有對應內容
+  可以比對，`test/parity.test.js` 另外單獨斷言這 10 個剛好等於
+  `FUNDAMENTAL_CANDIDATE_COLUMNS`。
+
+### 還沒做的事
+
+- **還沒接進「今日戰報/回測」的即時預測分數**——跟產業資金流向因子
+  同一個範圍界線（見「策略研究（四）」那節）：這批因子目前只用於
+  BigQuery 端的訓練，`computeFactors_`（JS）沒有對應的計算邏輯，LASSO
+  選中、權重不是 0 也只是被 `computeWeightedFactorScore_` 的既有防呆
+  邏輯跳過，不會出錯但也不會真的貢獻進即時預測分數。
+- **欄位名稱、民國年/西元年格式、「出表日期」是否真的存在這個欄位**
+  都是依 TWSE 官方報表長年公開的標準格式整理出來的最佳猜測，這個開發
+  環境完全沒辦法連線核對——部署後第一次執行「重新整理財報因子」如果
+  欄位偵測失敗，Admin 頁面「財報基本面因子」卡片會顯示清楚的錯誤訊息
+  （列出實際拿到的欄位名稱），照那個訊息回報就能一次修正。
+- **目前只接了「一般業」財報端點**，金融/證券/保險/金控等特殊產業別
+  查無資料是預期行為（跟 AI 診斷的 `TWSE_OFFICIAL_FINANCIALS_DATASETS_`
+  現有限制一致）。
+- 因為 TWSE 端點很可能只回傳「目前最新一期」，第一次執行只會累積到
+  一期資料，連續上升期數全部會是 0——要看到真正有意義的「連續上升」
+  訊號，需要在接下來幾週／幾季重複執行「重新整理財報因子」，累積出
+  至少 2~3 期的歷史才看得出差異，這是資料本質的限制，不是程式邏輯
+  的問題。

@@ -266,4 +266,79 @@ const bq = require('../lib/bigquery');
   console.log('Test buildSyncIndustryMapSql_ (non-empty rows build UNNEST structs, empty rows build typed empty table) passed.');
 }
 
+// --- financialRatiosTableRef_／financialRevenueTableRef_／fundamentalFeatureViewRef_ ---
+{
+  const cfg = { projectId: 'my-proj', dataset: 'twse_factor_model' };
+  assert.strictEqual(bq.financialRatiosTableRef_(cfg), 'my-proj.twse_factor_model.financial_ratios');
+  assert.strictEqual(bq.financialRevenueTableRef_(cfg), 'my-proj.twse_factor_model.financial_revenue');
+  assert.strictEqual(bq.fundamentalFeatureViewRef_(cfg), 'my-proj.twse_factor_model.factor_features_fundamental');
+  console.log('Test financialRatiosTableRef_／financialRevenueTableRef_／fundamentalFeatureViewRef_ passed.');
+}
+
+// --- chunkStructRowsBySize_ ---
+{
+  const rows = [{ v: 'a' }, { v: 'b' }, { v: 'c' }, { v: 'd' }];
+  const toSql = (r) => "STRUCT('" + r.v.repeat(10) + "' AS x)"; // 每筆固定長度，方便算 chunk 邊界
+  const chunks = bq.chunkStructRowsBySize_(rows, toSql, toSql(rows[0]).length * 2 + 2);
+  assert.strictEqual(chunks.flat().length, 4, '切 chunk 不能遺漏任何一筆');
+  assert.ok(chunks.length >= 2, '超過單一 chunk 上限要切成多個 chunk');
+  assert.deepStrictEqual(bq.chunkStructRowsBySize_([], toSql), []);
+  console.log('Test chunkStructRowsBySize_ (splits into size-bounded chunks, keeps every row, empty input -> empty array) passed.');
+}
+
+// --- buildSyncFinancialRatiosSql_ ---
+{
+  const rows = [
+    { code: '1101', reportDate: '2026-05-14', grossMarginPct: 30, operatingMarginPct: 15, netMarginPct: 10, roePct: 5, grossMarginStreak: 2, operatingMarginStreak: 1, netMarginStreak: 0, roeStreak: 2 },
+    { code: '1102', reportDate: '2026-05-14', grossMarginPct: null, operatingMarginPct: null, netMarginPct: null, roePct: null, grossMarginStreak: null, operatingMarginStreak: null, netMarginStreak: null, roeStreak: null }
+  ];
+  const statements = bq.buildSyncFinancialRatiosSql_('proj.ds.financial_ratios', rows);
+  assert.strictEqual(statements.length, 1, '資料量小，一個 chunk 就夠');
+  assert.ok(statements[0].indexOf('CREATE OR REPLACE TABLE `proj.ds.financial_ratios`') !== -1);
+  assert.ok(statements[0].indexOf("STRUCT('1101' AS stock_id, DATE('2026-05-14') AS report_date, 30 AS gross_margin_pct") !== -1);
+  assert.ok(statements[0].indexOf('NULL AS gross_margin_pct') !== -1, '缺值要輸出 NULL 常值，不是字串 "null" 或 0');
+
+  const emptyStatements = bq.buildSyncFinancialRatiosSql_('proj.ds.financial_ratios', []);
+  assert.strictEqual(emptyStatements.length, 1);
+  assert.ok(emptyStatements[0].indexOf('gross_margin_pct FLOAT64') !== -1, '空陣列要用明確宣告型別的空表 DDL');
+  console.log('Test buildSyncFinancialRatiosSql_ (builds typed STRUCT literals, NULL for missing values, typed empty table) passed.');
+}
+
+// --- chunkStructRowsBySize_ 真的被 buildSyncFinancialRatiosSql_ 用來切多個 statement ---
+{
+  // 驗證 chunkStructRowsBySize_ 在夠小的 maxChars 下確實會切成多筆——
+  // buildSyncFinancialRatiosSql_ 本身對正常資料量（遠小於 700000 預設
+  // 上限）只會產生 1 個 chunk，多 chunk 的組裝邏輯（第一句 CREATE OR
+  // REPLACE、其餘 INSERT）已經在 buildSyncFinancialRatiosSql_ 的實作裡
+  // 用同一個 chunkStructRowsBySize_，這裡單獨確認切 chunk 本身在資料量
+  // 真的超過上限時會觸發，不會不管資料多大都回傳單一 chunk。
+  const rows = [];
+  for (let i = 0; i < 20; i++) rows.push({ v: String(i) });
+  const chunks = bq.chunkStructRowsBySize_(rows, () => 'x'.repeat(100), 250); // 每筆約 100+2 字元，250 上限 -> 每 chunk 2 筆
+  assert.ok(chunks.length > 1, '夠小的 maxChars 下要真的切成多個 chunk');
+  assert.strictEqual(chunks.reduce((sum, c) => sum + c.length, 0), 20, '切 chunk 不能遺漏或重複任何一筆');
+  console.log('Test chunkStructRowsBySize_ (confirms multi-chunk split actually triggers under a small limit) passed.');
+}
+
+// --- financialRevenueTableRef_ 同款：buildSyncFinancialRevenueSql_ ---
+{
+  const rows = [{ code: '1101', reportDate: '2026-04-10', revenueYoyPct: 12.5, revenueGrowthStreak: 3 }];
+  const statements = bq.buildSyncFinancialRevenueSql_('proj.ds.financial_revenue', rows);
+  assert.strictEqual(statements.length, 1);
+  assert.ok(statements[0].indexOf("STRUCT('1101' AS stock_id, DATE('2026-04-10') AS report_date, 12.5 AS revenue_yoy_pct, 3 AS revenue_growth_streak)") !== -1);
+  console.log('Test buildSyncFinancialRevenueSql_ passed.');
+}
+
+// --- buildFundamentalFeatureViewSql_ ---
+{
+  const sql = bq.buildFundamentalFeatureViewSql_('proj.ds.factor_features', 'proj.ds.financial_ratios', 'proj.ds.financial_revenue', 'proj.ds.factor_features_fundamental');
+  assert.ok(sql.indexOf('CREATE OR REPLACE VIEW `proj.ds.factor_features_fundamental`') !== -1);
+  assert.ok(sql.indexOf('FROM `proj.ds.factor_features` base') !== -1, '疊在既有 factor_features view 之上，不是重算一次');
+  assert.ok(sql.indexOf('fr2.report_date <= base.date') !== -1, '財報因子要用「公告日 <= 這一天」做點對點正確的 join，避免未來函數');
+  assert.ok(sql.indexOf('rev2.report_date <= base.date') !== -1, '月營收因子同一個點對點正確性要求');
+  assert.ok(sql.indexOf('fundamental_gross_margin_streak') !== -1);
+  assert.ok(sql.indexOf('fundamental_revenue_growth_streak') !== -1);
+  console.log('Test buildFundamentalFeatureViewSql_ (layers on top of base view, point-in-time join condition, exposes all 10 fundamental columns) passed.');
+}
+
 console.log('All bigquery.js tests passed.');

@@ -168,4 +168,25 @@ CONFIG.INDUSTRY_FLOW_INVESTOR_TYPES.forEach(function (t) {
   });
 });
 
+// ---- 2026-10-08 新增：余適安（余博）法人選股邏輯延伸的基本面候選因子
+// ----「四率四升」（毛利率／營益率／淨利率／ROE 連續上升）跟「月營收連續
+// 成長」，apps-script 版沒有對應邏輯（全新因子，不是照搬），見
+// `lib/financials.js`（解析＋計算）跟 `lib/bigquery.js
+// buildFundamentalFeatureViewSql_`（點對點正確的 JOIN，疊在
+// `factor_features` view 之上，不是直接改那支 view 本身）的完整說明。
+// 跟產業資金流向因子一樣，刻意沒有加進 `BQ_FEATURE_TO_ANALYSIS_FIELD`
+// ——這批因子是 BigQuery 端用「公告日 <= 這一天」的相關子查詢算出來的，
+// `computeFactors_`（JS）目前沒有對應的計算邏輯，即時預測分數暫時用
+// 不上這批因子（LASSO 選中、權重不是 0 也只是被
+// `computeWeightedFactorScore_` 的既有防呆邏輯跳過，不會出錯），
+// 跟現有 38 個因子同一個範圍界線。
+CONFIG.FUNDAMENTAL_CANDIDATE_COLUMNS = [
+  'fundamental_gross_margin_pct', 'fundamental_operating_margin_pct',
+  'fundamental_net_margin_pct', 'fundamental_roe_pct',
+  'fundamental_gross_margin_streak', 'fundamental_operating_margin_streak',
+  'fundamental_net_margin_streak', 'fundamental_roe_streak',
+  'fundamental_revenue_yoy_pct', 'fundamental_revenue_growth_streak'
+];
+CONFIG.FUNDAMENTAL_CANDIDATE_COLUMNS.forEach(function (c) { CONFIG.FACTOR_CANDIDATE_COLUMNS.push(c); });
+
 module.exports = CONFIG;
