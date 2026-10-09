@@ -250,6 +250,22 @@ const FACTOR_FIELDS = [
     '第 49 個之後要剛好是 FUNDAMENTAL_CANDIDATE_COLUMNS（全新因子，apps-script 沒有對應內容可比對）'
   );
 
+  // 2026-10-09 新增：LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS（訓練時實際採用的
+  // 候選清單，見 lib/config.js 該常數上方的完整說明——限制在即時計算
+  // 真的支援的 20 個因子，否則訓練出來的模型權重大部分落在產業資金流向
+  // 因子上，套用後在回測/戰報整個被 computeWeightedFactorScore_ 忽略，
+  // 整個區間零訊號）要剛好等於 BQ_FEATURE_TO_ANALYSIS_FIELD 的 key 清單
+  // ——直接用 Object.keys 算出來，不是另外手刻一份，兩邊永遠自動同步。
+  assert.strictEqual(
+    JSON.stringify(configLib.LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS),
+    JSON.stringify(Object.keys(configLib.BQ_FEATURE_TO_ANALYSIS_FIELD)),
+    'LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS 要剛好是 BQ_FEATURE_TO_ANALYSIS_FIELD 的 key 清單'
+  );
+  assert.strictEqual(configLib.LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS.length, 20, '目前應該剛好是 10 個基礎因子 + 10 個財報因子');
+  configLib.LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS.forEach(function (c) {
+    assert.ok(configLib.FACTOR_CANDIDATE_COLUMNS.indexOf(c) !== -1, c + ' 要同時是訓練候選因子完整清單的一部分，不能是清單外的名字');
+  });
+
   const modelRef = 'proj.ds.factor_model_return1m';
   assert.strictEqual(
     context.buildTrainModelSql_(modelRef, snapshotRef, 'label_return_1m', context.CONFIG.FACTOR_CANDIDATE_COLUMNS, 0.05),

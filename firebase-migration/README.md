@@ -3296,3 +3296,55 @@ buildWeightsSql_` 用的 `ML.WEIGHTS` 會把**權重剛好是 0** 的因子也�
 R² 看得出模型確實從它們學到東西，量級明顯更大）小很多，不會不小心
 把真的有一點訊號的因子也放寬過去。`test/factorModel.test.js` 補上
 「權重極小但不是精確 0」「NaN 權重」「權重大於門檻仍要否決」三組案例。
+
+## 2026-10-09 再追加：真正的根因——訓練候選因子跟即時計算支援範圍沒對齊
+
+上面兩次修正（`=== 0` 精確比對、`Math.abs(w) < epsilon`）部署上線後，
+使用者套用新模型重新跑回測，`factor_model_rank`／`hybrid` 仍然整個
+區間零訊號，完全沒有改善——這代表問題從一開始就不是「缺值 null 否決」
+這個方向，兩次修正都在修一個不是真正根因的症狀。
+
+請使用者用 Cloud Shell 直接查 Firestore REST API 看目前套用中模型的
+實際權重數值（`curl` + `gcloud auth print-access-token` + `jq`，不用
+在 Console UI 裡找）才挖到真正的根因：`lib/config.js` 的
+`BQ_FEATURE_TO_ANALYSIS_FIELD`（因子迴歸權重 → 即時計算欄位的對照表）
+只有 20 個因子（10 個基礎因子＋10 個財報因子），完全不包含「36 個
+產業資金流向/相對大盤強度因子」跟 `inst_accum_divergence_20d`／
+`days_since_new_low`——這是「余博邏輯延伸的基本面因子」那次我自己
+寫的註解就承認的已知限制（"這兩個因子的算法...不是 computeFactors_
+目前會算的量...獨立於訓練之外的下一步工作"），但當時低估了這個限制
+的後果有多嚴重。
+
+`lib/factorModel.js computeWeightedFactorScore_` 遇到沒有對照表的
+因子會直接 `continue`（跳過，不管權重多大）。使用者套用的
+`downsideResistance` 模型，「關鍵影響因子」裡 5 個有 4 個
+（`industry_rel_mkt_dealer_20d`／`industry_flow_all_30d`／
+`industry_flow_all_60d`／`industry_rel_mkt_foreign_20d`）正好都屬於
+這個被跳過的群組——模型真正學到的預測力，大部分在即時計算這一端被
+整個忽略，只剩少數剛好落在這 20 個裡的因子還有效，預測分數在全市場
+幾乎擠在一起，排名永遠衝不到 `factor_model_rank` 要求的前 10%。這不是
+財報因子那次才出現的問題，是 `factor_model_rank`／`hybrid` 這兩個
+策略從加進 Firebase 版以來，從沒真的被一個「權重大部分落在產業因子上」
+的模型完整驗證過——R² 看起來正常（訓練/評估本身沒問題），只有套用
+後在回測/戰報才會暴露這個落差。
+
+**選擇：小範圍修正（已採用），不是完整把 38 個因子接進
+`computeFactors_`**（那個工作量大，要先把橫斷面百分位排名、依產業
+分組的資金流向等邏輯對照 BigQuery `buildFeatureViewSql_` 在 JS 端
+重新實作一次，風險跟工時都不小，今天不適合一次做完）。改成訓練時
+把候選因子限制在 `config.js` 新增的 `LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS`
+（直接用 `Object.keys(BQ_FEATURE_TO_ANALYSIS_FIELD)` 算出來，不是另外
+手刻一份清單，兩邊永遠自動同步，之後 `BQ_FEATURE_TO_ANALYSIS_FIELD`
+加新因子這份清單自動跟著變）——`lib/factorRegression.js
+buildTrainModelSql_` 收到的候選因子從 58 個降到 20 個，LASSO 不會再
+把權重放到即時計算端用不到的因子上。已知取捨：訓練出來的模型喪失
+產業資金流向這塊的預測力（之前「關鍵影響因子」裡那些 `industry_*`
+因子以後不會再出現），換來訓練出來的每一個因子權重，回測/戰報都保證
+用得上，不會再有「訓練分數看起來不錯、套用後卻完全沒有訊號」的落差。
+`test/parity.test.js` 補上斷言確認這份清單等於
+`BQ_FEATURE_TO_ANALYSIS_FIELD` 的 key、長度剛好 20、且都是完整候選
+清單的子集。
+
+要把產業資金流向因子重新納入訓練範圍，必須先完成「完整修正」那個
+選項（把這 36+2 個因子接進 `computeFactors_`），不是這次範圍內的
+工作，記錄在這裡供之後規劃。

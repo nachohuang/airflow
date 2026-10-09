@@ -208,4 +208,31 @@ CONFIG.FUNDAMENTAL_CANDIDATE_COLUMNS = [
 ];
 CONFIG.FUNDAMENTAL_CANDIDATE_COLUMNS.forEach(function (c) { CONFIG.FACTOR_CANDIDATE_COLUMNS.push(c); });
 
+/**
+ * 2026-10-09 新增：使用者實測套用因子迴歸模型後，`factor_model_rank`／
+ * `hybrid` 整個回測區間零訊號——追到根因是 `FACTOR_CANDIDATE_COLUMNS`
+ * （訓練用候選因子，58 個）跟 `BQ_FEATURE_TO_ANALYSIS_FIELD`（即時計算
+ * 真的支援、`computeWeightedFactorScore_` 不會跳過的因子，只有 20 個）
+ * 範圍對不齊：另外 38 個（36 個產業資金流向/相對大盤強度因子＋
+ * `inst_accum_divergence_20d`／`days_since_new_low`）訓練時 LASSO 可以
+ * 自由選用、權重可能很大（這次使用者實測的「關鍵影響因子」裡大半都是
+ * 這一批），但 `computeWeightedFactorScore_` 遇到沒對照表的因子一律直接
+ * `continue`（跳過，不管權重多大）——等於模型真正學到的預測力大部分
+ * 被即時計算端整個忽略，只剩少數剛好落在這 20 個裡的因子還有效，預測
+ * 分數在全市場幾乎擠在一起，排名永遠衝不到 `factor_model_rank` 要求的
+ * 前 10%。這不是今天財報因子那次的問題，是這兩個策略從加進 Firebase
+ * 版以來，從沒真的被一個「權重大部分落在產業因子上」的模型完整驗證過。
+ *
+ * 短期修正（完整把 38 個因子接進 `computeFactors_` 工作量大，見 README
+ * 的完整討論）：訓練時把候選因子限制在這 20 個「即時計算真的支援」的
+ * 因子，直接用 `Object.keys(BQ_FEATURE_TO_ANALYSIS_FIELD)` 算出來——
+ * 不另外手刻一份清單，兩邊永遠自動同步，之後 `BQ_FEATURE_TO_ANALYSIS_FIELD`
+ * 加了新因子，這份清單自動跟著變，不會再發生「訓練用候選因子」跟
+ * 「即時計算支援因子」兩份清單各自維護、逐漸對不齊的情況。訓練出來的
+ * 模型會喪失產業資金流向這塊的預測力，但換來的是訓練出來的每一個因子
+ * 的權重，回測/戰報都保證用得上，不會再有「訓練分數看起來不錯、套用
+ * 後卻完全沒有訊號」的落差。
+ */
+CONFIG.LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS = Object.keys(CONFIG.BQ_FEATURE_TO_ANALYSIS_FIELD);
+
 module.exports = CONFIG;

@@ -1583,15 +1583,29 @@ exports.getFinancialsSample = onCall(LIGHT_RUNTIME_OPTS_, async function (reques
   };
 });
 
-/** 對單一 label 跑一次訓練＋評估＋取權重，對應 apps-script 版
- *  `trainFactorModel_`。sourceRef 是這次訓練實際要讀的來源（同一次執行
- *  對兩個 label 共用同一份快照表，見 `buildFeatureSnapshotSql_` 的
- *  說明，避免 view 的特徵工程 SQL 被重跑兩次）。 */
+/**
+ * 對單一 label 跑一次訓練＋評估＋取權重，對應 apps-script 版
+ * `trainFactorModel_`。sourceRef 是這次訓練實際要讀的來源（同一次執行
+ * 對兩個 label 共用同一份快照表，見 `buildFeatureSnapshotSql_` 的
+ * 說明，避免 view 的特徵工程 SQL 被重跑兩次）。
+ *
+ * 2026-10-09 修正：訓練用候選因子改成 `config.LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS`
+ * （20 個），不是完整的 `config.FACTOR_CANDIDATE_COLUMNS`（58 個）——
+ * 使用者實測套用模型後 `factor_model_rank`／`hybrid` 整個回測區間零
+ * 訊號，追到根因是另外 38 個因子（36 個產業資金流向/相對大盤強度因子＋
+ * `inst_accum_divergence_20d`／`days_since_new_low`）訓練時 LASSO 可以
+ * 自由選用、權重可能很大，但 `computeWeightedFactorScore_`（即時計算）
+ * 遇到沒有對照表的因子一律跳過，等於模型大部分學到的預測力在回測/戰報
+ * 完全用不上。限制在這 20 個「即時計算真的支援」的因子，犧牲產業資金
+ * 流向這塊的預測力，換來訓練出來的每個因子權重保證回測/戰報都用得上，
+ * 見 `lib/config.js LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS` 的完整說明。
+ */
 async function trainFactorModel_(bigQueryConfig, labelDef, l1Reg, sourceRef) {
   const client = new BigQuery({ projectId: bigQueryConfig.projectId });
   const modelRef = bigQueryConfig.projectId + '.' + bigQueryConfig.dataset + '.' + factorRegressionLib.factorModelName_(labelDef.key);
+  const candidateColumns = config.LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS;
 
-  await client.query({ query: factorRegressionLib.buildTrainModelSql_(modelRef, sourceRef, labelDef.column, config.FACTOR_CANDIDATE_COLUMNS, l1Reg) });
+  await client.query({ query: factorRegressionLib.buildTrainModelSql_(modelRef, sourceRef, labelDef.column, candidateColumns, l1Reg) });
   const [evalRows] = await client.query({ query: factorRegressionLib.buildEvaluateSql_(modelRef) });
   const [weightRows] = await client.query({ query: factorRegressionLib.buildWeightsSql_(modelRef) });
   const weights = factorRegressionLib.summarizeWeights_(weightRows);
@@ -1602,7 +1616,7 @@ async function trainFactorModel_(bigQueryConfig, labelDef, l1Reg, sourceRef) {
     labelName: labelDef.name,
     r2: r2,
     weights: weights,
-    featureColumns: config.FACTOR_CANDIDATE_COLUMNS,
+    featureColumns: candidateColumns,
     l1Reg: l1Reg
   };
 }
