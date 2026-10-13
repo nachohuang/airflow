@@ -13,7 +13,8 @@ import { strategyColor } from '../../utils/strategyColor';
 const STRATEGIES = [
   { key: 'rule_v17', label: 'v17.0 規則式門檻（現行）' },
   { key: 'factor_model_rank', label: '因子模型排名精選' },
-  { key: 'hybrid', label: '規則式門檻＋模型排名混合' }
+  { key: 'hybrid', label: '規則式門檻＋模型排名混合' },
+  { key: 'early_accumulation', label: '🌱 潛伏期（法人逢低接手，趨勢未確立）' }
 ];
 
 const form = ref({ strategyKey: 'rule_v17', startDate: '', endDate: '', targetProfit: 5 });
@@ -408,6 +409,9 @@ function formatFactorValue(v) {
         <code>factor_model_rank</code>／<code>hybrid</code> 需要先在下面的
         「因子迴歸模型」訓練並套用一版抗跌力模型才能跑，沒套用的話這兩個
         策略會回報「需要先套用模型」的錯誤，請先用 <code>rule_v17</code>。
+        <code>early_accumulation</code>（🌱 潛伏期）不需要套用任何模型，
+        但比 <code>rule_v17</code> 更早進場（不要求趨勢已經確立），假突破/
+        續跌風險也相對更高，建議先用回測比對勝率再實際使用。
       </p>
     </div>
 

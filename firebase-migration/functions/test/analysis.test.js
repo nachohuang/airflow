@@ -278,6 +278,51 @@ function buildSyntheticHistory(days) {
   console.log('Test 11 (classifyEntrySignal_) passed.');
 }
 
+// --- 11b. classifyEntrySignal_：early_accumulation（2026-10-13 新增，法人逢低接手、趨勢未確立） ---
+{
+  const liquid = { '成交金額': 200000000 };
+
+  // 門檻剛好達標（0.85）、趨勢還沒確立（Trend_Score 1，兩個多頭條件只過一個）-> 應該命中
+  const earlyHit = Object.assign({}, liquid, { Trend_Score: 1, IBF_20D_Rank: 0.85 });
+  const earlyDiag = analysis.classifyEntrySignal_(earlyHit, 'early_accumulation');
+  assert.strictEqual(earlyDiag.strategy, '🌱 潛伏期');
+  assert.ok(earlyDiag.interpretation.indexOf('趨勢尚未確立') !== -1, earlyDiag.interpretation);
+
+  // Trend_Score===2（趨勢已經確立）也不特別排除，一樣算命中——這支策略不要求「未確立」，
+  // 只是「不要求確立」，兩者不一樣。
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 2, IBF_20D_Rank: 0.9 }), 'early_accumulation').strategy,
+    '🌱 潛伏期'
+  );
+
+  // Trend_Score===0（完全空頭排列，兩個多頭條件都沒過）要排除，避免接刀——即使法人逢低
+  // 接手率再高也不行，這是唯一的保護機制。
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 0, IBF_20D_Rank: 0.99 }), 'early_accumulation').strategy,
+    'Neutral', 'Trend_Score===0（完全空頭）要被排除，不管法人接手率多高'
+  );
+
+  // 門檻差一點點（0.84999）不該命中
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 1, IBF_20D_Rank: 0.84999 }), 'early_accumulation').strategy,
+    'Neutral'
+  );
+
+  // IBF_20D_Rank 是 null（算不出來）要當成沒過門檻，不是拋錯
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 1, IBF_20D_Rank: null }), 'early_accumulation').strategy,
+    'Neutral'
+  );
+
+  // 流動性門檻一樣適用（跟其他策略共用同一個前置檢查，不是 early_accumulation 自己另外判斷）
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { '成交金額': 1000000, Trend_Score: 1, IBF_20D_Rank: 0.9 }), 'early_accumulation').strategy,
+    'Neutral'
+  );
+
+  console.log('Test 11b (classifyEntrySignal_: early_accumulation — IBF threshold, excludes Trend_Score===0, liquidity still applies) passed.');
+}
+
 // --- 12. computePredictedResistanceRanks_：依日期分組各自排名 ---
 {
   const rowsNoModel = [{ '日期': '2026-07-30', Inst_Participation: 0.5 }];

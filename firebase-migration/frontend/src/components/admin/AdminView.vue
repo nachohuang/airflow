@@ -12,7 +12,8 @@ import FinancialsCoverageCard from './FinancialsCoverageCard.vue';
 const STRATEGIES = [
   { key: 'rule_v17', label: 'v17.0 規則式門檻（現行）' },
   { key: 'factor_model_rank', label: '因子模型排名精選' },
-  { key: 'hybrid', label: '規則式門檻＋模型排名混合' }
+  { key: 'hybrid', label: '規則式門檻＋模型排名混合' },
+  { key: 'early_accumulation', label: '🌱 潛伏期（法人逢低接手，趨勢未確立）' }
 ];
 
 /**

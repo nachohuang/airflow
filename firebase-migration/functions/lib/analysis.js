@@ -37,6 +37,7 @@ var financialsLib = require('./financials');
  *   factor_model_rank：完全交給套用中的因子迴歸模型，用「預測抗跌力」在當天全部候選股票裡
  *     的橫斷面排名（見 computePredictedResistanceRanks_）取前段班，不看規則式門檻。
  *   hybrid：先過 rule_v17 的多頭排列 + 流動性門檻，再用模型排名做二次篩選，兩邊都要通過。
+ *   early_accumulation：2026-10-13 新增，見下面 classifyEntrySignal_ 裡的完整說明。
  */
 var SCREENING_STRATEGIES = {
   rule_v17: {
@@ -50,11 +51,19 @@ var SCREENING_STRATEGIES = {
   hybrid: {
     key: 'hybrid', label: '規則式門檻＋模型排名混合', needsFactorModel: true,
     description: '先過 v17.0 規則式門檻，再用因子模型排名做二次篩選（前 30%），兩邊都要通過才算訊號。'
+  },
+  early_accumulation: {
+    key: 'early_accumulation', label: '🌱 潛伏期（法人逢低接手，趨勢未確立）', needsFactorModel: false,
+    description: '法人逢低接手率（IBF_20D）排名前段班，不要求 Trend_Score===2（趨勢還沒確立）——' +
+      '比 v17.0 更早進場，抓的是起漲前的吸籌階段，不是起漲後的確認階段；排除完全空頭排列' +
+      '（Trend_Score===0）的股票避免接刀，但不需要先套用因子迴歸模型。假突破/續跌風險比' +
+      'v17.0 高，屬於較積極的早期訊號，建議先用回測驗證過命中率/勝率再實際使用。'
   }
 };
 var SCREENING_STRATEGY_DEFAULT = 'rule_v17';
 var FACTOR_MODEL_RANK_TOP_PCT = 0.9; // factor_model_rank：預測抗跌力排名前 10%
 var HYBRID_RANK_MIN_PCT = 0.7; // hybrid：規則式門檻過關後，還要排名前 30%
+var EARLY_ACCUMULATION_IBF_MIN_PCT = 0.85; // early_accumulation：法人逢低接手率排名門檻，比「🔥 趨勢領航」用的 0.7 更嚴格（這裡是唯一條件，不像趨勢領航還有 Trend_Score===2 一起把關，單獨拿來當門檻要抓得更緊，減少雜訊）
 
 /**
  * 幫 rows 補上「因子模型預測抗跌力」以及它在「同一天」全部候選股票裡的橫斷面排名
@@ -97,6 +106,32 @@ function classifyEntrySignal_(row, strategyKey) {
 
   var key = SCREENING_STRATEGIES[strategyKey] ? strategyKey : SCREENING_STRATEGY_DEFAULT;
   if (key === 'rule_v17') return ruleHit || neutral;
+
+  if (key === 'early_accumulation') {
+    // 2026-10-13 新增：使用者問「趨勢跟隨可以再早一點嗎」——rule_v17／
+    // hybrid 都要求 Trend_Score===2（收盤價 > MA20 且 MA20 斜率為正，
+    // 趨勢已經確立才進場），這支策略刻意不要求這個，只看法人逢低接手率
+    // （IBF_20D_Rank，法人在股價下跌時逆勢買進的比例）是不是排在前段班
+    // ——抓的是「法人正在吸籌、但價格還沒噴出來」的起漲前階段，不是
+    // 「已經噴出來」的確認階段。唯一的保護是排除 Trend_Score===0（兩個
+    // 多頭條件都沒過，等於完全空頭排列）的股票，避免在真正的下跌趨勢中
+    // 接刀——Trend_Score===1（只過其中一個條件，例如價格剛站上 MA20 但
+    // 均線還沒轉彎、或均線剛轉正但價格還沒站上）才是這支策略真正想抓的
+    // 「早期」區間，Trend_Score===2 當然也符合（不特別排除，只是這種
+    // 情況下 rule_v17／hybrid 應該已經先篩到了，不是這支策略的主要
+    // 增量）。門檻刻意比「🔥 趨勢領航」用的 0.7 更嚴格（0.85，見
+    // EARLY_ACCUMULATION_IBF_MIN_PCT 的說明）：那邊有 Trend_Score===2
+    // 一起把關，這裡少了趨勢確認這道防線，單一條件要抓得更緊才不會太雜訊。
+    var isAccumulating = row.IBF_20D_Rank !== null && row.IBF_20D_Rank >= EARLY_ACCUMULATION_IBF_MIN_PCT;
+    var notInFreefall = row.Trend_Score !== 0;
+    if (isAccumulating && notInFreefall) {
+      return {
+        strategy: '🌱 潛伏期', action: '建議：分批佈局（風險較高，趨勢未確立）',
+        interpretation: '法人逢低接手率排名前 ' + Math.round((1 - EARLY_ACCUMULATION_IBF_MIN_PCT) * 100) + '%，趨勢尚未確立，較早期訊號'
+      };
+    }
+    return neutral;
+  }
 
   var rank = row.PredictedResistance_Rank;
   var hasRank = rank !== null && rank !== undefined;
