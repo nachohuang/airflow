@@ -18,7 +18,12 @@ const STRATEGY_COLOR = {
   // CSS 變數集目前沒有專門的「中性/muted」token，--text 本來就是比
   // --text-h 更淡的本文顏色，拿來表達「這是比較早期、風險較高的訊號」，
   // 不是已經確認的進場訊號，已經夠用）。
-  '🌱 潛伏期': 'var(--text)'
+  '🌱 潛伏期': 'var(--text)',
+  // 2026-10-13 新增：composite_accumulation——跟 🌱 潛伏期同樣「趨勢未確立」，
+  // 用同一個中性色；多因子交叉驗證理論上訊號雜訊更少，但顏色上不特別標成
+  // 更「確定」的樣式，畢竟還是比 rule_v17 更早、更積極的訊號，不是已經確認
+  // 的進場訊號。
+  '🧭 綜合吸籌': 'var(--text)'
 };
 
 export function strategyColor(strategy) {

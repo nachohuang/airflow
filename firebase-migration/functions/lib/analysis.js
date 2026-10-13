@@ -26,6 +26,9 @@ var diffN = utils.diffN;
 var expandingMax = utils.expandingMax;
 var expandingMaxFromIndex = utils.expandingMaxFromIndex;
 var percentRank = utils.percentRank;
+var shiftN = utils.shiftN;
+var rollingMin = utils.rollingMin;
+var daysBetween = utils.daysBetween;
 var computeWeightedFactorScore_ = require('./factorModel').computeWeightedFactorScore_;
 var financialsLib = require('./financials');
 
@@ -58,12 +61,27 @@ var SCREENING_STRATEGIES = {
       '比 v17.0 更早進場，抓的是起漲前的吸籌階段，不是起漲後的確認階段；排除完全空頭排列' +
       '（Trend_Score===0）的股票避免接刀，但不需要先套用因子迴歸模型。假突破/續跌風險比' +
       'v17.0 高，屬於較積極的早期訊號，建議先用回測驗證過命中率/勝率再實際使用。'
+  },
+  composite_accumulation: {
+    key: 'composite_accumulation', label: '🧭 綜合吸籌（多因子交叉驗證）', needsFactorModel: false,
+    description: '2026-10-13 新增，見下面 classifyEntrySignal_ 的完整說明——跟 early_accumulation ' +
+      '同樣不要求 Trend_Score===2，但不只看單一個 IBF_20D 門檻，額外交叉驗證「資金流向是否領先' +
+      '價格」（Inst_Accum_Divergence_20D）跟「近期是否還在創新低」（Days_Since_New_Low_Rank），' +
+      '三個訊號都過才算命中，訊號雜訊應該比 early_accumulation 少、但命中數也會更少。不需要' +
+      '先套用因子迴歸模型。'
   }
 };
 var SCREENING_STRATEGY_DEFAULT = 'rule_v17';
 var FACTOR_MODEL_RANK_TOP_PCT = 0.9; // factor_model_rank：預測抗跌力排名前 10%
 var HYBRID_RANK_MIN_PCT = 0.7; // hybrid：規則式門檻過關後，還要排名前 30%
 var EARLY_ACCUMULATION_IBF_MIN_PCT = 0.85; // early_accumulation：法人逢低接手率排名門檻，比「🔥 趨勢領航」用的 0.7 更嚴格（這裡是唯一條件，不像趨勢領航還有 Trend_Score===2 一起把關，單獨拿來當門檻要抓得更緊，減少雜訊）
+
+// composite_accumulation 的三個門檻——因為有三個訊號一起交叉驗證（不是單一條件），
+// 每個門檻都比 early_accumulation 單獨用 IBF_20D 時（0.85）寬鬆一些，靠「三個都要過」
+// 本身來控制雜訊，不是靠單一門檻卡得死死的。
+var COMPOSITE_ACCUMULATION_IBF_MIN_PCT = 0.75; // 法人逢低接手率排名門檻
+var COMPOSITE_ACCUMULATION_DIVERGENCE_MIN = 0.3; // Inst_Accum_Divergence_20D 門檻：法人資金流向排名要比價格排名高出至少 30 個百分點，代表「資金流向領先價格」
+var COMPOSITE_ACCUMULATION_STABILITY_MIN_PCT = 0.3; // Days_Since_New_Low_Rank 門檻：排除「最近才創新低」的最極端一批（不用設得太嚴，early_accumulation 已經有 Trend_Score!==0 把關完全空頭的狀況，這裡只是再加一道更細的穩定度篩選）
 
 /**
  * 幫 rows 補上「因子模型預測抗跌力」以及它在「同一天」全部候選股票裡的橫斷面排名
@@ -128,6 +146,44 @@ function classifyEntrySignal_(row, strategyKey) {
       return {
         strategy: '🌱 潛伏期', action: '建議：分批佈局（風險較高，趨勢未確立）',
         interpretation: '法人逢低接手率排名前 ' + Math.round((1 - EARLY_ACCUMULATION_IBF_MIN_PCT) * 100) + '%，趨勢尚未確立，較早期訊號'
+      };
+    }
+    return neutral;
+  }
+
+  if (key === 'composite_accumulation') {
+    // 2026-10-13 新增：使用者問「有沒有更綜合的評估方式」——early_accumulation
+    // 只看 IBF_20D_Rank 一個條件，這支策略額外交叉驗證另外兩個訊號，三個都要過：
+    //   1. IBF_20D_Rank：法人逢低接手率排名（跟 early_accumulation 同一個因子，
+    //      門檻比較寬鬆，因為這裡不是唯一條件）。
+    //   2. Inst_Accum_Divergence_20D = Inst_Rank_20D - Price_Rank_20D：過去 20 天
+    //      「法人買超金額排名」減去「股價漲跌幅排名」。正值代表法人資金流向排名
+    //      領先股價表現排名——法人在買，但價格還沒漲到對應的排名，是「資金流向
+    //      領先價格」的訊號，跟 IBF_20D（看逢低接手的頻率）是不同角度：IBF_20D
+    //      看的是「下跌日法人進場的比例」，Inst_Accum_Divergence_20D 看的是「20天
+    //      累積買超排名 vs 20天累積漲幅排名」有沒有落差。
+    //   3. Days_Since_New_Low_Rank：「距離上次創 20 日新低」天數的排名，越高代表
+    //      相對市場而言越久沒創新低、價格越穩定。跟 Trend_Score!==0（排除完全空頭
+    //      排列）是不同粒度的保護——Trend_Score 看的是 MA20 位置跟斜率這種趨勢
+    //      指標，這裡直接看「最近有沒有實際創新低」，兩個一起用比單獨用任何一個
+    //      更不容易在真正探底的過程中誤判成「已經開始吸籌」。
+    // 三個欄位都可能是 null（算不出來時，Inst_Accum_Divergence_20D 的兩個輸入在
+    // computeFactors_ 已經 COALESCE 成 0.5，不會是 null；但 Days_Since_New_Low_Rank
+    // 跟 IBF_20D_Rank 仍可能是 null），一律當成沒過門檻，不拋錯。
+    var compositeIbfOk = row.IBF_20D_Rank !== null && row.IBF_20D_Rank >= COMPOSITE_ACCUMULATION_IBF_MIN_PCT;
+    var compositeDivergenceOk = row.Inst_Accum_Divergence_20D !== null && row.Inst_Accum_Divergence_20D !== undefined &&
+      row.Inst_Accum_Divergence_20D >= COMPOSITE_ACCUMULATION_DIVERGENCE_MIN;
+    var compositeStabilityOk = row.Days_Since_New_Low_Rank !== null && row.Days_Since_New_Low_Rank !== undefined &&
+      row.Days_Since_New_Low_Rank >= COMPOSITE_ACCUMULATION_STABILITY_MIN_PCT;
+    var compositeNotInFreefall = row.Trend_Score !== 0;
+
+    if (compositeIbfOk && compositeDivergenceOk && compositeStabilityOk && compositeNotInFreefall) {
+      return {
+        strategy: '🧭 綜合吸籌', action: '建議：分批佈局（多因子交叉驗證，趨勢未確立）',
+        interpretation: '法人逢低接手率排名 ' + Math.round(row.IBF_20D_Rank * 100) + '%；資金流向領先價格 ' +
+          Math.round(row.Inst_Accum_Divergence_20D * 100) + ' 個百分點（法人買超排名 ' +
+          Math.round(row.Inst_Rank_20D * 100) + '% − 漲幅排名 ' + Math.round(row.Price_Rank_20D * 100) +
+          '%）；近期穩定度排名 ' + Math.round(row.Days_Since_New_Low_Rank * 100) + '%（距上次創新低天數）'
       };
     }
     return neutral;
@@ -245,6 +301,34 @@ function computeFactors_(rows, portfolioMap, financialsIndex) {
     var ma60 = rollingMean(closeArr, 60);
     var bias60 = closeArr.map(function (c, i) { return ma60[i] ? (c - ma60[i]) / ma60[i] : null; });
 
+    // 2026-10-13 新增，composite_accumulation 策略用——仿照
+    // lib/factorRegression.js buildFeatureViewSql_ 訓練用的 SQL 定義（見該檔案
+    // 開頭註解的 price_change_20d/low20d/is_new_low/days_since_new_low_raw），
+    // 但這裡刻意不要求 BigQuery SQL 的「視窗不滿也照算」語意，沿用這個檔案裡
+    // 其他 rolling 因子（MA20/MA60/Vol_MA20）一致的 min_periods=window 慣例
+    // （rollingSum/rollingMin 視窗不滿就是 null）——這支是給即時戰報/回測用的
+    // 即時計算，不是餵進 BQML 訓練，不需要跟 SQL 逐行對齊，維持跟這個檔案其他
+    // 因子一致的慣例比較重要。
+    var instNetSum20D = rollingSum(instNetArr, 20);
+    var close20DaysAgo = shiftN(closeArr, 20);
+    var priceChange20D = closeArr.map(function (c, i) {
+      var prev = close20DaysAgo[i];
+      if (prev === null || prev === undefined || prev === 0) return null;
+      return c / prev - 1;
+    });
+    var low20D = rollingMin(closeArr, 20);
+    var isNewLow = closeArr.map(function (c, i) { return (low20D[i] !== null && c === low20D[i]) ? 1 : 0; });
+    var daysSinceNewLowRaw = (function () {
+      var out = new Array(group.length).fill(null);
+      var lastNewLowDateStr = null;
+      for (var gi = 0; gi < group.length; gi++) {
+        var dateStr = normalizeDateStr(group[gi]['日期']);
+        if (isNewLow[gi]) lastNewLowDateStr = dateStr;
+        if (lastNewLowDateStr !== null) out[gi] = daysBetween(dateStr, lastNewLowDateStr);
+      }
+      return out;
+    })();
+
     var holding = portfolioMap[code];
     var adjustedPeak;
     if (holding && holding.buyDate) {
@@ -272,6 +356,9 @@ function computeFactors_(rows, portfolioMap, financialsIndex) {
       group[i].Daily_Return = dailyReturn[i];
       group[i].Is_Drop = isDrop[i];
       group[i].Is_Inst_Buy_On_Drop = isInstBuyOnDrop[i];
+      group[i].Inst_Net_Sum_20D = instNetSum20D[i];
+      group[i].Price_Change_20D = priceChange20D[i];
+      group[i].Days_Since_New_Low_Raw = daysSinceNewLowRaw[i];
 
       if (financialsIndex) {
         var dateStr = normalizeDateStr(group[i]['日期']);
@@ -297,10 +384,22 @@ function computeFactors_(rows, portfolioMap, financialsIndex) {
     var instPartRank = percentRank(dayRows, 'Inst_Part_MA5');
     var ibfRank = percentRank(dayRows, 'IBF_20D');
     var volRatioRank = percentRank(dayRows, 'Vol_Ratio');
+    // composite_accumulation 策略用的三個橫斷面排名。percentRank 對算不出來的
+    // （null）回 null，這裡仿照 lib/factorRegression.js buildFeatureViewSql_ 的
+    // SQL 版本「原始值是 NULL 就直接把排名 COALESCE 成 0.5（中性值）」，不讓
+    // 單一股票因為資料不足（例如剛上市不到 20 天）就在排名時被當成缺值排除
+    // 掉——用「視為中性」取代「不列入排名」，跟 SQL 那邊特意采用的設計一致。
+    var instSum20DRank = percentRank(dayRows, 'Inst_Net_Sum_20D');
+    var priceChange20DRank = percentRank(dayRows, 'Price_Change_20D');
+    var daysSinceNewLowRank = percentRank(dayRows, 'Days_Since_New_Low_Raw');
     for (var i = 0; i < dayRows.length; i++) {
       dayRows[i].Inst_Part_Rank = instPartRank[i];
       dayRows[i].IBF_20D_Rank = ibfRank[i];
       dayRows[i].Vol_Ratio_Rank = volRatioRank[i];
+      dayRows[i].Inst_Rank_20D = instSum20DRank[i] === null ? 0.5 : instSum20DRank[i];
+      dayRows[i].Price_Rank_20D = priceChange20DRank[i] === null ? 0.5 : priceChange20DRank[i];
+      dayRows[i].Days_Since_New_Low_Rank = daysSinceNewLowRank[i] === null ? 0.5 : daysSinceNewLowRank[i];
+      dayRows[i].Inst_Accum_Divergence_20D = dayRows[i].Inst_Rank_20D - dayRows[i].Price_Rank_20D;
       var t = dayRows[i].Trend_Score;
       var parts = [instPartRank[i], ibfRank[i], volRatioRank[i], t];
       var hasNull = parts.some(function (p) { return p === null || p === undefined; });

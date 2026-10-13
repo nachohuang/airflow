@@ -3497,3 +3497,74 @@ Firestore rules/indexes 不是 Cloud Run、沒有 vCPU 配額問題，維持一�
 基礎設施的編排邏輯，不是 `lib/` 底下的可測試核心業務邏輯，沒有另外寫
 `test/*.test.js`，跟 `migration/import-firestore.js` 這類手動維運工具
 的定位一致（見 workflow 裡「測試 migration 工具」那一步的說明）。
+
+## 2026-10-13：新策略「🧭 綜合吸籌」——比 🌱 潛伏期多驗證兩個訊號
+
+使用者對「🌱 潛伏期」追問「有沒有更綜合的評估方式」——🌱 潛伏期只看單一
+個因子（`IBF_20D_Rank`，法人逢低接手率排名）當進場條件，使用者想要的是
+用更多個獨立角度交叉驗證，而且要能「看到邏輯內容」——不是只給一句通過/
+不通過的結論，要讓人看得到每個訊號實際算出來的數值。新增
+`composite_accumulation`（🧭 綜合吸籌）策略回應這兩點，**跟 🌱 潛伏期並存
+（不是取代）**，兩個都可以在回測/戰報切換使用。
+
+**三個訊號，全部要過才算命中**（跟 🌱 潛伏期一樣不要求 `Trend_Score===2`，
+只排除 `Trend_Score===0` 避免接刀）：
+
+1. **`IBF_20D_Rank`**——跟 🌱 潛伏期同一個因子（法人在下跌日逆勢買進的
+   頻率排名），門檻放寬到 `0.75`（🌱 潛伏期的 `0.85` 是因為那邊是唯一
+   條件，這裡有另外兩個訊號一起把關，單一門檻可以放寬）。
+2. **`Inst_Accum_Divergence_20D = Inst_Rank_20D − Price_Rank_20D`**——
+   「過去 20 天法人買超金額的橫斷面排名」減去「過去 20 天股價漲跌幅的
+   橫斷面排名」，正值代表法人資金流向排名領先股價表現排名（錢已經在
+   進場，但價格還沒跟上），跟 `IBF_20D`（看的是「下跌日法人進場的
+   頻率」）是不同角度——一個看頻率，一個看 20 天累積金額跟價格的落差。
+   門檻 `0.3`（排名至少領先 30 個百分點）。
+3. **`Days_Since_New_Low_Rank`**——「距離上次 20 日新低的天數」在當天
+   全市場的橫斷面排名，越高代表這檔股票相對市場而言越久沒創新低、價格
+   相對穩定。跟 `Trend_Score!==0` 的保護是不同粒度：`Trend_Score` 看
+   MA20 位置跟斜率這種趨勢指標，這裡直接看「最近有沒有實際創新低」，
+   兩個一起用比單獨用任何一個更不容易在真正探底的過程中誤判成「已經
+   開始吸籌」。門檻 `0.3`。
+
+**新增的底層因子**（`lib/analysis.js computeFactors_`，照抄
+`lib/factorRegression.js buildFeatureViewSql_` 訓練用 SQL 的定義，但刻意
+不要求 SQL「視窗不滿也照算」的語意，沿用這個檔案其他 rolling 因子
+一致的 `min_periods=window` 慣例——這幾個因子只餵給即時戰報/回測的 JS
+計算，不是餵進 BQML 訓練，不需要跟 SQL 逐行對齊）：
+- `Inst_Net_Sum_20D`：`rollingSum(instNetArr, 20)`，20 天法人買超金額
+  累加（原始值，未排名）。
+- `Price_Change_20D`：`close[i] / close[i-20] - 1`，20 天漲跌幅（原始值，
+  用新增的 `utils.shiftN` 取 20 天前收盤價）。
+- `Days_Since_New_Low_Raw`：先用 `rollingMin(closeArr, 20)` 算 20 日最低
+  價，`close === low20D` 判斷是否創新低，再用一個正向掃描追蹤「最近一次
+  創新低的日期」，用新增的 `utils.daysBetween`（對應 BigQuery
+  `DATE_DIFF`）算日曆天數差。視窗內從未創過新低（例如持續上漲的
+  股票）時維持 `null`，不是硬填 0 或任意數字。
+- 橫斷面排名 `Inst_Rank_20D`／`Price_Rank_20D`／`Days_Since_New_Low_Rank`：
+  跟訓練 SQL 的 `COALESCE(..., 0.5)` 設計一致——原始值算不出來（`null`）
+  時，排名直接當成中性值 `0.5`，不是被排除在外、也不是當成最低分，這樣
+  才不會因為某檔股票剛上市資料不足就在橫斷面比較時被誤判成「最差」。
+  排名公式本身沿用這個檔案既有的 `percentRank`（pandas `rank(pct=True)`
+  風格），跟訓練 SQL 用的 BigQuery `PERCENT_RANK()` 公式不是同一種定義
+  ——這是刻意的簡化：這幾個欄位只用在這支即時計算的 JS 策略，不會
+  餵回 BQML 訓練，不需要跟 SQL 逐行對齊，維持跟這個檔案其他排名欄位
+  （`Inst_Part_Rank`／`IBF_20D_Rank`／`Vol_Ratio_Rank`）一致的公式比較
+  重要。
+- `Inst_Accum_Divergence_20D = Inst_Rank_20D - Price_Rank_20D`。
+
+**「看得到邏輯內容」**：命中時的「實相解讀」直接列出三個訊號各自的實際
+百分位數值（例如「法人逢低接手率排名 78%；資金流向領先價格 35 個百分點
+（法人買超排名 82% − 漲幅排名 47%）；近期穩定度排名 55%」），不是一句
+通用的「符合條件」，使用者可以直接看出這次命中主要是哪個訊號在推動。
+
+`test/analysis.test.js` Test 14 用兩檔走勢相反的合成股票（一檔先跌 30 天
+連續創新低再反彈、一檔全程穩定上漲）驗證 `Inst_Net_Sum_20D`／
+`Price_Change_20D`／`Days_Since_New_Low_Raw` 算出來的原始值方向正確、
+橫斷面排名跟 `Inst_Accum_Divergence_20D` 的正負號符合預期，並且確認
+「全程沒創過新低」的股票排名是 `0.5`（中性）不是被排除。Test 11c 覆蓋
+`classifyEntrySignal_` 的三門檻判斷：三個都過才命中、任何一個沒過
+（含剛好差一點點）都不命中、`Trend_Score===0` 排除、`Trend_Score===2`
+不排除、三個欄位分別是 `null` 時都要安全地當作沒過門檻（不拋錯）、
+流動性門檻一樣適用。`parity.test.js` Parity 1/2 用明確的欄位白名單
+（`FACTOR_FIELDS`）比對，不是整物件比對，新增這些欄位不影響既有的
+byte-for-byte 驗證範圍。

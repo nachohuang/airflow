@@ -349,6 +349,24 @@ function normalizeDateStr(v) {
   return s.slice(0, 10);
 }
 
+/** 兩個 yyyy-MM-dd 字串的日曆天數差（dateStrA - dateStrB），對應 BigQuery
+ *  DATE_DIFF(dateStrA, dateStrB, DAY)（lib/factorRegression.js
+ *  buildFeatureViewSql_ 的 days_since_new_low_raw 算法）。用 Date.UTC
+ *  組兩邊都當 UTC 午夜，避免本地時區／夏令時造成的位移。任一邊格式不對
+ *  （不是 yyyy-MM-dd 開頭）回 null，不拋錯。 */
+function daysBetween(dateStrA, dateStrB) {
+  var a = parseDateStrToUtcMs_(dateStrA);
+  var b = parseDateStrToUtcMs_(dateStrB);
+  if (a === null || b === null) return null;
+  return Math.round((a - b) / 86400000);
+}
+
+function parseDateStrToUtcMs_(s) {
+  var m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
 module.exports = {
   toNumber: toNumber,
   toNumberOrNull: toNumberOrNull,
@@ -371,6 +389,7 @@ module.exports = {
   percentRank: percentRank,
   pearsonCorrelation: pearsonCorrelation,
   normalizeDateStr: normalizeDateStr,
+  daysBetween: daysBetween,
   todayStrTaipei_: todayStrTaipei_,
   timestampLabelTaipei_: timestampLabelTaipei_,
   timestampSecondsTaipei_: timestampSecondsTaipei_

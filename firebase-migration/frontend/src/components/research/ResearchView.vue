@@ -14,7 +14,8 @@ const STRATEGIES = [
   { key: 'rule_v17', label: 'v17.0 規則式門檻（現行）' },
   { key: 'factor_model_rank', label: '因子模型排名精選' },
   { key: 'hybrid', label: '規則式門檻＋模型排名混合' },
-  { key: 'early_accumulation', label: '🌱 潛伏期（法人逢低接手，趨勢未確立）' }
+  { key: 'early_accumulation', label: '🌱 潛伏期（法人逢低接手，趨勢未確立）' },
+  { key: 'composite_accumulation', label: '🧭 綜合吸籌（多因子交叉驗證）' }
 ];
 
 const form = ref({ strategyKey: 'rule_v17', startDate: '', endDate: '', targetProfit: 5 });
@@ -412,6 +413,11 @@ function formatFactorValue(v) {
         <code>early_accumulation</code>（🌱 潛伏期）不需要套用任何模型，
         但比 <code>rule_v17</code> 更早進場（不要求趨勢已經確立），假突破/
         續跌風險也相對更高，建議先用回測比對勝率再實際使用。
+        <code>composite_accumulation</code>（🧭 綜合吸籌）同樣不需要套用模型，
+        也不要求趨勢確立，但比 🌱 潛伏期多驗證兩個訊號（資金流向是否領先
+        價格、近期是否還在創新低）才算命中，訊號雜訊應該更少、命中數也會
+        更少——戰報卡片的「實相解讀」會直接列出三個訊號各自的百分位數值，
+        方便判斷是哪個訊號在推動這次命中。
       </p>
     </div>
 

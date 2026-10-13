@@ -323,6 +323,71 @@ function buildSyntheticHistory(days) {
   console.log('Test 11b (classifyEntrySignal_: early_accumulation — IBF threshold, excludes Trend_Score===0, liquidity still applies) passed.');
 }
 
+// --- 11c. classifyEntrySignal_：composite_accumulation（2026-10-13 新增，三個訊號交叉驗證） ---
+{
+  const liquid = { '成交金額': 200000000 };
+  const allPass = Object.assign({}, liquid, {
+    Trend_Score: 1, IBF_20D_Rank: 0.75, Inst_Rank_20D: 0.8, Price_Rank_20D: 0.4,
+    Inst_Accum_Divergence_20D: 0.4, Days_Since_New_Low_Rank: 0.5
+  });
+
+  // 三個門檻都剛好達標 -> 命中，interpretation 要秀出三個訊號各自的實際數值
+  // （不是只有一句泛用的通過/不通過），呼應使用者「看能否看到邏輯內容供理解」的要求
+  const diag = analysis.classifyEntrySignal_(allPass, 'composite_accumulation');
+  assert.strictEqual(diag.strategy, '🧭 綜合吸籌');
+  assert.ok(diag.interpretation.indexOf('75%') !== -1, diag.interpretation);
+  assert.ok(diag.interpretation.indexOf('80%') !== -1 && diag.interpretation.indexOf('40%') !== -1, diag.interpretation);
+  assert.ok(diag.interpretation.indexOf('50%') !== -1, diag.interpretation);
+
+  // 三個條件任何一個沒過，都不該命中——逐一只改一個欄位讓它沒過
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { IBF_20D_Rank: 0.74999 }), 'composite_accumulation').strategy,
+    'Neutral', 'IBF_20D_Rank 差一點點沒過門檻'
+  );
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { Inst_Accum_Divergence_20D: 0.29999 }), 'composite_accumulation').strategy,
+    'Neutral', 'Inst_Accum_Divergence_20D 差一點點沒過門檻'
+  );
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { Days_Since_New_Low_Rank: 0.29999 }), 'composite_accumulation').strategy,
+    'Neutral', 'Days_Since_New_Low_Rank 差一點點沒過門檻'
+  );
+
+  // Trend_Score===0（完全空頭排列）要排除，跟 early_accumulation 一樣的保護機制
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { Trend_Score: 0 }), 'composite_accumulation').strategy,
+    'Neutral', 'Trend_Score===0 要被排除'
+  );
+
+  // Trend_Score===2（趨勢已經確立）不特別排除，一樣算命中
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { Trend_Score: 2 }), 'composite_accumulation').strategy,
+    '🧭 綜合吸籌'
+  );
+
+  // 三個欄位任何一個是 null（算不出來）都要當成沒過門檻，不是拋錯
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { IBF_20D_Rank: null }), 'composite_accumulation').strategy,
+    'Neutral'
+  );
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { Inst_Accum_Divergence_20D: null }), 'composite_accumulation').strategy,
+    'Neutral'
+  );
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { Days_Since_New_Low_Rank: null }), 'composite_accumulation').strategy,
+    'Neutral'
+  );
+
+  // 流動性門檻一樣適用
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, allPass, { '成交金額': 1000000 }), 'composite_accumulation').strategy,
+    'Neutral'
+  );
+
+  console.log('Test 11c (classifyEntrySignal_: composite_accumulation — three signals all required, excludes Trend_Score===0, null-safe, liquidity still applies) passed.');
+}
+
 // --- 12. computePredictedResistanceRanks_：依日期分組各自排名 ---
 {
   const rowsNoModel = [{ '日期': '2026-07-30', Inst_Participation: 0.5 }];
@@ -399,6 +464,73 @@ function buildSyntheticHistory(days) {
   assert.strictEqual(score, 10, '5 (Fundamental_Roe_Pct) * 2 (權重) = 10');
 
   console.log('Test 13 (computeFactors_ financialsIndex: backward-compatible when omitted, as-of lookup, wired into computeWeightedFactorScore_) passed.');
+}
+
+// --- 14. computeFactors_：composite_accumulation 用到的新因子（Inst_Net_Sum_20D／
+// Price_Change_20D／Days_Since_New_Low_Raw／橫斷面排名／Inst_Accum_Divergence_20D，
+// 2026-10-13 新增）---
+{
+  function dateStrAt14(baseIdx) {
+    const start = new Date(2026, 0, 1);
+    const d = new Date(start);
+    d.setDate(d.getDate() + baseIdx);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function buildRow14(code, idx, close, instNet) {
+    return {
+      '日期': dateStrAt14(idx), '證券代號': code, '證券名稱': code + '_名稱',
+      '外資': instNet, '投信': 0, '自營商': 0, '三大法人買賣超股數': instNet,
+      '成交股數': 5000000, '成交筆數': 10000, '成交金額': 100000000,
+      '開盤價': close, '最高價': close + 0.5, '最低價': close - 0.5, '收盤價': close,
+      '漲跌(+/-)': '+', '漲跌價差': 0.3,
+      '最後揭示買價': close, '最後揭示買量': 100, '最後揭示賣價': close + 0.1, '最後揭示賣量': 100,
+      '殖利率(%)': 2.0, '本益比': 15, '股價淨值比': 3, '財報年/季': '2026Q1'
+    };
+  }
+
+  // AAAA：前 30 天（index 0~29）每天跌 1 點，連續創新低；index 29 是最低點（71），
+  // 從 index 30 開始反彈每天漲 2 點，最後一天（index 34）距離上次創新低應該是 5 天。
+  // 法人每天買超固定 1000（20 天累積買超排名會比 BBBB 高）。
+  const aaaaRows = [];
+  for (let i = 0; i < 30; i++) aaaaRows.push(buildRow14('AAAA', i, 100 - i, 1000));
+  for (let i = 30; i < 35; i++) aaaaRows.push(buildRow14('AAAA', i, 71 + (i - 29) * 2, 1000));
+
+  // BBBB：全程穩定上漲（20 天漲幅排名會比 AAAA 高，而且視窗內從來沒有創過新低），
+  // 法人每天買超只有 500（20 天累積買超排名會比 AAAA 低）。
+  const bbbbRows = [];
+  for (let i = 0; i < 35; i++) bbbbRows.push(buildRow14('BBBB', i, 50 + i * 0.5, 500));
+
+  const computed14 = analysis.computeFactors_(aaaaRows.concat(bbbbRows), {});
+  const latestDateStr14 = dateStrAt14(34);
+  const byCode14 = {};
+  computed14.filter(function (r) { return r['日期'] === latestDateStr14; })
+    .forEach(function (r) { byCode14[r['證券代號']] = r; });
+
+  assert.strictEqual(byCode14.AAAA.Days_Since_New_Low_Raw, 5, '最後一天（index 34）距離上次創新低（index 29）應該是 5 天');
+  assert.strictEqual(byCode14.BBBB.Days_Since_New_Low_Raw, null, 'BBBB 持續上漲，20 天視窗內從未創過新低，應該是 null，不是 0 或任意數字');
+  assert.ok(byCode14.AAAA.Price_Change_20D < 0, 'AAAA 20 天前收盤 86、現在 81，20 天漲幅應該是負的');
+  assert.ok(byCode14.BBBB.Price_Change_20D > 0, 'BBBB 持續上漲，20 天漲幅應該是正的');
+  assert.ok(byCode14.AAAA.Inst_Net_Sum_20D > byCode14.BBBB.Inst_Net_Sum_20D, 'AAAA 每天買超 1000 > BBBB 每天買超 500，20 天累積應該更高');
+
+  // 只有兩檔股票同一天橫斷面排名：數值大的那檔是 1.0，小的是 0.5
+  // （pandas rank(pct=True) 兩筆資料的標準結果）。
+  assert.strictEqual(byCode14.AAAA.Inst_Rank_20D, 1.0);
+  assert.strictEqual(byCode14.BBBB.Inst_Rank_20D, 0.5);
+  assert.strictEqual(byCode14.AAAA.Price_Rank_20D, 0.5);
+  assert.strictEqual(byCode14.BBBB.Price_Rank_20D, 1.0);
+
+  // BBBB 的 Days_Since_New_Low_Raw 是 null，排名要 COALESCE 成中性值 0.5，不是被排除在
+  // 外當成最低分；AAAA 是唯一有值的那筆，橫斷面排名是 1.0（1/1）。
+  assert.strictEqual(byCode14.AAAA.Days_Since_New_Low_Rank, 1.0);
+  assert.strictEqual(byCode14.BBBB.Days_Since_New_Low_Rank, 0.5);
+
+  // Inst_Accum_Divergence_20D = Inst_Rank_20D − Price_Rank_20D：AAAA 法人買超排名領先、
+  // 漲幅排名落後 -> 正值（資金流向領先價格）；BBBB 相反 -> 負值。
+  assert.ok(approxEqual(byCode14.AAAA.Inst_Accum_Divergence_20D, 0.5), byCode14.AAAA.Inst_Accum_Divergence_20D);
+  assert.ok(approxEqual(byCode14.BBBB.Inst_Accum_Divergence_20D, -0.5), byCode14.BBBB.Inst_Accum_Divergence_20D);
+
+  console.log('Test 14 (computeFactors_: Inst_Net_Sum_20D / Price_Change_20D / Days_Since_New_Low_Raw / cross-sectional ranks with null-coalesced-to-0.5 / Inst_Accum_Divergence_20D) passed.');
 }
 
 console.log('All analysis.js tests passed.');
