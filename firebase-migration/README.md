@@ -3436,3 +3436,64 @@ buildPriceSeries_` 早就算好），只是 Vue 版一直沒把它畫成圖。�
 檢查，一樣適用。`parity.test.js` Parity 3 只對 `rule_v17`／
 `factor_model_rank`／`hybrid` 三種既有策略做逐案例比對，新增這個策略
 不影響既有的 byte-for-byte 驗證範圍。
+
+## 2026-10-13：部署改成分批依序，不要一次全部函式平行上
+
+「🌱 潛伏期」上線那次部署（commit `ab20974`）又撞到 CPU 配額失敗，15 支
+函式沒更新成功，其中包含 `runBacktestAllStrategies`／`generateDailyReport`
+——代表新策略的後端程式碼實際上還沒真的生效。照這天之前的慣例，推一個
+改一行註解的 commit 強制換雜湊重新部署（commit `0094342`）。這次
+`runBacktestAllStrategies`／`generateDailyReport` 兩支成功了（🌱 潛伏期
+確認真的上線），但換成另外 28 支函式撞到同一個錯誤——而且跟上一次失敗
+的 15 支函式名單幾乎不重疊。
+
+兩次失敗名單幾乎不重疊，代表問題不是「某幾支函式特別肥」這種可以一次
+抓出來修的問題，而是**部署機制本身的競態**：這個專案的 `firebase.json`
+只設定了一個 codebase（`functions.source` 是單一目錄，沒有拆成多個
+codebases），所以 Firebase CLI 是對「整個 `functions/` 目錄」算一個
+來源雜湊，不是逐支函式算。驗證：這兩次部署的 log 裡完全沒有任何一行
+`Skipped (No changes detected)`——哪怕只改一行跟某支函式無關的註解，
+全部 37 支函式的雜湊都會一起變，CLI 判斷成「全部都變了」，一次對全部
+37 支函式平行發新 revision。
+
+而這 37 支函式裡，13 支沒有覆寋 `cpu`（Cloud Functions 2nd gen 預設
+`cpu: 1`），其他用 `LIGHT_RUNTIME_OPTS_`（`cpu: 0.25`）。光是這 37 支
+全部**穩態同時跑著**，理論用量就有 `13*1 + 24*0.25 = 19 vCPU`，已經
+逼近 us-central1 這個專案 20 vCPU 的硬上限，幾乎沒有餘裕。一次全部
+平行部署時，每支函式的新 revision 要先跑過 Container Healthcheck 才會
+接手流量，這段期間新舊 revision 短暫重疊，瞬間用量很容易超過上限——
+但哪幾支先搶到配額、哪幾支沒搶到是部署時的競態結果，所以每次失敗的
+函式名單都不一樣，單純重推一次是在賭運氣，不是真的修好問題。
+
+**考慮過的替代方案**：「只部署真的有改的函式」（用 `--only
+functions:A,B` 明確指定）。沒有採用——上面已經驗證這個專案是單一
+codebase，Firebase CLI 自己判斷不出「哪些函式真的受影響」（任何改動都
+會讓全部函式的雜湊一起變），要做到「只部署有改的」只能靠人工去推斷
+「這次改的程式碼會影響哪些函式」再手動列清單——而像今天這種改
+`lib/analysis.js`（`computeFactors_`／`classifyEntrySignal_`）的變更，
+幾乎所有讀取因子或跑回測/報表的函式都用得到，手動列清單其實窄不了多少，
+卻多了「漏列、列錯」的風險，不值得。
+
+**採用的修法**：不管這次改了什麼，一律把全部函式拆成小批、**依序**
+（不是平行）部署——新增 `firebase-migration/scripts/deploy-functions-
+sequential.js`：
+- 從 `functions/index.js` 掃 `^exports\.(\w+)\s*=` 抓出全部函式名稱，
+  不手動維護清單（之後加減函式不用記得改這支腳本，目前掃出來剛好是
+  37 支，跟 `grep -c` 對過）。
+- 以 `BATCH_SIZE = 3` 一批，每批跑 `firebase deploy --only
+  functions:A,functions:B,functions:C --non-interactive --force`，批跟
+  批之間 `sleep 15` 秒，讓上一批的舊 revision 有時間完成流量切換、釋放
+  掉 CPU 配額，才讓下一批發新 revision。
+- `BATCH_SIZE`／等待秒數是第一版的保守值，不是算出來的精確解——如果
+  之後部署還是偶爾撞配額，把 `BATCH_SIZE` 調更小或 `PAUSE` 拉長；如果
+  每次都很順、想縮短部署時間（37 支、每批 3 支、每批間隔 15 秒，粗估
+  一次完整部署要 15-20 分鐘，比原本一次全部平行上的 1-4 分鐘慢不少），
+  可以調大 `BATCH_SIZE` 換速度。
+
+`.github/workflows/deploy-firebase.yml` 的部署步驟拆成兩步：Hosting／
+Firestore rules/indexes 不是 Cloud Run、沒有 vCPU 配額問題，維持一次
+`firebase deploy --only hosting,firestore`；Cloud Functions 改成
+`node scripts/deploy-functions-sequential.js` 分批跑。這支腳本是部署
+基礎設施的編排邏輯，不是 `lib/` 底下的可測試核心業務邏輯，沒有另外寫
+`test/*.test.js`，跟 `migration/import-firestore.js` 這類手動維運工具
+的定位一致（見 workflow 裡「測試 migration 工具」那一步的說明）。

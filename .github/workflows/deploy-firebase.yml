@@ -76,7 +76,17 @@ jobs:
       - name: 安裝 firebase-tools
         run: npm install -g firebase-tools
 
-      # 不加 --only：firebase.json 裡設定了 hosting/functions/firestore 三個 target，
-      # 一次全部部署，跟目前手動在 Cloud Shell 跑 `firebase deploy` 的範圍一致。
-      - name: firebase deploy（Hosting + Functions + Firestore rules/indexes）
-        run: firebase deploy --non-interactive --force
+      # Hosting + Firestore rules/indexes 不是 Cloud Run，沒有 vCPU 配額問題，
+      # 一次部署沒關係。Cloud Functions 拆到下一步分批處理（見那一步的說明）。
+      - name: firebase deploy（Hosting + Firestore rules/indexes）
+        run: firebase deploy --only hosting,firestore --non-interactive --force
+
+      # 2026-10-13：改成分批依序部署，不要一次全部平行上。這個專案只有一個
+      # codebase，任何一行改動都會讓全部 37 支函式的來源雜湊一起變，逼全部
+      # 函式同時發新 revision；而這些函式穩態就已經逼近 us-central1 的
+      # 20 vCPU 配額上限，一次全部平行部署時新舊 revision 短暫重疊，常常
+      # 讓一批（每次還不一樣）函式撞 Container Healthcheck failed / Quota
+      # exceeded。詳細原因跟批次大小怎麼調，見
+      # firebase-migration/scripts/deploy-functions-sequential.js 開頭註解。
+      - name: firebase deploy（Cloud Functions，分批依序部署避免撞 CPU 配額）
+        run: node scripts/deploy-functions-sequential.js
