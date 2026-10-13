@@ -61,14 +61,42 @@ const factorModel = require('../lib/factorModel');
     ),
     7, '負的極小權重也要同樣處理（用絕對值比較，不是只擋正數那一邊）'
   );
-  // 權重大於門檻（即使很小，但不是「可忽略」等級）的因子缺值，仍然要整個否決——
-  // 門檻不能設得太寬，不然會連真的有一點訊號的因子都悄悄放過。
+  // 權重大於門檻（即使很小，但不是「可忽略」等級）的基礎因子缺值，仍然要整個
+  // 否決——門檻不能設得太寬，不然會連真的有一點訊號的因子都悄悄放過。
   assert.strictEqual(
     factorModel.computeWeightedFactorScore_(
-      { Inst_Participation: 2, Fundamental_Roe_Pct: null },
-      { inst_participation: 2, fundamental_roe_pct: 0.01 }
+      { Inst_Participation: null, Trend_Score: 3 },
+      { inst_participation: 0.01, trend_score: 1 }
     ),
-    null, '權重明顯大於可忽略門檻時，缺值依然要整個否決'
+    null, '基礎因子（非 fundamental_*）權重明顯大於可忽略門檻時，缺值依然要整個否決'
+  );
+
+  // 2026-10-13 新增：fundamental_* 因子權重明顯大於可忽略門檻、但值缺失——跟上面
+  // 基礎因子的情況不同，這裡不該否決整個分數，缺值要當成 0（跟訓練時
+  // buildFundamentalFeatureViewSql_ 的 COALESCE(...,0) 一致）。這是這次「套用新
+  // 模型後 factor_model_rank/hybrid 整個回測區間還是零訊號」的真正根因：訓練時
+  // fundamental_* 缺值一律補 0，但套用時卻被當成「完全不能用」整個否決。
+  assert.strictEqual(
+    factorModel.computeWeightedFactorScore_(
+      { Inst_Participation: 2, Fundamental_Revenue_Growth_Streak: null },
+      { inst_participation: 2, fundamental_revenue_growth_streak: 0.01 }
+    ),
+    4, 'fundamental_* 因子缺值要當成 0，不是否決整個分數——4 = 2*2 + 0.01*0'
+  );
+  assert.strictEqual(
+    factorModel.computeWeightedFactorScore_(
+      { Fundamental_Revenue_Growth_Streak: undefined },
+      { fundamental_revenue_growth_streak: -0.0001071 }
+    ),
+    0, 'fundamental_* 欄位根本不存在（undefined）也要同樣當成 0，不是只處理 null'
+  );
+  // fundamental_* 因子真的有值時，照常用真實值加總，不是被強制當成 0
+  assert.strictEqual(
+    factorModel.computeWeightedFactorScore_(
+      { Inst_Participation: 2, Fundamental_Revenue_Growth_Streak: 5 },
+      { inst_participation: 2, fundamental_revenue_growth_streak: 0.01 }
+    ),
+    4.05, 'fundamental_* 因子有真實值時要正常使用，不是不管有沒有值都當成 0'
   );
   // NaN 權重（零變異欄位在某些數值流程下可能產生）：不管值是多少都不該讓 NaN
   // 污染整個加總，效果等同於「這個因子沒有可用資訊」，跳過即可。

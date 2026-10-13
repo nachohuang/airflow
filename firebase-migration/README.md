@@ -3568,3 +3568,49 @@ Firestore rules/indexes 不是 Cloud Run、沒有 vCPU 配額問題，維持一�
 流動性門檻一樣適用。`parity.test.js` Parity 1/2 用明確的欄位白名單
 （`FACTOR_FIELDS`）比對，不是整物件比對，新增這些欄位不影響既有的
 byte-for-byte 驗證範圍。
+
+## 2026-10-13 再追加：第二個獨立根因——基本面因子缺值在訓練/套用兩端解讀不一致
+
+候選因子收斂到 20 個（見上面「真正的根因」那節）部署上線後，使用者重新
+訓練＋套用新模型，`factor_model_rank`／`hybrid` 重新跑回測，整個區間
+（2026-09-01~2026-10-12）還是零訊號——跟上次一樣，`rule_v17`／🌱 潛伏期／
+🧭 綜合吸籌（都不需要模型）同一段區間都有正常訊號，只有這兩個需要模型
+的策略是 0，說明問題不在資料或回測機制，是模型套用這條路徑本身。
+
+請使用者用同一招 Cloud Shell 查目前套用中模型的實際權重，這次挖到的是
+完全不同的第二個根因：`featureColumns` 確認已經收斂成 20 個（上次的修正
+確實生效），但兩個 label 都給了 `fundamental_revenue_growth_streak`
+不可忽略的權重（`downsideResistance` -0.000107、`return1m` 0.00152，
+都大於 `NEGLIGIBLE_WEIGHT_EPSILON_ = 1e-6`），其他 8 個基本面比率/連續
+上升因子這次剛好都被 LASSO 分到精確的 `0` 權重。
+
+追下去發現：`lib/bigquery.js buildFundamentalFeatureViewSql_`（訓練用
+BigQuery view）把這 10 個 `fundamental_*` 因子查無資料一律
+`COALESCE(..., 0)`——模型是在「缺值＝0」的世界裡訓練出來的。但
+`lib/analysis.js computeFactors_`（即時/回測計算，透過 `financialsIndex`
+參數的 `lookupAsOf_`）查無資料時卻留著真正的 `null`。`lib/factorModel.js
+computeWeightedFactorScore_` 的保守否決規則（「權重不是 0 的因子缺值，
+整個分數回傳 null」）在這個情況下反而是問題：這 10 個因子的覆蓋率普遍
+偏低（`fundamental_revenue_growth_streak` 需要連續好幾個月的營收資料
+才能算出「連續成長月數」，覆蓋率又是這批裡最差的），只要其中任何一個
+被訓練分到不可忽略的權重（不保證每次都是同一個因子），幾乎每一列都會
+因為這個因子是 `null` 被整個否決——跟上次「訓練/即時計算因子範圍沒
+對齊」是完全不同機制，但表現出來的症狀一樣：整個回測區間零訊號。
+
+**修正**（`lib/factorModel.js computeWeightedFactorScore_`）：這 10 個
+`fundamental_*` 因子（`config.FUNDAMENTAL_CANDIDATE_COLUMNS`）缺值時
+當成 `0`（跟訓練時的 `COALESCE(...,0)` 一致），不觸發整個分數否決；
+其他基礎技術面因子維持原本「缺值就否決」的保守規則不變——那批因子
+訓練時從來沒有被 0-imputation 過（`buildTrainModelSql_` 的 NOT NULL
+篩選只排除了基本面因子，基礎因子缺值的列整個被排除在訓練資料外，不是
+補 0），所以「缺值就否決」對它們仍然是正確的假設。這個改動只影響
+「基本面因子缺值時如何計算加權分數」，`computeFactors_` 算出來的
+`Fundamental_*` 欄位本身仍然維持 `null` 不變——因子檢視器這類顯示用途
+還是能正確分辨「真的是 0」跟「查無資料」，只有算加權分數這一步才把
+null 當成 0。
+
+`test/factorModel.test.js` 新增三組案例：基礎因子（非 `fundamental_*`）
+權重明顯大於門檻時缺值依然否決（確認沒有連這個保守規則都放寬）；
+`fundamental_*` 因子權重明顯大於門檻但缺值（`null`／`undefined` 都要
+覆蓋到）時改成當 0、不否決；`fundamental_*` 因子真的有值時正常使用，
+不是不管有沒有值都當成 0。

@@ -45,8 +45,39 @@ var config = require('./config');
  * 檢查——其他因子（`bias60`／`inst_part_ma5` 等）經確認權重量級明顯大於這個門檻
  * （R² 看得出模型確實從這些因子學到了一些訊號，不會是跟雜訊同一個量級），不會被
  * 誤判成「可忽略」而被不小心放寬了保守的 null 否決邏輯。
+ *
+ * 2026-10-13 再修正：使用者套用了一版候選因子正確收斂到 20 個的新模型
+ * （見 `config.LIVE_SCORED_FACTOR_CANDIDATE_COLUMNS` 的說明），
+ * `factor_model_rank`／`hybrid` 還是整個回測區間零訊號——這次用 Cloud
+ * Shell 查實際權重才發現是另一個獨立的根因：這次兩個 label 都給了
+ * `fundamental_revenue_growth_streak` 不可忽略的權重（downsideResistance
+ * -0.000107、return1m 0.00152，都大於 `NEGLIGIBLE_WEIGHT_EPSILON_`），
+ * 但 `lib/bigquery.js buildFundamentalFeatureViewSql_`（訓練用）把這 10
+ * 個 `fundamental_*` 因子查無資料時一律 `COALESCE(..., 0)`，`computeFactors_`
+ * （即時/回測計算，見該函式 `financialsIndex` 參數的說明）查無資料時卻是
+ * 留著真正的 `null`——這兩邊對「查無財報資料」的解讀不一致：模型是在
+ * 「缺值＝0」的世界裡訓練出來的，但套用時卻被「缺值＝完全不能用，整個
+ * 否決」的規則擋住。只要這 10 個因子裡任何一個被訓練分到不可忽略的權重
+ * （不保證每次都是 `fundamental_revenue_growth_streak`，覆蓋率最差的那個
+ * 剛好最常被選到，但原則上可能是任何一個），而這批因子的覆蓋率普遍偏
+ * 低，就會導致幾乎每一列都被否決——不是訓練候選因子範圍或 epsilon
+ * 門檻的問題，是這 10 個因子的「缺值該怎麼解讀」在訓練跟套用兩端沒有
+ * 對齊。
+ *
+ * 修正：這 10 個 `fundamental_*` 因子（`config.FUNDAMENTAL_CANDIDATE_COLUMNS`）
+ * 缺值時當成 `0`（跟訓練時的 `COALESCE(...,0)` 一致），不觸發整個分數
+ * 否決；其他（基礎技術面）因子維持原本的否決邏輯不變——那批因子訓練時
+ * 從來沒有被 0-imputation 過（`buildTrainModelSql_` 的 NOT NULL 篩選只
+ * 排除了基本面因子，基礎因子缺值的列整個被排除在訓練資料外，不是補
+ * 0），所以「缺值就否決」對它們仍然是正確、該維持的保守假設。這個改動
+ * 只影響「基本面因子缺值時的解讀」，不影響上面兩段關於權重大小的判斷
+ * （`computeFactors_` 算出來的 `Fundamental_*` 欄位本身仍然維持 `null`
+ * 不變，因子檢視器這類顯示用途還是能正確分辨「真的是 0」跟「查無資料」
+ * ——只有這支函式內部算加權分數時才把 null 當成 0）。
  */
 var NEGLIGIBLE_WEIGHT_EPSILON_ = 1e-6;
+var FUNDAMENTAL_BQ_NAMES_ = {};
+config.FUNDAMENTAL_CANDIDATE_COLUMNS.forEach(function (c) { FUNDAMENTAL_BQ_NAMES_[c] = true; });
 
 function computeWeightedFactorScore_(row, weights) {
   if (!weights) return null;
@@ -62,7 +93,13 @@ function computeWeightedFactorScore_(row, weights) {
     // 情況）；`Math.abs(NaN) < epsilon` 恆為 false，不能只靠下面這個比較涵蓋到。
     if (isNaN(w) || Math.abs(w) < NEGLIGIBLE_WEIGHT_EPSILON_) continue; // 權重可忽略，這個因子不管缺不缺值對加總都沒有實質影響
     var v = row[analysisField];
-    if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return null;
+    if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) {
+      if (FUNDAMENTAL_BQ_NAMES_[bqName]) {
+        v = 0; // 跟訓練時 buildFundamentalFeatureViewSql_ 的 COALESCE(...,0) 一致，不否決整個分數
+      } else {
+        return null;
+      }
+    }
     sum += w * v;
   }
   return sum;
