@@ -597,6 +597,12 @@ async function runDailyCatchupFetch_(appConfig, skipDates) {
 // commit 的原始碼雜湊，CLI 認定「沒變更」直接跳過，完全沒有真的重新
 // 嘗試部署，這 13 支目前仍然是壞的。這段註解本身就是刻意用來改變原始碼
 // 雜湊，逼 Firebase CLI 這次真的對全部函式重新嘗試部署。
+//
+// 2026-10-13 再次補充：「🌱 潛伏期」策略那次部署又撞到同一個 Cloud Run
+// CPU 配額問題（新的一天，配額狀況又緊繃），這次 15 支函式沒更新成功，
+// 其中包括 `runBacktestAllStrategies`／`generateDailyReport`——這兩支
+// 沒更新成功代表新策略的程式碼還沒真的上線，不是前端加了選項就代表
+// 後端也支援了。同樣的理由，這段註解用來強制換雜湊、逼這次重新嘗試。
 var RUNTIME_OPTS_ = { memory: '1GiB', timeoutSeconds: 180 };
 
 /**
