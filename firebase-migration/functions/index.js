@@ -50,6 +50,7 @@ const factorRegressionLib = require('./lib/factorRegression');
 const financialsLib = require('./lib/financials');
 const mopsRevenueLib = require('./lib/mopsRevenueHtml');
 const factorInspectorLib = require('./lib/factorInspector');
+const realtimeLib = require('./lib/realtime');
 
 admin.initializeApp();
 
@@ -2425,6 +2426,111 @@ exports.searchStockCodes = onCall(LIGHT_RUNTIME_OPTS_, async function (request) 
     if (results.length >= 20) break;
   }
   return results;
+});
+
+/**
+ * 以下是個股「即時內外盤」（委買委賣五檔）的 I/O，從 apps-script/src/
+ * Realtime.gs 搬過來（純邏輯部分見 lib/realtime.js 開頭的說明）。跟
+ * Goodinfo／AI 那幾支一樣是打外部 HTTP 端點，不獨立成 lib/ 模組。
+ *
+ * `mis.twse.com.tw` 不是正式文件化的公開 API，限速「每 5 秒 3 個請求」，
+ * 只給使用者在個股詳情主動按按鈕查詢單一檔股票用，不寫入 Reports、不被
+ * 排程呼叫、不能拿來掃全市場——前端只在使用者按下「查詢即時內外盤」才
+ * 呼叫這支，不會隨股票詳情頁開啟就自動打。
+ */
+
+/** 跟瀏覽器打開看盤頁面時一樣先拿一次 cookie，部分情況下沒有這個 cookie
+ *  查詢會失敗或被視為異常流量——拿不到就算了，後面還是會試著直接查
+ *  （不因此整個中斷）。`Headers.getSetCookie()`（Node 18.14+／undici 內建
+ *  fetch 才有）才能正確拿到多個 Set-Cookie 標頭，不能用 `.get('set-cookie')`
+ *  （只會回傳被逗號串接、可能解析錯誤的單一字串）。 */
+async function fetchTwseMisCookie_() {
+  try {
+    const resp = await fetch('https://mis.twse.com.tw/stock/index.jsp');
+    const cookies = typeof resp.headers.getSetCookie === 'function' ? resp.headers.getSetCookie() : [];
+    return cookies.map(function (c) { return String(c).split(';')[0]; }).join('; ');
+  } catch (e) {
+    return '';
+  }
+}
+
+/** data: {code}。回傳單一股票的即時內外盤報價＋買賣力道評估，見
+ *  lib/realtime.js 的完整說明。code 不先判斷是上市還是上櫃，兩種前綴
+ *  （tse_/otc_）用 "|" 合併成一次查詢，MIS 回傳的 msgArray 只會有真正
+ *  存在的那一筆（同一個代號不可能同時是上市又是上櫃）。 */
+exports.getRealtimeQuote = onCall(LIGHT_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  const code = utilsLib.sanitizeStockId_(data.code);
+  if (!code) throw new HttpsError('invalid-argument', '請提供股票代號');
+
+  const cookie = await fetchTwseMisCookie_();
+  const exCh = 'tse_' + code + '.tw|otc_' + code + '.tw';
+  const url = 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=' + encodeURIComponent(exCh) + '&_=' + Date.now();
+
+  let resp;
+  try {
+    resp = await fetch(url, { headers: cookie ? { Cookie: cookie } : {} });
+  } catch (e) {
+    throw new HttpsError('unavailable', '證交所即時報價伺服器暫時無法連線，可能是網路問題或剛好被限速，稍後再試一次。');
+  }
+  if (!resp.ok) {
+    throw new HttpsError('unavailable', '證交所即時報價查詢失敗（HTTP ' + resp.status + '），可能是暫時性問題或剛好遇到限速，稍後再試一次。');
+  }
+
+  let json;
+  try {
+    json = await resp.json();
+  } catch (e) {
+    throw new HttpsError('internal', '證交所即時報價回傳格式異常，無法解析，稍後再試一次。');
+  }
+
+  const arr = json.msgArray || [];
+  if (arr.length === 0) {
+    return { code: code, ok: false, message: '目前查不到即時報價，可能是非交易時間、股票代號錯誤，或這檔股票剛好沒有掛單資料。' };
+  }
+  const q = arr[0];
+
+  const bidPrices = realtimeLib.parseMisLevels_(q.b);
+  const bidVolumes = realtimeLib.parseMisLevels_(q.g);
+  const askPrices = realtimeLib.parseMisLevels_(q.a);
+  const askVolumes = realtimeLib.parseMisLevels_(q.f);
+  const bidLevels = bidPrices.map(function (p, i) { return { price: p, volume: bidVolumes[i] || 0 }; });
+  const askLevels = askPrices.map(function (p, i) { return { price: p, volume: askVolumes[i] || 0 }; });
+
+  const buyPressure = bidVolumes.reduce(function (s, v) { return s + v; }, 0);
+  const sellPressure = askVolumes.reduce(function (s, v) { return s + v; }, 0);
+  const total = buyPressure + sellPressure;
+  const buyRatio = total > 0 ? buyPressure / total : null;
+
+  const latestPrice = (q.z && q.z !== '-') ? Number(q.z) : null;
+  const highPrice = q.h ? Number(q.h) : null;
+  const lowPrice = q.l ? Number(q.l) : null;
+  const verdict = realtimeLib.computeBuySellVerdict_(buyRatio, latestPrice, highPrice, lowPrice);
+  const spreadInfo = realtimeLib.computeBookSpreadAndMidpoint_(bidLevels, askLevels);
+
+  return {
+    code: code,
+    ok: true,
+    name: q.n || '',
+    latestPrice: latestPrice,
+    // latestPrice 是 null 時的備援參考值（見 computeBookSpreadAndMidpoint_
+    // 的說明：買一/賣一均價推算的估計值，不是官方成交價）；latestPrice 有值
+    // 時固定回傳 null，避免呼叫端不小心把估算值當成真正成交價使用。
+    priceEstimate: latestPrice === null ? spreadInfo.midpointEstimate : null,
+    spread: spreadInfo.spread,
+    openPrice: q.o ? Number(q.o) : null,
+    highPrice: highPrice,
+    lowPrice: lowPrice,
+    accumulatedVolume: q.v ? Number(q.v) : null,
+    timestamp: q.tlong ? Number(q.tlong) : null,
+    bidLevels: bidLevels,
+    askLevels: askLevels,
+    buyPressure: buyPressure,
+    sellPressure: sellPressure,
+    buyRatio: buyRatio,
+    verdict: verdict
+  };
 });
 
 /**

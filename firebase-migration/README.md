@@ -3348,3 +3348,50 @@ buildTrainModelSql_` 收到的候選因子從 58 個降到 20 個，LASSO 不會
 要把產業資金流向因子重新納入訓練範圍，必須先完成「完整修正」那個
 選項（把這 36+2 個因子接進 `computeFactors_`），不是這次範圍內的
 工作，記錄在這裡供之後規劃。
+
+## 2026-10-13：個股詳情頁補回兩個舊版有、Vue 版漏掉的功能
+
+使用者實測比對發現個股詳情頁（`StockDetailView.vue`）比 apps-script
+舊版少兩個東西：「每日法人買賣超長條圖」跟「即時買出入建議」。
+
+### 法人買賣超長條圖
+
+純前端補齊，沒有動後端——`getStockDetail` 回傳的 `series` 本來就含
+`instNet`／`foreign`／`trust`／`dealer` 每天的數值（`lib/stockDetail.js
+buildPriceSeries_` 早就算好），只是 Vue 版一直沒把它畫成圖。跟舊版
+`renderInstChartInto_` 同一套呈現方式：Chart.js 長條圖，紅色代表買超、
+綠色代表賣超，跟價格走勢圖（收盤價/MA5/MA20/MA60）同一個 240 天區間、
+用同一組 `series`，不用多打一次 API。
+
+### 即時內外盤（委買委賣五檔＋買賣力道評估）
+
+這個是全新的即時功能，不是漏接——從 `apps-script/src/Realtime.gs`
+搬過來：
+
+- **後端新增 `lib/realtime.js`**（純函式，複製時機 2026-10-13，逐函式
+  對照 apps-script 當時內容）：
+  - `parseMisLevels_`：五檔字串（`"620.00_619.00_..._"`）轉數字陣列
+  - `computeBuySellVerdict_`：委買委賣力道比（60%）＋現價在當日高低
+    區間的相對位置（40%）算出 0~100 的「買賣力道評估分數」，≥65「偏向
+    有利買進」、≤35「偏向有利賣出」、中間「多空不明顯」——刻意跟 AI
+    深度診斷分開設計，只看「這一刻」的掛單簿跟價位，不看公司體質、
+    不看持股成本、不是操作建議
+  - `computeBookSpreadAndMidpoint_`：最佳買賣價差、盤口中間價估算
+    （`latestPrice` 是 null 時的備援參考值，前端顯示一定要標明「估算」）
+- **`index.js` 新增 `exports.getRealtimeQuote`**：打
+  `mis.twse.com.tw`（證交所看盤系統自己在用的即時報價端點，不是正式
+  文件化的公開 API，沒有官方保證格式不會改版，限速「每 5 秒 3 個
+  請求」）——先 `fetchTwseMisCookie_` 拿一次 cookie（部分情況下沒有
+  會查詢失敗，拿不到就算了繼續往下試），再組 `tse_{code}.tw|otc_{code}.tw`
+  一次查詢涵蓋上市/上櫃兩種前綴。`LIGHT_RUNTIME_OPTS_`——單檔查詢，
+  資料量跟 `searchStockCodes`／`getStockDetail` 同一個量級，符合今天
+  稍早訂出來的「有界小量查詢用輕量資源」原則。
+- **前端 `StockDetailView.vue`** 新增「🎯 買賣力道評估（即時內外盤）」
+  卡片：只在使用者按下「查詢即時內外盤」按鈕才呼叫（不隨頁面開啟自動
+  打，呼應後端限速的說明），顯示買賣力道評估分數/說明、成交價（含
+  估算備援）、今日開高低、價差、五檔委買委賣表格。切換股票時會清掉
+  上一檔的查詢結果，不會暫時顯示舊資料。
+
+`test/realtime.test.js` 覆蓋三支純函式：五檔字串解析（含空字串/尾端
+空值）、買賣力道評估的加權公式與邊界分數（65/35 門檻、`high===low`
+中性值防除以 0）、價差計算（任一邊沒有掛單時回傳 null，不硬算假值）。
