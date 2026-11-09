@@ -33,6 +33,10 @@ dry-run → 正式寫入 Firestore → `validate.js` 核對 → `✅ 通過`）�
 
 ## 這裡有什麼
 
+- `PROBLEM_ARCHITECTURE.md` — 2026-11 月「問題重構」練習選定的開發準則
+  （深度命題：新因子要先過 IC／walk-forward 驗證才能進策略設計），
+  開發中遇到新需求/新 bug/要不要加新因子，先對照這份文件的準則跟
+  偏離警訊 checklist，不要又掉回「做出來、套用、看回測勝率」的舊模式
 - `.firebaserc` / `firebase.json` — 指到上面那個專案 ID，讓 `firebase-tools`
   CLI 知道要部署去哪裡
 - `firestore/schema.md` — 全部 12 張表的 Firestore collection/document 結構設計
