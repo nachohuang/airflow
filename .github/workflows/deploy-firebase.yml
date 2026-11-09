@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       # functions/lib 底下是純運算邏輯，不需要雲端憑證就能測試——部署前先跑一次，
       # 測試沒過就不會進到後面的 deploy 步驟。

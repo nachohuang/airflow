@@ -3671,3 +3671,31 @@ null 配對排除（含上面提到的「共同子集」bug 的回歸測試）�
 Function 拉真實歷史資料跑這條管線，先拿現有已經在用的因子（`IBF_20D`、
 `Inst_Net_Sum_20D` 合計版）當 sanity check，驗證管線本身算出來的數字
 合理，再正式驗證身份別拆解跟新因子。
+
+## 2026-11-09：部署失敗——Node.js 20 runtime 被 GCP 下架
+
+距離上次部署約一個月沒有動這個專案，推了一個跟部署機制完全無關的小
+改動（上面那次 IC 驗證引擎），部署卻直接在第一批函式就失敗：
+
+```
+Error: Runtime Node.js 20 was decommissioned on 2026-10-30. To deploy
+you must first upgrade your runtime version.
+```
+
+跟 CPU 配額那幾次不一樣，這次是部署一開始就整批失敗，不是跑到一半
+才撞配額——GCP 把 Cloud Functions 的 Node.js 20 runtime 整個下架了
+（查到的資料顯示 nodejs20 的下架日期正好是 2026-10-30，nodejs22 是
+目前的 GA 版本，有效期到 2027），不是這次改動造成的，是純粹的時間
+流逝造成環境本身過期——這個專案 `firebase.json` 的 `functions.runtime`
+從 Phase 3 遷移以來就一直寫死 `nodejs20`，從沒更新過。
+
+修正：`firebase.json` 的 `functions.runtime` 改成 `nodejs22`，
+`functions/package.json` 的 `engines.node` 同步改成 `"22"`（避免
+本地開發環境跟部署宣告的版本不一致），`.github/workflows/
+deploy-firebase.yml` 的 `actions/setup-node@v4` 也改成 `node-version:
+'22'`——三個地方都要一起改，不然 CI 用舊版 Node 跑測試/build，跟實際
+部署到 Cloud Functions 的版本會對不上。
+
+這類「專案擱置一段時間沒動，回來發現部署環境本身過期」的風險，之後
+應該定期（例如每次要做較大改動前）確認一次目前宣告的 runtime 版本
+還沒被 GCP 下架，不要等部署失敗才發現。
