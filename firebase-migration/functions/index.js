@@ -51,6 +51,8 @@ const financialsLib = require('./lib/financials');
 const mopsRevenueLib = require('./lib/mopsRevenueHtml');
 const factorInspectorLib = require('./lib/factorInspector');
 const realtimeLib = require('./lib/realtime');
+const flowFactorsLib = require('./lib/flowFactors');
+const factorValidationLib = require('./lib/factorValidation');
 
 admin.initializeApp();
 
@@ -998,6 +1000,93 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function
   } catch (e) {
     await logRun_('v17.0回測', '失敗', String(e.message || e), Date.now() - startTime);
     await writeJobStatus_('backtest', { status: 'failed', finishedAt: Date.now(), mode: 'all', error: String(e.message || e) });
+    throw e;
+  }
+});
+
+/**
+ * 「深度命題」第三層（見 PROBLEM_ARCHITECTURE.md）：IC／walk-forward
+ * 驗證管線的 I/O 外殼——讀 BigQuery 歷史（跟回測同一套 loadStartStr
+ * 暖機邏輯，20 天 rolling 因子要有足夠的暖機資料才不會整段都是 0/null），
+ * 算出依身份別拆開的法人資金流向因子（lib/flowFactors.js），再丟進
+ * lib/factorValidation.js 的驗證管線算 IC。
+ *
+ * 跟 `loadBacktestFactorRows_` 不同：這裡不需要抓 `endStr` 之後的
+ * 「追蹤緩衝」資料（回測要追蹤訊號出現後的實際報酬，這裡不模擬交易，
+ * 只需要歷史本身）——但 forward return 在最後 `max(horizons)` 天會是
+ * null（還沒有足夠的未來資料可以算），這是正常的右端截斷，不是 bug，
+ * 呼叫端從回傳的 `report[因子][horizon].overall.n` 可以看出每個 horizon
+ * 實際有多少天進了統計。
+ */
+async function runFactorIcValidationCore_(bigQueryConfig, startStr, endStr, horizons, foldSizeDays) {
+  const warmupStart = new Date(startStr + 'T00:00:00');
+  warmupStart.setDate(warmupStart.getDate() - config.ANALYSIS_LOOKBACK_DAYS);
+  const loadStartStr = utilsLib.normalizeDateStr(warmupStart);
+
+  const rawRows = await fetchHistoryRangeRows_(bigQueryConfig, loadStartStr, endStr);
+  if (rawRows.length === 0) {
+    return { warning: '這段區間（含暖機）完全沒有查到任何 History 資料：' + loadStartStr + ' ~ ' + endStr };
+  }
+
+  const flowRows = flowFactorsLib.computeFlowPersistenceFactors_(rawRows);
+  // 只保留要求區間本身（不含暖機那段）的列才拿去跑驗證——暖機資料只是
+  // 用來讓 20 天 rolling 因子暖機，不該算進 IC 統計的樣本數裡。
+  const scopedRows = flowRows.filter(function (r) {
+    const d = utilsLib.normalizeDateStr(r['日期']);
+    return d >= startStr && d <= endStr;
+  });
+  if (scopedRows.length === 0) {
+    return { warning: '要求的區間（不含暖機）沒有任何 History 資料：' + startStr + ' ~ ' + endStr };
+  }
+
+  const factorFields = [];
+  flowFactorsLib.INSTITUTIONAL_TYPES.forEach(function (type) {
+    factorFields.push('IBF_20D_' + type.key);
+    factorFields.push('Flow_Streak_' + type.key);
+  });
+
+  const report = factorValidationLib.runIcValidationBatch_(
+    scopedRows, factorFields, horizons, foldSizeDays, factorValidationLib.MIN_DAILY_SAMPLE_SIZE_
+  );
+  return {
+    startDate: startStr, endDate: endStr, horizons: horizons, foldSizeDays: foldSizeDays,
+    candidateFactors: factorFields, report: report
+  };
+}
+
+var DEFAULT_IC_VALIDATION_HORIZONS_ = [5, 10, 20];
+var DEFAULT_IC_VALIDATION_FOLD_SIZE_DAYS_ = 20; // ~1 個月交易日，見 PROBLEM_ARCHITECTURE.md／README 的說明
+
+exports.runFactorIcValidation = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  if (!data.startDate || !data.endDate) {
+    throw new HttpsError('invalid-argument', '請提供 startDate／endDate（yyyy-MM-dd）。');
+  }
+  const horizons = Array.isArray(data.horizons) && data.horizons.length ? data.horizons : DEFAULT_IC_VALIDATION_HORIZONS_;
+  const foldSizeDays = data.foldSizeDays || DEFAULT_IC_VALIDATION_FOLD_SIZE_DAYS_;
+
+  const startTime = Date.now();
+  await writeJobStatus_('factorIcValidation', {
+    status: 'running', startedAt: startTime,
+    params: { startDate: data.startDate, endDate: data.endDate, horizons: horizons, foldSizeDays: foldSizeDays },
+    error: null
+  });
+  try {
+    const appConfig = await fetchAppConfig_();
+    if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+      throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+    }
+    const result = await runFactorIcValidationCore_(appConfig.bigQuery, data.startDate, data.endDate, horizons, foldSizeDays);
+    const durationMs = Date.now() - startTime;
+    const summaryMsg = result.warning ||
+      (data.startDate + '~' + data.endDate + '　' + Object.keys(result.report || {}).length + ' 個因子');
+    await logRun_('IC驗證', '成功', summaryMsg, durationMs);
+    await writeJobStatus_('factorIcValidation', { status: 'succeeded', finishedAt: Date.now(), result: result, error: null });
+    return result;
+  } catch (e) {
+    await logRun_('IC驗證', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('factorIcValidation', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
     throw e;
   }
 });

@@ -120,7 +120,20 @@ function approxEqual(a, b, eps) {
   assert.strictEqual(single.tStat, null);
   assert.strictEqual(single.significant, null);
 
-  console.log('Test summarizeIcSeries_ (mean/std/t-stat/significance, null filtering, n<2 edge cases) passed.');
+  // 零變異（每一天的 ic 完全相同）：t-stat 公式會除以 0，是寫 runIcValidationBatch_
+  // 端到端測試時真的碰到的邊界情況——平均值非 0 時，這其實是最極端的「訊號完全
+  // 穩定」情況，應該判定為顯著，不是因為除以 0 就放棄判斷、回傳 null。
+  const zeroVarianceNonzero = fv.summarizeIcSeries_([{ ic: 1 }, { ic: 1 }, { ic: 1 }]);
+  assert.strictEqual(zeroVarianceNonzero.stdIc, 0);
+  assert.strictEqual(zeroVarianceNonzero.tStat, null, '沒有一個有限數字能代表無窮大，tStat 留 null');
+  assert.strictEqual(zeroVarianceNonzero.significant, true, '零變異但平均值非 0，是最強的訊號，應該判定為顯著');
+
+  // 零變異、平均值也剛好是 0：完全沒有效果，不是「無法判斷」。
+  const zeroVarianceZero = fv.summarizeIcSeries_([{ ic: 0 }, { ic: 0 }, { ic: 0 }]);
+  assert.strictEqual(zeroVarianceZero.stdIc, 0);
+  assert.strictEqual(zeroVarianceZero.significant, false, '零變異且平均值是 0，是完全沒有效果，應該判定為不顯著');
+
+  console.log('Test summarizeIcSeries_ (mean/std/t-stat/significance, null filtering, n<2 and zero-variance edge cases) passed.');
 }
 
 // --- splitWalkForwardFolds_ ---
@@ -164,6 +177,68 @@ function approxEqual(a, b, eps) {
   assert.strictEqual(mixedReport.signConsistency, 0.75);
 
   console.log('Test walkForwardIcReport_ (per-fold summaries, overall summary, cross-fold sign consistency) passed.');
+}
+
+function dateStrAt(baseIdx) {
+  const start = new Date(2026, 0, 1);
+  const d = new Date(start);
+  d.setDate(d.getDate() + baseIdx);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+// --- attachForwardReturns_ ---
+{
+  const rows = [
+    { '日期': dateStrAt(0), '證券代號': '2330', '收盤價': 100 },
+    { '日期': dateStrAt(1), '證券代號': '2330', '收盤價': 110 },
+    { '日期': dateStrAt(2), '證券代號': '2330', '收盤價': 121 },
+    { '日期': dateStrAt(0), '證券代號': '2454', '收盤價': 50 },
+    { '日期': dateStrAt(1), '證券代號': '2454', '收盤價': 55 },
+    { '日期': dateStrAt(2), '證券代號': '2454', '收盤價': 60.5 }
+  ];
+  const result = fv.attachForwardReturns_(rows, [1, 2]);
+  const byDateCode = {};
+  result.forEach(function (r) { byDateCode[r['證券代號'] + '_' + r['日期']] = r; });
+
+  assert.ok(approxEqual(byDateCode['2330_' + dateStrAt(0)].FwdReturn_1D, 0.1), '2330 第 0 天往後 1 天：110/100-1=0.1');
+  assert.ok(approxEqual(byDateCode['2330_' + dateStrAt(0)].FwdReturn_2D, 0.21), '2330 第 0 天往後 2 天：121/100-1=0.21');
+  assert.strictEqual(byDateCode['2330_' + dateStrAt(2)].FwdReturn_1D, null, '最後一天沒有未來資料，應該是 null');
+  // 兩檔股票各自獨立算（不會互相污染），2454 的漲幅模式跟 2330 不一樣。
+  assert.ok(approxEqual(byDateCode['2454_' + dateStrAt(0)].FwdReturn_1D, 0.1), '2454 第 0 天往後 1 天：55/50-1=0.1');
+
+  console.log('Test attachForwardReturns_ (per-code forward returns at multiple horizons, independent per stock) passed.');
+}
+
+// --- runIcValidationBatch_：端到端，用一個刻意完美分離的因子驗證整條管線 ---
+{
+  // 30 天，兩檔股票：S1 每天漲 1 點，S2 每天漲 0.5 點——S1 在任何時間點、
+  // 任何未來天期的報酬都嚴格大於 S2（兩者從不打平），所以只要 TestFactor
+  // 正確標出「S1 比較強」，每一天的橫斷面 IC 都應該是完美的 1.0。
+  const rows = [];
+  for (let i = 0; i < 30; i++) {
+    rows.push({ '日期': dateStrAt(i), '證券代號': 'S001', '收盤價': 100 + i * 1, TestFactor: 1 });
+    rows.push({ '日期': dateStrAt(i), '證券代號': 'S002', '收盤價': 100 + i * 0.5, TestFactor: 0 });
+  }
+
+  const report = fv.runIcValidationBatch_(rows, ['TestFactor'], [5, 10], 10, 2);
+
+  assert.ok(report.TestFactor, '報告應該要有 TestFactor 這個 key');
+  assert.ok(report.TestFactor.h5, '應該要有 h5 這個 horizon');
+  assert.ok(report.TestFactor.h10, '應該要有 h10 這個 horizon');
+
+  ['h5', 'h10'].forEach(function (h) {
+    const r = report.TestFactor[h];
+    assert.ok(approxEqual(r.overall.meanIc, 1), h + ' 整體平均 IC 應該接近完美的 1.0：' + r.overall.meanIc);
+    assert.strictEqual(r.overall.significant, true, h + ' 應該判定為顯著');
+    assert.strictEqual(r.signConsistency, 1, h + ' 每個區段都應該是正值，跨區段方向一致性應該是 1');
+    assert.ok(r.foldCount >= 2, h + ' 應該切出至少 2 個區段才算真的在做 walk-forward');
+  });
+
+  // h10 比 h5 更快碰到陣列尾端（最後 10 天沒有足夠的未來資料），有效天數應該更少。
+  assert.ok(report.TestFactor.h10.overall.n < report.TestFactor.h5.overall.n,
+    'h10 的有效天數應該比 h5 少（陣列尾端被截斷的天數更多）');
+
+  console.log('Test runIcValidationBatch_ (end-to-end: perfectly-separated factor yields IC=1 across horizons and folds) passed.');
 }
 
 console.log('All factorValidation.js tests passed.');

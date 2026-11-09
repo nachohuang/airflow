@@ -117,6 +117,15 @@ function computeIcSeries_(rows, factorField, forwardReturnField, minSampleSize) 
  * 跟 lib/financials.js 這類「夠用就好、不為單一用途引套件」的既有風格
  * 一致）。有效天數 < 2 時 stdIc／tStat／significant 都是 null（標準差跟
  * t 檢定在只有 0、1 個樣本時沒有意義，不能硬算）。
+ *
+ * 標準差剛好是 0（每一天的 IC 完全相同，零變異）是另一個邊界情況，
+ * 寫端到端測試時真的碰到過：t-stat 公式在這裡會除以 0，但這其實是
+ * 「訊號完全穩定、每一天都指向同一個方向，沒有任何一天反例」的最極端
+ * 情況，比一般的統計顯著性更強，不是算不出來——反過來，如果連平均值
+ * 本身都是 0（每天都是 0），那是「完全沒有效果」，一樣不需要查 t 分配表。
+ * 這兩種都直接由 `meanIc` 是否非 0 判斷 `significant`，`tStat` 留
+ * `null`（沒有一個有限的數字能代表「無窮大」，用 `Infinity` 會在
+ * JSON／Firestore 序列化時變成 `null`，反而更難分辨是哪一種情況）。
  */
 function summarizeIcSeries_(icSeries) {
   var valid = icSeries.filter(function (d) { return d.ic !== null && d.ic !== undefined && !isNaN(d.ic); });
@@ -126,8 +135,9 @@ function summarizeIcSeries_(icSeries) {
   if (n < 2) return { n: n, meanIc: meanIc, stdIc: null, tStat: null, significant: null };
   var sq = valid.reduce(function (s, d) { return s + (d.ic - meanIc) * (d.ic - meanIc); }, 0);
   var stdIc = Math.sqrt(sq / (n - 1));
-  var tStat = stdIc === 0 ? null : meanIc / (stdIc / Math.sqrt(n));
-  var significant = tStat === null ? null : Math.abs(tStat) >= 2;
+  if (stdIc === 0) return { n: n, meanIc: meanIc, stdIc: 0, tStat: null, significant: meanIc !== 0 };
+  var tStat = meanIc / (stdIc / Math.sqrt(n));
+  var significant = Math.abs(tStat) >= 2;
   return { n: n, meanIc: meanIc, stdIc: stdIc, tStat: tStat, significant: significant };
 }
 
@@ -179,6 +189,58 @@ function walkForwardIcReport_(icSeries, foldSizeDays) {
   };
 }
 
+/**
+ * 「深度命題」第三層的第一步：把 `computeForwardReturns_` 接到一批已經
+ * 依股票代號分組好因子的 rows 上——對每個身份別分組，依日期排序、算出
+ * 每個 horizon（例如 5/10/20 交易日）的未來報酬，就地補上
+ * `FwdReturn_{n}D` 欄位。即使呼叫端給的 rows 已經排序過，這裡還是會
+ * 重新依「代號、日期」排序一次——這支是獨立可重用的純函式，不該假設
+ * 呼叫端的排序紀律，跟 lib/analysis.js computeFactors_ 自己也會重新排序
+ * 一次是同一個理由。
+ */
+function attachForwardReturns_(rows, horizons) {
+  var sorted = sortRows(rows, [
+    ['證券代號', 'asc'],
+    [function (r) { return normalizeDateStr(r['日期']); }, 'asc']
+  ]);
+  var byCode = groupBy(sorted, function (r) { return r['證券代號']; });
+  byCode.forEach(function (group) {
+    var closeArr = group.map(function (r) { return r['收盤價']; });
+    horizons.forEach(function (n) {
+      var fwd = computeForwardReturns_(closeArr, n);
+      for (var i = 0; i < group.length; i++) group[i]['FwdReturn_' + n + 'D'] = fwd[i];
+    });
+  });
+  return sorted;
+}
+
+/**
+ * 整條驗證管線的頂層純函式：給一批已經算好「候選因子欄位」的 rows
+ * （例如 lib/flowFactors.js computeFlowPersistenceFactors_ 的輸出），
+ * 對每個 (因子, horizon) 組合各自跑一次完整的 walk-forward IC 驗證，
+ * 回傳 `{ [factorField]: { ['h'+n]: walkForwardIcReport_ 的結果 } }`
+ * 這樣的巢狀結構。
+ *
+ * 不會回傳每天逐筆的 IC 時間序列（只回傳 walkForwardIcReport_ 已經算好
+ * 的彙總統計跟逐區段摘要）——驗證的因子數×horizon 數量一多，逐日明細
+ * 會很快膨脹，而且呼叫端（Cloud Function 的回傳值／Firestore 文件）
+ * 要看的是「這個因子站不站得住腳」的結論，不是重新畫一次時間序列圖，
+ * 需要逐日明細時再另外開一個查詢路徑，不要預設就夾帶。
+ */
+function runIcValidationBatch_(rows, factorFields, horizons, foldSizeDays, minSampleSize) {
+  var withReturns = attachForwardReturns_(rows, horizons);
+  var report = {};
+  factorFields.forEach(function (factorField) {
+    report[factorField] = {};
+    horizons.forEach(function (n) {
+      var forwardField = 'FwdReturn_' + n + 'D';
+      var icSeries = computeIcSeries_(withReturns, factorField, forwardField, minSampleSize);
+      report[factorField]['h' + n] = walkForwardIcReport_(icSeries, foldSizeDays);
+    });
+  });
+  return report;
+}
+
 module.exports = {
   MIN_DAILY_SAMPLE_SIZE_: MIN_DAILY_SAMPLE_SIZE_,
   computeForwardReturns_: computeForwardReturns_,
@@ -187,5 +249,7 @@ module.exports = {
   computeIcSeries_: computeIcSeries_,
   summarizeIcSeries_: summarizeIcSeries_,
   splitWalkForwardFolds_: splitWalkForwardFolds_,
-  walkForwardIcReport_: walkForwardIcReport_
+  walkForwardIcReport_: walkForwardIcReport_,
+  attachForwardReturns_: attachForwardReturns_,
+  runIcValidationBatch_: runIcValidationBatch_
 };

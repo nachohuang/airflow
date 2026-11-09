@@ -3747,3 +3747,58 @@ IC 比任何單一身份別都強，代表拆開身份別沒有額外價值；�
 `computeIcSeries_`／`walkForwardIcReport_`，先拿既有已經在用的因子
 （`IBF_20D` 合計版、`Inst_Net_Sum_20D`）當 sanity check，驗證管線本身
 算出來的數字合理，再正式驗證身份別拆解跟新因子的 IC／跨區段穩定性。
+
+## 2026-11-09：IC／walk-forward 因子驗證管線——第三層，串起 Cloud Function + 前端
+
+把第一層（`lib/factorValidation.js`）跟第二層（`lib/flowFactors.js`）
+串成一條完整、使用者可以直接在前端跑的驗證管線。
+
+**新增的純函式**（`lib/factorValidation.js`）：
+- `attachForwardReturns_(rows, horizons)`：對一批已經依身份別算好因子的
+  rows，依股票代號分組、依日期排序，對每個 horizon（例如 5/10/20 天）
+  算出未來報酬，補上 `FwdReturn_{n}D` 欄位。獨立重新排序一次（不信任
+  呼叫端的排序紀律），跟 `computeFactors_` 自己也會重新排序同一個理由。
+- `runIcValidationBatch_(rows, factorFields, horizons, foldSizeDays,
+  minSampleSize)`：對每個（因子、horizon）組合各自跑一次完整的
+  walk-forward IC 驗證，回傳 `{ [因子]: { h5: {...}, h10: {...} } }`
+  這樣的巢狀報告。只回傳彙總統計跟逐區段摘要，不夾帶逐日明細——因子數
+  ×horizon 數一多，逐日明細會很快膨脹，而且要看的是「這個因子站不
+  站得住腳」的結論，不是重畫一次時間序列圖。
+
+**寫端到端測試時意外抓到的第二個統計邊界 bug**：`summarizeIcSeries_`
+原本在 IC 時間序列「零變異」（每一天算出來的 IC 完全相同）時，t-stat
+公式除以 0，被我寫成直接回傳 `significant: null`（「算不出來」）。
+用一個刻意完美分離的合成因子（兩檔股票報酬從不打平，因子完美標出
+誰比較強）跑端到端測試時，每天的 IC 剛好都是精確的 1.0，觸發了這個
+邊界——但仔細想這其實是**最強的訊號**（零變異、平均值非 0，代表沒有
+任何一天是反例），不是「無法判斷」。改成：零變異且平均值非 0 時
+直接判定為顯著（`tStat` 留 `null`，沒有一個有限數字能代表「無窮大」，
+用 `Infinity` 會在 JSON／Firestore 序列化時變成 `null`，反而更難分辨
+是哪一種情況）；零變異且平均值也是 0 時判定為不顯著（完全沒有效果）。
+`test/factorValidation.test.js` 補上這兩種邊界情況的回歸測試。
+
+**Cloud Function**（`index.js`）：新增 `runFactorIcValidationCore_`（I/O
+外殼：讀 BigQuery 歷史，跟回測共用同一套 `ANALYSIS_LOOKBACK_DAYS`
+暖機邏輯，讓 20 天 rolling 因子在要求區間的第一天就有完整視窗；算完
+因子後過濾掉暖機那段，不讓暖機資料混進 IC 統計的樣本數）跟
+`exports.runFactorIcValidation`（`onCall`，`BACKTEST_RUNTIME_OPTS_`
+等級，跟 `runBacktest`／`runBacktestAllStrategies` 同一個資源量級，
+跟因子迴歸模型共用 `jobs/{jobKey}` 執行狀態模式）。預設驗證 8 個候選
+因子（4 個身份別 × 逢低接手率／連續買超天數）在 5/10/20 天三個天期。
+
+**前端**（`ResearchView.vue`）：「策略研究」頁面新增「📡 IC／
+walk-forward 因子驗證」卡片——選一段日期區間、按「開始驗證」，結果
+表格依「是否顯著」「|平均 IC|」排序，每一列顯示因子／身份別、天期、
+平均 IC、t-stat、顯著與否、跨區段方向一致性、區段數、有效天數，提醒
+使用者「顯著」跟「跨區段方向一致性」要一起看（對應
+`PROBLEM_ARCHITECTURE.md` 的 G2），只看平均 IC 數字好看是不夠的。
+
+**怎麼測**：打開 App →「策略研究」頁面最下面「📡 IC／walk-forward
+因子驗證」卡片，選一段至少涵蓋一兩個月的日期區間（太短切不出
+`walkForwardIcReport_` 預設 20 個交易日一段的多個區段，`foldCount`
+會只有 1、看不出跨區段穩不穩定），按「開始驗證」。執行中可以切走頁面，
+回來會自動顯示最新狀態（跟因子迴歸模型同一套 `jobs/{jobKey}` 監聽，
+執行通常要數十秒到數分鐘，視區間長短）。跑完看結果表格：先看「顯著」
+欄是「是」的那幾列，再看「跨區段方向一致性」是不是也接近 100%——兩者
+都成立，這個因子/身份別/天期組合才算真的站得住腳，值得往下設計策略；
+只有「顯著」沒有「方向一致」，很可能是正負區段互相抵消湊出來的假象。

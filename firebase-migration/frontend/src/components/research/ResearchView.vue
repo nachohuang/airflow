@@ -370,6 +370,101 @@ function formatFactorValue(v) {
   if (typeof v !== 'number') return v;
   return Number(v.toFixed(4));
 }
+
+// ---- IC／walk-forward 因子驗證（functions/lib/factorValidation.js／
+// flowFactors.js，見根目錄 PROBLEM_ARCHITECTURE.md「深度命題」）----
+// 跟上面三個工具（回測／因子迴歸模型／因子檢視器）不同：這裡不訓練
+// 模型、不模擬交易，是在因子被包裝成任何策略之前，先檢驗因子本身有
+// 沒有資訊含量——對每一天的候選股票橫斷面，分別算因子值跟未來 N 天
+// 報酬的 Spearman 等級相關係數（IC），再切成多個不重疊區段分別統計，
+// 不是只看單一視窗的回測勝率。跟因子迴歸模型共用同一套 jobs/{jobKey}
+// 監聽模式。
+const icValidationForm = ref({ startDate: '', endDate: '' });
+const icValidationStarting = ref(false);
+const icValidationStartError = ref('');
+const icValidationJob = ref(null);
+let unsubscribeIcValidationJob = null;
+
+onMounted(function () {
+  unsubscribeIcValidationJob = onSnapshot(doc(db, 'jobs', 'factorIcValidation'), function (snap) {
+    icValidationJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeIcValidationJob) unsubscribeIcValidationJob();
+});
+
+const icValidationJobStatusLabel = computed(function () {
+  if (!icValidationJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[icValidationJob.value.status] || icValidationJob.value.status;
+});
+
+async function runIcValidationNow() {
+  icValidationStarting.value = true;
+  icValidationStartError.value = '';
+  try {
+    await callFn('runFactorIcValidation', {
+      startDate: icValidationForm.value.startDate,
+      endDate: icValidationForm.value.endDate
+    }, 540000); // 跟後端 BACKTEST_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 540 對齊
+  } catch (e) {
+    icValidationStartError.value = e.message || String(e);
+  } finally {
+    icValidationStarting.value = false;
+  }
+}
+
+const IC_TYPE_LABELS = { foreign: '外資', trust: '投信', dealer: '自營商', combined: '合計' };
+const IC_METRIC_LABELS = { IBF_20D: '逢低接手率', Flow_Streak: '連續買超天數' };
+
+/** IBF_20D_foreign 這種原始欄名換成「逢低接手率／外資」比較好讀。 */
+function icFactorDisplayName(factorKey) {
+  const m = factorKey.match(/^(IBF_20D|Flow_Streak)_(foreign|trust|dealer|combined)$/);
+  if (!m) return factorKey;
+  return (IC_METRIC_LABELS[m[1]] || m[1]) + '／' + (IC_TYPE_LABELS[m[2]] || m[2]);
+}
+
+function formatIc(v) {
+  if (v === null || v === undefined) return '-';
+  return Number(v).toFixed(3);
+}
+function formatPct01(v) {
+  if (v === null || v === undefined) return '-';
+  return Math.round(v * 100) + '%';
+}
+
+/** 把 report（{因子: {h5: {...}, h10: {...}, ...}}）攤平成表格列：每個
+ *  因子 × 每個天期各一列，依「是否顯著」「|平均 IC|」排序，讓使用者
+ *  一眼看出哪個因子/天期最站得住腳，不用自己在巢狀物件裡找。 */
+const icValidationRows = computed(function () {
+  const result = icValidationJob.value && icValidationJob.value.result;
+  if (!result || !result.report) return [];
+  const rows = [];
+  Object.keys(result.report).forEach(function (factorKey) {
+    const byHorizon = result.report[factorKey];
+    Object.keys(byHorizon).forEach(function (hKey) {
+      const r = byHorizon[hKey];
+      rows.push({
+        factorKey: factorKey,
+        displayName: icFactorDisplayName(factorKey),
+        horizon: hKey.replace('h', '') + ' 天',
+        meanIc: r.overall.meanIc,
+        tStat: r.overall.tStat,
+        significant: r.overall.significant,
+        signConsistency: r.signConsistency,
+        foldCount: r.foldCount,
+        n: r.overall.n
+      });
+    });
+  });
+  rows.sort(function (a, b) {
+    const sa = a.significant ? 1 : 0, sb = b.significant ? 1 : 0;
+    if (sa !== sb) return sb - sa;
+    return Math.abs(b.meanIc || 0) - Math.abs(a.meanIc || 0);
+  });
+  return rows;
+});
 </script>
 
 <template>
@@ -787,6 +882,77 @@ function formatFactorValue(v) {
             </tbody>
           </table>
         </div>
+      </template>
+    </div>
+
+    <div class="form-card">
+      <h3>📡 IC／walk-forward 因子驗證</h3>
+      <p class="hint">
+        跟上面三個工具不同：這裡不訓練模型、不模擬交易，只檢驗候選因子
+        （依法人身份別拆開的逢低接手率／連續買超天數，見
+        <code>functions/lib/flowFactors.js</code>）本身有沒有資訊
+        含量——對每一天的候選股票橫斷面，分別算因子值跟未來 5／10／20
+        天報酬的 Spearman 等級相關係數（IC），再切成多個不重疊區段分別
+        統計，不是只看單一視窗的回測勝率。細節跟為什麼要這樣做，見
+        專案根目錄的 <code>PROBLEM_ARCHITECTURE.md</code>。
+      </p>
+      <div class="schedule-time-inputs">
+        <input v-model="icValidationForm.startDate" type="date" required>
+        <span>~</span>
+        <input v-model="icValidationForm.endDate" type="date" required>
+      </div>
+      <div class="form-actions">
+        <button type="button" :disabled="icValidationStarting" @click="runIcValidationNow">
+          {{ icValidationStarting ? '送出中...' : '開始驗證' }}
+        </button>
+      </div>
+      <p v-if="icValidationStartError" class="error-box">{{ icValidationStartError }}</p>
+
+      <div v-if="icValidationJob" class="run-log-status-card" style="margin-top:8px;">
+        <div class="run-log-status-card-top">
+          <span>執行狀態</span>
+          <span class="signal-badge" :style="{ color: jobStatusColor(icValidationJobStatusLabel) }">{{ icValidationJobStatusLabel }}</span>
+        </div>
+        <div class="hint">
+          <template v-if="icValidationJob.status === 'running'">還在驗證中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+          <template v-else-if="icValidationJob.error">{{ icValidationJob.error }}</template>
+          <template v-else-if="icValidationJob.result && icValidationJob.result.warning">{{ icValidationJob.result.warning }}</template>
+        </div>
+      </div>
+
+      <template v-if="icValidationRows.length">
+        <h3 style="margin-top:16px;">驗證結果（依「是否顯著」「|平均IC|」排序）</h3>
+        <div class="table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>因子／身份別</th><th>天期</th><th>平均 IC</th><th>t-stat</th>
+                <th>顯著？</th><th>跨區段方向一致性</th><th>區段數</th><th>有效天數</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in icValidationRows" :key="row.factorKey + '_' + row.horizon">
+                <td>{{ row.displayName }}</td>
+                <td>{{ row.horizon }}</td>
+                <td>{{ formatIc(row.meanIc) }}</td>
+                <td>{{ row.tStat === null ? '-' : formatIc(row.tStat) }}</td>
+                <td :style="{ color: row.significant ? 'var(--green)' : 'var(--text)' }">
+                  {{ row.significant === null ? '-' : (row.significant ? '是' : '否') }}
+                </td>
+                <td>{{ formatPct01(row.signConsistency) }}</td>
+                <td>{{ row.foldCount }}</td>
+                <td>{{ row.n }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="hint">
+          「顯著」是 |t-stat| ≥ 2 的粗略經驗法則判定，不是精確 p-value；
+          「跨區段方向一致性」越接近 100% 代表每個不重疊區段都指向同一個
+          方向，越接近 50% 代表正負區段互相抵消、平均值不可信。兩者都要
+          一起看，只看平均 IC 數字好看是不夠的——見
+          <code>PROBLEM_ARCHITECTURE.md</code> 的 G2。
+        </p>
       </template>
     </div>
   </section>
