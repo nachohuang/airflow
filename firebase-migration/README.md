@@ -3858,3 +3858,52 @@ EWMA（指數加權移動平均）／CUSUM，用指數衰減取代硬重置：�
 `Flow_EWMA_{key}` 的端到端驗證（全部買超收斂到精確 1.0、全部賣超維持
 精確 0、不連續買超日的 EWMA 要跟獨立呼叫 `utils.ewma` 算出來的結果
 完全一致、合計版等於自營商那一份）。
+
+## 2026-11-10：第四期驗證推翻前三期的結論——「深度命題」第四層，跨期自動彙總
+
+使用者又手動跑了第四段完全獨立期間的驗證。結果直接推翻了上一輪的
+結論：`連續買超天數`（外資／合計）在 5 天天期——前三期一度被判斷成
+「唯一撐過三次獨立測試的發現」，而且還特地為它設計了 EWMA 因子——
+在第四期直接掉到 IC≈0.001、完全不顯著，EWMA 版本在同一期也沒有救回來
+（甚至變號）。
+
+**問題不是這個因子沒用，是「手動跑幾次、在對話裡靠人工記憶比對」這件
+事本身不可靠**：容易因為樣本不夠多就下結論，也容易中途漏看、記錯前
+幾次的數字（上一輪我自己就說過「這是唯一驗證過的發現」，這句話本身
+就是被不可靠的人工比對產生出來的）。
+
+**修正**（「深度命題」第四層，見 `PROBLEM_ARCHITECTURE.md`）：把「跨
+幾個完全獨立的期間一致不一致」變成系統自動算出來的數字，不要再靠人工
+在聊天記錄裡回頭翻。
+
+- `lib/factorValidation.js` 新增 `aggregateAcrossPeriods_(periodReports)`：
+  輸入多段獨立期間各自跑出來的 `runIcValidationBatch_` 結果，對每個
+  （因子、horizon）算出 `periodsTested`（有算出數字的期數）、
+  `periodsSignificant`（顯著的期數）、`crossPeriodConsistency`（跟多數
+  期數同方向的比例，概念上跟 `walkForwardIcReport_.signConsistency`
+  一樣，只是這次是跨獨立期間而不是跨同一期間裡的 fold，是更嚴格的
+  穩定性檢定）、`robust`（每一期都顯著且每一期都同方向才是
+  `true`——這是這個 session 一路手動判斷的標準，現在變成系統算出來的
+  布林值）。原始逐期數字完整保留在 `periods` 陣列裡，不是只給一個
+  聚合後的結論。沒算出數字的期間（例如那段期間資料不足）會從分母排除，
+  不當成「不顯著」的一期扣分——資料不足跟「有資料但沒驗證出訊號」是
+  兩件不一樣的事。
+- `index.js`：`runFactorIcValidationCore_` 拆成
+  `runFactorIcValidationForPeriod_`（單一期間，I/O 外殼，邏輯不變）＋
+  `runFactorIcValidationMultiCore_`（新的，對多段期間用
+  `Promise.all` 平行跑完 `runFactorIcValidationForPeriod_`，再丟進
+  `aggregateAcrossPeriods_`）。`exports.runFactorIcValidation` 改成接受
+  `periods: [{startDate,endDate}, ...]` 陣列（不再是單一
+  `startDate`／`endDate`），新增 `IC_VALIDATION_RUNTIME_OPTS_`
+  （`timeoutSeconds: 900`，比單段回測寬裕，因為一次要平行查好幾段
+  BigQuery 歷史）。
+- `ResearchView.vue`：表單改成可以「+ 新增一段期間」動態加減多個
+  日期區間；結果表格改成顯示跨期彙總（穩健？／已測期數／顯著期數／
+  跨期方向一致性／各期平均 IC 列表），排序優先序是穩健 > 顯著期數 >
+  跨期方向一致性，直接對應這個 session 一路用來判斷「這個訊號到底
+  站不站得住腳」的標準。
+
+`test/factorValidation.test.js` 用這個 session 實際跑過的真實四期數字
+重建測試（連續買超天數的「方向一致但不是每期都顯著」模式、逢低接手率
+投信的類似模式），加上完全 robust／正負各半（50% 一致性）／缺資料
+期間排除在分母外但保留在原始清單裡這幾種邊界情況。

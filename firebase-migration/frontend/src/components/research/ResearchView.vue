@@ -379,11 +379,24 @@ function formatFactorValue(v) {
 // 報酬的 Spearman 等級相關係數（IC），再切成多個不重疊區段分別統計，
 // 不是只看單一視窗的回測勝率。跟因子迴歸模型共用同一套 jobs/{jobKey}
 // 監聽模式。
-const icValidationForm = ref({ startDate: '', endDate: '' });
+//
+// 2026-11-10 改成支援多段獨立期間：這個 session 手動跑了四次獨立期間
+// 的驗證，光靠在對話裡人工比對就已經出過錯（一度誤判某個因子「三期
+// 都驗證過」，後來第四期直接推翻）。改成一次送出多段期間、後端平行
+// 跑完自動彙總成「跨幾期一致不一致」，不用再靠人工記憶比對好幾輪
+// 對話紀錄。
+const icValidationPeriods = ref([{ startDate: '', endDate: '' }]);
 const icValidationStarting = ref(false);
 const icValidationStartError = ref('');
 const icValidationJob = ref(null);
 let unsubscribeIcValidationJob = null;
+
+function addIcValidationPeriod() {
+  icValidationPeriods.value.push({ startDate: '', endDate: '' });
+}
+function removeIcValidationPeriod(index) {
+  icValidationPeriods.value.splice(index, 1);
+}
 
 onMounted(function () {
   unsubscribeIcValidationJob = onSnapshot(doc(db, 'jobs', 'factorIcValidation'), function (snap) {
@@ -405,9 +418,8 @@ async function runIcValidationNow() {
   icValidationStartError.value = '';
   try {
     await callFn('runFactorIcValidation', {
-      startDate: icValidationForm.value.startDate,
-      endDate: icValidationForm.value.endDate
-    }, 540000); // 跟後端 BACKTEST_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 540 對齊
+      periods: icValidationPeriods.value
+    }, 900000); // 跟後端 IC_VALIDATION_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 900 對齊
   } catch (e) {
     icValidationStartError.value = e.message || String(e);
   } finally {
@@ -434,34 +446,46 @@ function formatPct01(v) {
   return Math.round(v * 100) + '%';
 }
 
-/** 把 report（{因子: {h5: {...}, h10: {...}, ...}}）攤平成表格列：每個
- *  因子 × 每個天期各一列，依「是否顯著」「|平均 IC|」排序，讓使用者
- *  一眼看出哪個因子/天期最站得住腳，不用自己在巢狀物件裡找。 */
+/** 哪幾段期間送出去查詢時完全沒有資料（因為資料源本身查不到，不是因子
+ *  沒訊號）——跟「每個因子的驗證結果」分開顯示，不要混在同一張表裡。 */
+const icValidationPeriodWarnings = computed(function () {
+  const result = icValidationJob.value && icValidationJob.value.result;
+  if (!result || !Array.isArray(result.periods)) return [];
+  return result.periods.filter(function (p) { return p.warning; });
+});
+
+/** 把 aggregated（{因子: {h5: {periodsTested, periodsSignificant,
+ *  crossPeriodConsistency, robust, periods: [...]}, ...}}）攤平成表格
+ *  列：每個因子 × 每個天期各一列。排序優先序：robust（每期都顯著、
+ *  每期都同方向）排最前面，再來是顯著期數、跨期方向一致性——這組排序
+ *  直接對應這個 session 一路用來判斷「這個訊號到底站不站得住腳」的
+ *  標準，不是單純看某一期的 |平均IC| 好不好看。 */
 const icValidationRows = computed(function () {
   const result = icValidationJob.value && icValidationJob.value.result;
-  if (!result || !result.report) return [];
+  if (!result || !result.aggregated) return [];
   const rows = [];
-  Object.keys(result.report).forEach(function (factorKey) {
-    const byHorizon = result.report[factorKey];
+  Object.keys(result.aggregated).forEach(function (factorKey) {
+    const byHorizon = result.aggregated[factorKey];
     Object.keys(byHorizon).forEach(function (hKey) {
-      const r = byHorizon[hKey];
+      const entry = byHorizon[hKey];
+      const meanIcs = entry.periods.filter(function (p) { return p.meanIc !== null && p.meanIc !== undefined; }).map(function (p) { return p.meanIc; });
       rows.push({
         factorKey: factorKey,
         displayName: icFactorDisplayName(factorKey),
         horizon: hKey.replace('h', '') + ' 天',
-        meanIc: r.overall.meanIc,
-        tStat: r.overall.tStat,
-        significant: r.overall.significant,
-        signConsistency: r.signConsistency,
-        foldCount: r.foldCount,
-        n: r.overall.n
+        periodsTested: entry.periodsTested,
+        periodsSignificant: entry.periodsSignificant,
+        crossPeriodConsistency: entry.crossPeriodConsistency,
+        robust: entry.robust,
+        periodIcList: meanIcs.map(formatIc).join('、')
       });
     });
   });
   rows.sort(function (a, b) {
-    const sa = a.significant ? 1 : 0, sb = b.significant ? 1 : 0;
-    if (sa !== sb) return sb - sa;
-    return Math.abs(b.meanIc || 0) - Math.abs(a.meanIc || 0);
+    const ra = a.robust ? 1 : 0, rb = b.robust ? 1 : 0;
+    if (ra !== rb) return rb - ra;
+    if (a.periodsSignificant !== b.periodsSignificant) return b.periodsSignificant - a.periodsSignificant;
+    return (b.crossPeriodConsistency || 0) - (a.crossPeriodConsistency || 0);
   });
   return rows;
 });
@@ -897,20 +921,28 @@ const icValidationRows = computed(function () {
         專案根目錄的 <code>PROBLEM_ARCHITECTURE.md</code>。
       </p>
       <p class="hint">
-        2026-11-10 新增「買超動量(EWMA)」：三期驗證下來，連續買超天數
-        （外資／合計）在 5 天天期是唯一三期都顯著、同方向的訊號，但
-        「連續天數」遇到任何一天不符合條件就整個歸零，跟「動量應該隨
-        時間自然淡化、不是被單一一天一次性清零」的實證結果不一致。這個
-        新因子用指數加權移動平均（半衰期 5 個交易日，對應已驗證的
-        horizon）取代硬計數，同一次驗證會自動列出來，可以直接跟
-        「連續買超天數」那幾列比較，看指數衰減版本是不是訊號更強／更穩定。
+        2026-11-10 新增「買超動量(EWMA)」：連續買超天數（外資／合計）在
+        5 天天期的訊號，但「連續天數」遇到任何一天不符合條件就整個歸零，
+        跟「動量應該隨時間自然淡化、不是被單一一天一次性清零」的直覺
+        不一致。這個新因子用指數加權移動平均（半衰期 5 個交易日）取代
+        硬計數，同一次驗證會自動列出來，可以直接比較誰的訊號更強／更
+        穩定。
       </p>
-      <div class="schedule-time-inputs">
-        <input v-model="icValidationForm.startDate" type="date" required>
+      <p class="hint">
+        2026-11-10 改成支援多段獨立期間：光靠人工在對話裡回頭比對好幾次
+        驗證結果並不可靠（這個 session 真的因此誤判過一次），改成一次
+        送出多段完全獨立的日期區間，後端平行查完自動彙總——「跨幾期一致
+        不一致」直接變成系統算出來的數字，不用自己記。建議至少測 3-4
+        段互不重疊的期間。
+      </p>
+      <div v-for="(p, idx) in icValidationPeriods" :key="idx" class="schedule-time-inputs" style="margin-top:4px;">
+        <input v-model="p.startDate" type="date" required>
         <span>~</span>
-        <input v-model="icValidationForm.endDate" type="date" required>
+        <input v-model="p.endDate" type="date" required>
+        <button v-if="icValidationPeriods.length > 1" type="button" @click="removeIcValidationPeriod(idx)">移除</button>
       </div>
       <div class="form-actions">
+        <button type="button" @click="addIcValidationPeriod">+ 新增一段期間</button>
         <button type="button" :disabled="icValidationStarting" @click="runIcValidationNow">
           {{ icValidationStarting ? '送出中...' : '開始驗證' }}
         </button>
@@ -923,44 +955,49 @@ const icValidationRows = computed(function () {
           <span class="signal-badge" :style="{ color: jobStatusColor(icValidationJobStatusLabel) }">{{ icValidationJobStatusLabel }}</span>
         </div>
         <div class="hint">
-          <template v-if="icValidationJob.status === 'running'">還在驗證中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+          <template v-if="icValidationJob.status === 'running'">還在驗證中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態（多段期間平行查詢，通常比單段稍慢一些）。</template>
           <template v-else-if="icValidationJob.error">{{ icValidationJob.error }}</template>
-          <template v-else-if="icValidationJob.result && icValidationJob.result.warning">{{ icValidationJob.result.warning }}</template>
         </div>
       </div>
 
+      <template v-if="icValidationPeriodWarnings.length">
+        <p v-for="w in icValidationPeriodWarnings" :key="w.startDate + '_' + w.endDate" class="error-box">
+          {{ w.startDate }} ~ {{ w.endDate }}：{{ w.warning }}
+        </p>
+      </template>
+
       <template v-if="icValidationRows.length">
-        <h3 style="margin-top:16px;">驗證結果（依「是否顯著」「|平均IC|」排序）</h3>
+        <h3 style="margin-top:16px;">跨期驗證結果（依「是否穩健」「顯著期數」「跨期方向一致性」排序）</h3>
         <div class="table-wrap">
           <table class="history-table">
             <thead>
               <tr>
-                <th>因子／身份別</th><th>天期</th><th>平均 IC</th><th>t-stat</th>
-                <th>顯著？</th><th>跨區段方向一致性</th><th>區段數</th><th>有效天數</th>
+                <th>因子／身份別</th><th>天期</th><th>穩健？</th><th>已測期數</th>
+                <th>顯著期數</th><th>跨期方向一致性</th><th>各期平均 IC</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="row in icValidationRows" :key="row.factorKey + '_' + row.horizon">
                 <td>{{ row.displayName }}</td>
                 <td>{{ row.horizon }}</td>
-                <td>{{ formatIc(row.meanIc) }}</td>
-                <td>{{ row.tStat === null ? '-' : formatIc(row.tStat) }}</td>
-                <td :style="{ color: row.significant ? 'var(--green)' : 'var(--text)' }">
-                  {{ row.significant === null ? '-' : (row.significant ? '是' : '否') }}
+                <td :style="{ color: row.robust ? 'var(--green)' : 'var(--text)' }">
+                  {{ row.robust ? '是' : '否' }}
                 </td>
-                <td>{{ formatPct01(row.signConsistency) }}</td>
-                <td>{{ row.foldCount }}</td>
-                <td>{{ row.n }}</td>
+                <td>{{ row.periodsTested }}</td>
+                <td>{{ row.periodsSignificant }} / {{ row.periodsTested }}</td>
+                <td>{{ formatPct01(row.crossPeriodConsistency) }}</td>
+                <td>{{ row.periodIcList }}</td>
               </tr>
             </tbody>
           </table>
         </div>
         <p class="hint">
-          「顯著」是 |t-stat| ≥ 2 的粗略經驗法則判定，不是精確 p-value；
-          「跨區段方向一致性」越接近 100% 代表每個不重疊區段都指向同一個
-          方向，越接近 50% 代表正負區段互相抵消、平均值不可信。兩者都要
-          一起看，只看平均 IC 數字好看是不夠的——見
-          <code>PROBLEM_ARCHITECTURE.md</code> 的 G2。
+          「穩健」要求每一段獨立期間都顯著、而且每一段都是同方向
+          （跨期方向一致性 100%）才算——這是這個 session 一路用來判斷
+          「這個訊號到底站不站得住腳」的標準（見
+          <code>PROBLEM_ARCHITECTURE.md</code> 的 G5），不是某一期看起來
+          漂亮就採信。「顯著」本身是單一期間內 |t-stat| ≥ 2 的粗略經驗
+          法則判定，不是精確 p-value。
         </p>
       </template>
     </div>

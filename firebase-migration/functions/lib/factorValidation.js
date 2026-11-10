@@ -241,6 +241,73 @@ function runIcValidationBatch_(rows, factorFields, horizons, foldSizeDays, minSa
   return report;
 }
 
+/**
+ * 「深度命題」第四層：跨「完全獨立的期間」彙總——不是 `walkForwardIcReport_`
+ * 那種「同一段歷史裡切出來的不重疊 fold」，是使用者各自重新選日期區間、
+ * 各自重新抓一次 BigQuery 歷史、各自獨立跑一次完整驗證管線之後的結果。
+ *
+ * 2026-11-10 新增的真正理由：這個 session 手動跑了四次獨立期間的驗證，
+ * 前三次「連續買超天數（外資／合計）在 5 天 horizon 全部顯著、同方向」，
+ * 一度被判斷成「唯一撐過驗證的發現」；第四次直接打回接近 0、不顯著——
+ * 問題不是這個因子沒用，是「手動跑幾次、在對話裡靠人工記憶比對」這件事
+ * 本身不可靠，容易因為樣本不夠多就下結論，也容易中途漏看、記錯前幾次
+ * 的數字。這支函式把「這個因子跨幾個獨立期間一致不一致」變成系統自動
+ * 算出來的數字，不是靠人工在聊天記錄裡回頭翻。
+ *
+ * periodReports：`runIcValidationBatch_` 回傳值的陣列，每個元素對應一段
+ * 完全獨立期間各自跑出來的 `{ [因子]: { h5: {...}, h10: {...} } }`。
+ *
+ * 回傳 `{ [因子]: { h5: { periods: [...], periodsTested, periodsSignificant,
+ * crossPeriodConsistency, robust }, ... } }`：
+ * - `periods`：每一段期間的 `{ periodIndex, meanIc, significant, n }`，
+ *   保留原始數字，不是只給結論——使用者可以自己攤開看每一期實際多少，
+ *   不用只相信一個聚合後的判定。
+ * - `periodsTested`：有算出數字（`meanIc` 不是 null）的期數。
+ * - `periodsSignificant`：這幾期裡 `significant===true` 的期數。
+ * - `crossPeriodConsistency`：跟多數期數同方向（正/負）的比例，0~1——
+ *   概念上跟 `walkForwardIcReport_.signConsistency` 一樣，只是這次是跨
+ *   「獨立期間」而不是跨「同一期間裡的 fold」，是更嚴格的穩定性檢定。
+ * - `robust`：每一期都顯著、而且每一期都同方向（`crossPeriodConsistency
+ *   === 1`）才是 `true`——這是這個 session 一路手動判斷「這個訊號到底
+ *   站不站得住腳」用的標準，現在直接變成系統算出來的布林值。
+ */
+function aggregateAcrossPeriods_(periodReports) {
+  var agg = {};
+  periodReports.forEach(function (report, periodIndex) {
+    Object.keys(report).forEach(function (factorField) {
+      if (!agg[factorField]) agg[factorField] = {};
+      Object.keys(report[factorField]).forEach(function (hKey) {
+        if (!agg[factorField][hKey]) agg[factorField][hKey] = { periods: [] };
+        var r = report[factorField][hKey];
+        agg[factorField][hKey].periods.push({
+          periodIndex: periodIndex,
+          meanIc: r.overall.meanIc,
+          significant: r.overall.significant,
+          n: r.overall.n
+        });
+      });
+    });
+  });
+
+  Object.keys(agg).forEach(function (factorField) {
+    Object.keys(agg[factorField]).forEach(function (hKey) {
+      var entry = agg[factorField][hKey];
+      var withData = entry.periods.filter(function (p) { return p.meanIc !== null && p.meanIc !== undefined; });
+      var positiveCount = withData.filter(function (p) { return p.meanIc > 0; }).length;
+      var negativeCount = withData.filter(function (p) { return p.meanIc < 0; }).length;
+      var dominantCount = Math.max(positiveCount, negativeCount);
+      var significantCount = withData.filter(function (p) { return p.significant === true; }).length;
+
+      entry.periodsTested = withData.length;
+      entry.periodsSignificant = significantCount;
+      entry.crossPeriodConsistency = withData.length ? dominantCount / withData.length : null;
+      entry.robust = withData.length > 0 && significantCount === withData.length && entry.crossPeriodConsistency === 1;
+    });
+  });
+
+  return agg;
+}
+
 module.exports = {
   MIN_DAILY_SAMPLE_SIZE_: MIN_DAILY_SAMPLE_SIZE_,
   computeForwardReturns_: computeForwardReturns_,
@@ -251,5 +318,6 @@ module.exports = {
   splitWalkForwardFolds_: splitWalkForwardFolds_,
   walkForwardIcReport_: walkForwardIcReport_,
   attachForwardReturns_: attachForwardReturns_,
-  runIcValidationBatch_: runIcValidationBatch_
+  runIcValidationBatch_: runIcValidationBatch_,
+  aggregateAcrossPeriods_: aggregateAcrossPeriods_
 };

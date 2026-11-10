@@ -241,4 +241,107 @@ function dateStrAt(baseIdx) {
   console.log('Test runIcValidationBatch_ (end-to-end: perfectly-separated factor yields IC=1 across horizons and folds) passed.');
 }
 
+// --- aggregateAcrossPeriods_：用這個 session 實際跑過的四期資料重建測試 ---
+{
+  // 幫手：組一個單一期間的 report 物件（跟 runIcValidationBatch_ 回傳的
+  // 形狀一致），只填測試會用到的 overall 欄位，folds/foldCount/signConsistency
+  // 留空陣列/null 即可（aggregateAcrossPeriods_ 不會去讀那幾個欄位）。
+  function buildReport(entries) {
+    const report = {};
+    Object.keys(entries).forEach(function (factorField) {
+      report[factorField] = {};
+      Object.keys(entries[factorField]).forEach(function (hKey) {
+        report[factorField][hKey] = { overall: entries[factorField][hKey], folds: [], foldCount: 0, signConsistency: null };
+      });
+    });
+    return report;
+  }
+
+  // Flow_Streak_foreign/h5：這個 session 實測過的真實模式——前三期全部顯著
+  // 正向，第四期掉到幾乎是 0、不顯著。IBF_20D_trust/h20：另一個真實模式
+  // ——四期全部同方向（正），但第一期沒有達到顯著。
+  const period1 = buildReport({
+    Flow_Streak_foreign: { h5: { meanIc: 0.048, significant: true, n: 50 } },
+    IBF_20D_trust: { h20: { meanIc: 0.024, significant: false, n: 24 } }
+  });
+  const period2 = buildReport({
+    Flow_Streak_foreign: { h5: { meanIc: 0.030, significant: true, n: 56 } },
+    IBF_20D_trust: { h20: { meanIc: 0.139, significant: true, n: 41 } }
+  });
+  const period3 = buildReport({
+    Flow_Streak_foreign: { h5: { meanIc: 0.030, significant: true, n: 50 } },
+    IBF_20D_trust: { h20: { meanIc: 0.027, significant: true, n: 35 } }
+  });
+  const period4 = buildReport({
+    Flow_Streak_foreign: { h5: { meanIc: 0.001, significant: false, n: 55 } },
+    IBF_20D_trust: { h20: { meanIc: 0.076, significant: true, n: 40 } }
+  });
+
+  const agg = fv.aggregateAcrossPeriods_([period1, period2, period3, period4]);
+
+  const streak = agg.Flow_Streak_foreign.h5;
+  assert.strictEqual(streak.periodsTested, 4);
+  assert.strictEqual(streak.periodsSignificant, 3, '第四期不顯著，4 期裡只有 3 期顯著');
+  assert.strictEqual(streak.crossPeriodConsistency, 1, '4 期全部正向，方向一致性應該是 1（即使第四期不顯著，符號還是正的）');
+  assert.strictEqual(streak.robust, false, '不是每一期都顯著（3/4），不該判定為 robust，即使方向一致性是滿分');
+  assert.strictEqual(streak.periods.length, 4);
+  assert.ok(approxEqual(streak.periods[3].meanIc, 0.001), '原始逐期數字要完整保留，不是只有聚合後的結論');
+
+  const trust = agg.IBF_20D_trust.h20;
+  assert.strictEqual(trust.periodsTested, 4);
+  assert.strictEqual(trust.periodsSignificant, 3, '第一期不顯著');
+  assert.strictEqual(trust.crossPeriodConsistency, 1, '4 期全部正向');
+  assert.strictEqual(trust.robust, false, '同樣因為不是每期都顯著，不該判定為 robust');
+
+  console.log('Test aggregateAcrossPeriods_ (reconstructs this session\'s real 4-period pattern: direction-consistent but not every period significant -> not robust) passed.');
+}
+
+// --- aggregateAcrossPeriods_：完全 robust 的情況，跟缺資料（null）期間的排除 ---
+{
+  function buildReport(entries) {
+    const report = {};
+    Object.keys(entries).forEach(function (factorField) {
+      report[factorField] = {};
+      Object.keys(entries[factorField]).forEach(function (hKey) {
+        report[factorField][hKey] = { overall: entries[factorField][hKey], folds: [], foldCount: 0, signConsistency: null };
+      });
+    });
+    return report;
+  }
+
+  // 3 期全部顯著、全部正向 -> robust 應該是 true。
+  const allRobust = fv.aggregateAcrossPeriods_([
+    buildReport({ F: { h5: { meanIc: 0.05, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: 0.06, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: 0.04, significant: true, n: 40 } } })
+  ]);
+  assert.strictEqual(allRobust.F.h5.robust, true);
+  assert.strictEqual(allRobust.F.h5.crossPeriodConsistency, 1);
+
+  // 正負各半 -> 方向一致性應該是 0.5，不該是 robust。
+  const mixedSign = fv.aggregateAcrossPeriods_([
+    buildReport({ F: { h5: { meanIc: 0.05, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: -0.05, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: 0.04, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: -0.04, significant: true, n: 40 } } })
+  ]);
+  assert.strictEqual(mixedSign.F.h5.crossPeriodConsistency, 0.5, '正負各半，方向一致性應該是 0.5');
+  assert.strictEqual(mixedSign.F.h5.robust, false);
+
+  // 某一期完全沒有算出數字（meanIc 是 null，例如那段期間資料不足）——
+  // 這期要從 periodsTested 的分母排除，不是當成「不顯著」的一期去扣分
+  // （資料不足跟「有資料但沒驗證出訊號」是兩件不一樣的事）。
+  const withMissingPeriod = fv.aggregateAcrossPeriods_([
+    buildReport({ F: { h5: { meanIc: 0.05, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: null, significant: null, n: 0 } } }),
+    buildReport({ F: { h5: { meanIc: 0.06, significant: true, n: 40 } } })
+  ]);
+  assert.strictEqual(withMissingPeriod.F.h5.periodsTested, 2, '缺資料的那一期不該算進分母');
+  assert.strictEqual(withMissingPeriod.F.h5.periodsSignificant, 2);
+  assert.strictEqual(withMissingPeriod.F.h5.robust, true, '扣掉缺資料那期，剩下 2 期都顯著同向，應該還是 robust');
+  assert.strictEqual(withMissingPeriod.F.h5.periods.length, 3, '但原始 periods 陣列要保留全部 3 筆（含缺資料那期），不隱藏掉');
+
+  console.log('Test aggregateAcrossPeriods_ (fully robust case, mixed-sign 50% consistency, missing-data period excluded from denominator but kept in raw periods list) passed.');
+}
+
 console.log('All factorValidation.js tests passed.');

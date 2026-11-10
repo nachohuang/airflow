@@ -1006,10 +1006,10 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function
 
 /**
  * 「深度命題」第三層（見 PROBLEM_ARCHITECTURE.md）：IC／walk-forward
- * 驗證管線的 I/O 外殼——讀 BigQuery 歷史（跟回測同一套 loadStartStr
- * 暖機邏輯，20 天 rolling 因子要有足夠的暖機資料才不會整段都是 0/null），
- * 算出依身份別拆開的法人資金流向因子（lib/flowFactors.js），再丟進
- * lib/factorValidation.js 的驗證管線算 IC。
+ * 驗證管線的 I/O 外殼，對**單一一段期間**——讀 BigQuery 歷史（跟回測
+ * 同一套 loadStartStr 暖機邏輯，20 天 rolling 因子要有足夠的暖機資料才
+ * 不會整段都是 0/null），算出依身份別拆開的法人資金流向因子
+ * （lib/flowFactors.js），再丟進 lib/factorValidation.js 的驗證管線算 IC。
  *
  * 跟 `loadBacktestFactorRows_` 不同：這裡不需要抓 `endStr` 之後的
  * 「追蹤緩衝」資料（回測要追蹤訊號出現後的實際報酬，這裡不模擬交易，
@@ -1018,14 +1018,14 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function
  * 呼叫端從回傳的 `report[因子][horizon].overall.n` 可以看出每個 horizon
  * 實際有多少天進了統計。
  */
-async function runFactorIcValidationCore_(bigQueryConfig, startStr, endStr, horizons, foldSizeDays) {
+async function runFactorIcValidationForPeriod_(bigQueryConfig, startStr, endStr, horizons, foldSizeDays, factorFields) {
   const warmupStart = new Date(startStr + 'T00:00:00');
   warmupStart.setDate(warmupStart.getDate() - config.ANALYSIS_LOOKBACK_DAYS);
   const loadStartStr = utilsLib.normalizeDateStr(warmupStart);
 
   const rawRows = await fetchHistoryRangeRows_(bigQueryConfig, loadStartStr, endStr);
   if (rawRows.length === 0) {
-    return { warning: '這段區間（含暖機）完全沒有查到任何 History 資料：' + loadStartStr + ' ~ ' + endStr };
+    return { startDate: startStr, endDate: endStr, warning: '這段區間（含暖機）完全沒有查到任何 History 資料：' + loadStartStr + ' ~ ' + endStr };
   }
 
   const flowRows = flowFactorsLib.computeFlowPersistenceFactors_(rawRows);
@@ -1036,9 +1036,33 @@ async function runFactorIcValidationCore_(bigQueryConfig, startStr, endStr, hori
     return d >= startStr && d <= endStr;
   });
   if (scopedRows.length === 0) {
-    return { warning: '要求的區間（不含暖機）沒有任何 History 資料：' + startStr + ' ~ ' + endStr };
+    return { startDate: startStr, endDate: endStr, warning: '要求的區間（不含暖機）沒有任何 History 資料：' + startStr + ' ~ ' + endStr };
   }
 
+  const report = factorValidationLib.runIcValidationBatch_(
+    scopedRows, factorFields, horizons, foldSizeDays, factorValidationLib.MIN_DAILY_SAMPLE_SIZE_
+  );
+  return { startDate: startStr, endDate: endStr, report: report };
+}
+
+/**
+ * 「深度命題」第四層：對**多段完全獨立的期間**分別跑
+ * `runFactorIcValidationForPeriod_`（平行跑，不是依序——每段期間各自
+ * 獨立抓 BigQuery／算因子，互不依賴，平行執行只是縮短總等待時間，不影響
+ * 正確性；跟 CPU 配額那個問題不是同一回事，那個是 Cloud Functions 部署
+ * 時搶 Cloud Run revision 配額，這裡是同一支已經在執行的函式內部平行發
+ * BigQuery 查詢，不會觸發那個問題），再用
+ * `factorValidationLib.aggregateAcrossPeriods_` 把每段期間各自的結果
+ * 彙總成「這個因子跨幾段獨立期間一致不一致」的報告——見
+ * `aggregateAcrossPeriods_` 開頭的說明，這是為了取代「手動跑幾次、在
+ * 對話裡靠人工記憶比對」這件不可靠的事。
+ *
+ * 只有真的跑出 `report`（沒有 `warning`）的期間才會送進
+ * `aggregateAcrossPeriods_`——缺資料的期間不該假裝有數字進去污染彙總
+ * 結果，但完整的 `periods` 陣列（含警告）還是會原樣回傳，使用者看得到
+ * 哪幾段期間資料不足。
+ */
+async function runFactorIcValidationMultiCore_(bigQueryConfig, periods, horizons, foldSizeDays) {
   const factorFields = [];
   flowFactorsLib.INSTITUTIONAL_TYPES.forEach(function (type) {
     factorFields.push('IBF_20D_' + type.key);
@@ -1046,23 +1070,29 @@ async function runFactorIcValidationCore_(bigQueryConfig, startStr, endStr, hori
     factorFields.push('Flow_EWMA_' + type.key);
   });
 
-  const report = factorValidationLib.runIcValidationBatch_(
-    scopedRows, factorFields, horizons, foldSizeDays, factorValidationLib.MIN_DAILY_SAMPLE_SIZE_
-  );
+  const periodResults = await Promise.all(periods.map(function (p) {
+    return runFactorIcValidationForPeriod_(bigQueryConfig, p.startDate, p.endDate, horizons, foldSizeDays, factorFields);
+  }));
+
+  const reportsOnly = periodResults.filter(function (p) { return p.report; }).map(function (p) { return p.report; });
+  const aggregated = reportsOnly.length ? factorValidationLib.aggregateAcrossPeriods_(reportsOnly) : {};
+
   return {
-    startDate: startStr, endDate: endStr, horizons: horizons, foldSizeDays: foldSizeDays,
-    candidateFactors: factorFields, report: report
+    periods: periodResults, horizons: horizons, foldSizeDays: foldSizeDays,
+    candidateFactors: factorFields, periodsWithData: reportsOnly.length, aggregated: aggregated
   };
 }
 
 var DEFAULT_IC_VALIDATION_HORIZONS_ = [5, 10, 20];
 var DEFAULT_IC_VALIDATION_FOLD_SIZE_DAYS_ = 20; // ~1 個月交易日，見 PROBLEM_ARCHITECTURE.md／README 的說明
+var IC_VALIDATION_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '2GiB', timeoutSeconds: 900 }); // 多段期間平行查 BigQuery，比單段回測需要更寬裕的時間預算
 
-exports.runFactorIcValidation = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
+exports.runFactorIcValidation = onCall(IC_VALIDATION_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
-  if (!data.startDate || !data.endDate) {
-    throw new HttpsError('invalid-argument', '請提供 startDate／endDate（yyyy-MM-dd）。');
+  const periods = Array.isArray(data.periods) ? data.periods : [];
+  if (periods.length === 0 || periods.some(function (p) { return !p || !p.startDate || !p.endDate; })) {
+    throw new HttpsError('invalid-argument', '請至少提供一段期間，每段都要有 startDate／endDate（yyyy-MM-dd）。');
   }
   const horizons = Array.isArray(data.horizons) && data.horizons.length ? data.horizons : DEFAULT_IC_VALIDATION_HORIZONS_;
   const foldSizeDays = data.foldSizeDays || DEFAULT_IC_VALIDATION_FOLD_SIZE_DAYS_;
@@ -1070,7 +1100,7 @@ exports.runFactorIcValidation = onCall(BACKTEST_RUNTIME_OPTS_, async function (r
   const startTime = Date.now();
   await writeJobStatus_('factorIcValidation', {
     status: 'running', startedAt: startTime,
-    params: { startDate: data.startDate, endDate: data.endDate, horizons: horizons, foldSizeDays: foldSizeDays },
+    params: { periods: periods, horizons: horizons, foldSizeDays: foldSizeDays },
     error: null
   });
   try {
@@ -1078,10 +1108,10 @@ exports.runFactorIcValidation = onCall(BACKTEST_RUNTIME_OPTS_, async function (r
     if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
       throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
     }
-    const result = await runFactorIcValidationCore_(appConfig.bigQuery, data.startDate, data.endDate, horizons, foldSizeDays);
+    const result = await runFactorIcValidationMultiCore_(appConfig.bigQuery, periods, horizons, foldSizeDays);
     const durationMs = Date.now() - startTime;
-    const summaryMsg = result.warning ||
-      (data.startDate + '~' + data.endDate + '　' + Object.keys(result.report || {}).length + ' 個因子');
+    const summaryMsg = periods.length + ' 段期間（' + result.periodsWithData + ' 段有資料）、' +
+      Object.keys(result.aggregated).length + ' 個因子';
     await logRun_('IC驗證', '成功', summaryMsg, durationMs);
     await writeJobStatus_('factorIcValidation', { status: 'succeeded', finishedAt: Date.now(), result: result, error: null });
     return result;
