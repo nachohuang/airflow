@@ -1,5 +1,6 @@
 const assert = require('assert');
 const flowFactors = require('../lib/flowFactors');
+const utils = require('../lib/utils');
 
 function approxEqual(a, b, eps) {
   eps = eps || 1e-6;
@@ -11,6 +12,37 @@ function dateStrAt(baseIdx) {
   const d = new Date(start);
   d.setDate(d.getDate() + baseIdx);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+// --- utils.ewma／ewmaAlphaFromHalfLife ---
+{
+  // 半衰期 1 天 -> alpha 剛好是 0.5（經典的「每一步權重減半」）。
+  assert.ok(approxEqual(utils.ewmaAlphaFromHalfLife(1), 0.5), utils.ewmaAlphaFromHalfLife(1));
+
+  // alpha=0.5、第一筆是 1、之後全部是 0：經典的指數減半序列
+  // 1, 0.5, 0.25, 0.125, 0.0625——手算驗證遞迴公式本身對不對。
+  const decay = utils.ewma([1, 0, 0, 0, 0], 0.5);
+  assert.ok(approxEqual(decay[0], 1), decay[0]);
+  assert.ok(approxEqual(decay[1], 0.5), decay[1]);
+  assert.ok(approxEqual(decay[2], 0.25), decay[2]);
+  assert.ok(approxEqual(decay[3], 0.125), decay[3]);
+  assert.ok(approxEqual(decay[4], 0.0625), decay[4]);
+
+  // 中間缺值（null）：那一筆本身是 null，但不會讓後面的累積從頭開始——
+  // 下一筆有值時要接著「上一個有效值」繼續衰減，不是當成中斷重新起算。
+  const withGap = utils.ewma([1, null, 0], 0.5);
+  assert.strictEqual(withGap[0], 1);
+  assert.strictEqual(withGap[1], null, '缺值那一筆本身要是 null');
+  assert.ok(approxEqual(withGap[2], 0.5), '缺值不中斷累積，第 3 筆要接著第 1 筆的值繼續衰減：0.5*0+0.5*1=0.5');
+
+  // 開頭就是缺值：要等到第一個有效值出現才開始累積，不是把 null 當成 0 參與計算。
+  const leadingGap = utils.ewma([null, null, 1, 0], 0.5);
+  assert.strictEqual(leadingGap[0], null);
+  assert.strictEqual(leadingGap[1], null);
+  assert.ok(approxEqual(leadingGap[2], 1), '第一個有效值直接當初始值，不是 0.5*1+0.5*0');
+  assert.ok(approxEqual(leadingGap[3], 0.5));
+
+  console.log('Test utils.ewma / ewmaAlphaFromHalfLife (geometric decay, half-life derivation, null handling without resetting accumulation) passed.');
 }
 
 // --- computeFlowPersistenceFactors_：21 天精心設計的資料，逐欄位手算驗證 ---
@@ -49,17 +81,31 @@ function dateStrAt(baseIdx) {
 
   assert.ok(approxEqual(last.IBF_20D_foreign, 1.0), 'foreign: ' + last.IBF_20D_foreign);
   assert.strictEqual(last.Flow_Streak_foreign, 21, '外資每天都買超，第 20 天（第 21 筆）應該連續 21 天');
+  assert.ok(approxEqual(last.Flow_EWMA_foreign, 1.0), '外資每天都買超（buyTag 全部是 1），EWMA 應該收斂到精確的 1.0');
 
   assert.ok(approxEqual(last.IBF_20D_trust, 0), 'trust: ' + last.IBF_20D_trust);
   assert.strictEqual(last.Flow_Streak_trust, 0, '投信從來沒買超過，streak 應該一直是 0');
+  assert.ok(approxEqual(last.Flow_EWMA_trust, 0), '投信從來沒買超過（buyTag 全部是 0），EWMA 應該一直是精確的 0');
 
   assert.ok(approxEqual(last.IBF_20D_dealer, 0.5), 'dealer: ' + last.IBF_20D_dealer);
   assert.strictEqual(last.Flow_Streak_dealer, 0, '第 20 天自營商是賣超日，streak 應該是 0');
+  // 自營商的買超天數不連續（中間都夾著賣超日），EWMA 應該跟獨立用 utils.ewma
+  // 對同一組 buyTag 直接算出來的結果完全一致——跟 Flow_Streak 不同，EWMA 在
+  // 賣超日不會歸零，應該是一個介於 0~1 之間、隨最近幾天衰減的正數，不是 0。
+  const dealerBuyTag = [];
+  for (let i = 0; i <= 20; i++) {
+    const isDropDay = (i >= 2 && i % 2 === 0);
+    dealerBuyTag.push((isDropDay && i % 4 === 2) ? 1 : 0);
+  }
+  const expectedDealerEwma = utils.ewma(dealerBuyTag, utils.ewmaAlphaFromHalfLife(5));
+  assert.ok(approxEqual(last.Flow_EWMA_dealer, expectedDealerEwma[20]), 'dealer EWMA: ' + last.Flow_EWMA_dealer + ' vs ' + expectedDealerEwma[20]);
+  assert.ok(last.Flow_EWMA_dealer > 0, 'EWMA 在賣超日不該像 Flow_Streak 一樣歸零，應該是殘留的正數');
 
   assert.ok(approxEqual(last.IBF_20D_combined, last.IBF_20D_dealer), '外資+投信互相抵銷，合計版 IBF 應該等於自營商那一份');
   assert.strictEqual(last.Flow_Streak_combined, last.Flow_Streak_dealer, '合計版 streak 同理應該等於自營商那一份');
+  assert.ok(approxEqual(last.Flow_EWMA_combined, last.Flow_EWMA_dealer), '合計版 EWMA 同理應該等於自營商那一份');
 
-  console.log('Test computeFlowPersistenceFactors_ (IBF_20D/Flow_Streak per institutional type, combined = sum of three types) passed.');
+  console.log('Test computeFlowPersistenceFactors_ (IBF_20D/Flow_Streak/Flow_EWMA per institutional type, combined = sum of three types) passed.');
 }
 
 // --- 視窗不滿 20 天（dropCount20 是 null）跟「視窗滿了但剛好 0 個下跌日」要同樣是 0，不是 null/NaN ---

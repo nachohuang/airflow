@@ -14,7 +14,14 @@
  * production 的即時計算路徑（跟 computeFactors_ 不是同一回事，驗證通過
  * 之前不會動到任何正式戰報/回測邏輯）。
  *
- * 新增時機：2026-11-09。
+ * 新增時機：2026-11-09。2026-11-10 補上 `Flow_EWMA_{key}`——三期 IC
+ * 驗證下來，`Flow_Streak`（外資／合計）在 5 天 horizon 是唯一三期都顯著、
+ * 同方向的訊號，但「連續天數」是遇到任何一天不符合條件就整個歸零的硬
+ * 計數，跟「動量應該隨時間自然淡化」的實證結果（訊號大約 5 天就衰退，
+ * 不是忽然消失）不一致。`Flow_EWMA_{key}` 用指數加權移動平均（見
+ * `lib/utils.js ewma`）取代硬重置，半衰期設定成已驗證的 5 個交易日
+ * ——這是「廣度命題」借統計製程管制（SPC）/流行病監測常用的 EWMA／
+ * CUSUM 概念重新設計這個因子，見 PROBLEM_ARCHITECTURE.md 的完整討論。
  */
 var utils = require('./utils');
 var zfill4 = utils.zfill4;
@@ -24,7 +31,14 @@ var sortRows = utils.sortRows;
 var normalizeDateStr = utils.normalizeDateStr;
 var pctChange = utils.pctChange;
 var rollingSum = utils.rollingSum;
+var ewma = utils.ewma;
 var computeStreak_ = require('./factorScan').computeStreak_;
+
+/** `Flow_EWMA_{key}` 的半衰期：5 個交易日，直接取三期 IC 驗證裡唯一
+ *  穩定顯著的 horizon（Flow_Streak 外資／合計在 5 天三期都顯著），不是
+ *  隨便挑的數字——如果之後驗證出不同的穩定 horizon，這裡要跟著改。 */
+var FLOW_EWMA_HALF_LIFE_DAYS_ = 5;
+var FLOW_EWMA_ALPHA_ = utils.ewmaAlphaFromHalfLife(FLOW_EWMA_HALF_LIFE_DAYS_);
 
 /**
  * 要拆解的身份別清單。`combined`（投信+外資+自營商加總）當對照組——
@@ -46,9 +60,10 @@ var INSTITUTIONAL_TYPES = [
  * 就地補上每個身份別的 `IBF_20D_{key}`（逢低接手率，沿用
  * analysis.js computeFactors_ 的定義：過去 20 天、下跌日裡這個身份淨買超
  * 的比例，分母是 0 或 null 時整個是 0，不是 null——下跌日數不足的
- * 早期資料不該被當成「缺值」排除在橫斷面比較之外）跟 `Flow_Streak_{key}`
- * （連續買超天數，重用 lib/factorScan.js 既有的 `computeStreak_`），
- * 回傳同一批列（已重新排序過）。
+ * 早期資料不該被當成「缺值」排除在橫斷面比較之外）、`Flow_Streak_{key}`
+ * （連續買超天數，重用 lib/factorScan.js 既有的 `computeStreak_`）跟
+ * `Flow_EWMA_{key}`（買超指數加權移動平均，半衰期 5 個交易日，見上方
+ * `FLOW_EWMA_HALF_LIFE_DAYS_` 的說明），回傳同一批列（已重新排序過）。
  */
 function computeFlowPersistenceFactors_(rows) {
   var numCols = ['收盤價', '成交股數', '投信', '外資', '自營商'];
@@ -84,10 +99,15 @@ function computeFlowPersistenceFactors_(rows) {
 
       var buyTag = netArr.map(function (v) { return v > 0 ? 1 : 0; });
       var streak = computeStreak_(buyTag);
+      // buyTag 全部是 0/1、沒有缺值，ewma 不會遇到 null-跳過 的分支——
+      // 跟 Flow_Streak 的差別只在「不符合條件的那天」怎麼處理：streak
+      // 整個歸零，EWMA 讓影響力隨後續幾天指數衰減，不是瞬間清零。
+      var ewmaBuy = ewma(buyTag, FLOW_EWMA_ALPHA_);
 
       for (var i = 0; i < group.length; i++) {
         group[i]['IBF_20D_' + type.key] = ibf20[i];
         group[i]['Flow_Streak_' + type.key] = streak[i];
+        group[i]['Flow_EWMA_' + type.key] = ewmaBuy[i];
       }
     });
   });

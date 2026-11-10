@@ -1043,6 +1043,7 @@ async function runFactorIcValidationCore_(bigQueryConfig, startStr, endStr, hori
   flowFactorsLib.INSTITUTIONAL_TYPES.forEach(function (type) {
     factorFields.push('IBF_20D_' + type.key);
     factorFields.push('Flow_Streak_' + type.key);
+    factorFields.push('Flow_EWMA_' + type.key);
   });
 
   const report = factorValidationLib.runIcValidationBatch_(

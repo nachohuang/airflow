@@ -367,6 +367,47 @@ function parseDateStrToUtcMs_(s) {
   return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
 }
 
+/**
+ * 指數加權移動平均（EWMA）：`out[i] = alpha*values[i] + (1-alpha)*out[i-1]`
+ * ——越新的值權重越高，`alpha` 介於 0~1，越大衰減越快（越只看最近幾筆）。
+ * 第一筆有效值直接當初始值（不是硬塞 0，避免序列一開始被不存在的「前一筆
+ * 是 0」錯誤拉低/推高）。
+ *
+ * 2026-11-10 新增，「廣度命題」借統計製程管制（SPC）/流行病監測常用的
+ * EWMA／CUSUM 概念：IC 驗證三期資料都顯示法人買超動量訊號大約 5 個交易日
+ * 就會衰退，但 `Flow_Streak`（連續買超天數）是「遇到任何一天不符合條件
+ * 就整個歸零」的硬計數，中間單一一天的雜訊會把前面好幾天的動量全部洗掉，
+ * 跟「動量應該隨時間自然淡化，不是被單一一天一次性歸零」的實證結果不
+ * 一致。EWMA 用指數衰減取代硬重置：某一天不是買超，影響力會隨後續幾天
+ * 持續淡化，不會讓整條累積瞬間清零。
+ *
+ * null／undefined／NaN 的那一天視為「沒有新資訊」，直接沿用上一個有效的
+ * EWMA 值（`out[i]` 還是 null，但下一筆有值時繼續用上一個有效值累積，不是
+ * 從頭開始算）——跟「缺值就讓整個因子失效」的保守假設不同，這裡的立場是
+ * 「這一天沒有觀測到新資訊，不代表舊的估計值作廢」，比較接近 Kalman
+ * filter 處理缺測資料的方式，不是這個檔案其他地方「缺值就 null」的慣例，
+ * 使用端要清楚這個差異再决定要不要用。
+ */
+function ewma(values, alpha) {
+  var out = new Array(values.length).fill(null);
+  var prev = null;
+  for (var i = 0; i < values.length; i++) {
+    var v = values[i];
+    if (isNullish_(v)) { out[i] = null; continue; }
+    prev = (prev === null) ? v : (alpha * v + (1 - alpha) * prev);
+    out[i] = prev;
+  }
+  return out;
+}
+
+/** 由「半衰期」（幾筆之後權重剩一半）反推 EWMA 的 alpha——比直接要求
+ *  呼叫端自己猜一個 0~1 之間的 alpha 數字更直覺：「訊號大概 5 天衰退一半」
+ *  比「alpha 設 0.13」更容易對應到實際驗證出來的結果。公式：
+ *  `alpha = 1 - 0.5^(1/halfLife)`。 */
+function ewmaAlphaFromHalfLife(halfLife) {
+  return 1 - Math.pow(0.5, 1 / halfLife);
+}
+
 module.exports = {
   toNumber: toNumber,
   toNumberOrNull: toNumberOrNull,
@@ -390,6 +431,8 @@ module.exports = {
   pearsonCorrelation: pearsonCorrelation,
   normalizeDateStr: normalizeDateStr,
   daysBetween: daysBetween,
+  ewma: ewma,
+  ewmaAlphaFromHalfLife: ewmaAlphaFromHalfLife,
   todayStrTaipei_: todayStrTaipei_,
   timestampLabelTaipei_: timestampLabelTaipei_,
   timestampSecondsTaipei_: timestampSecondsTaipei_

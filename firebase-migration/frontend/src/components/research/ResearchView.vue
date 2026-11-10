@@ -416,11 +416,11 @@ async function runIcValidationNow() {
 }
 
 const IC_TYPE_LABELS = { foreign: '外資', trust: '投信', dealer: '自營商', combined: '合計' };
-const IC_METRIC_LABELS = { IBF_20D: '逢低接手率', Flow_Streak: '連續買超天數' };
+const IC_METRIC_LABELS = { IBF_20D: '逢低接手率', Flow_Streak: '連續買超天數', Flow_EWMA: '買超動量(EWMA,半衰期5天)' };
 
 /** IBF_20D_foreign 這種原始欄名換成「逢低接手率／外資」比較好讀。 */
 function icFactorDisplayName(factorKey) {
-  const m = factorKey.match(/^(IBF_20D|Flow_Streak)_(foreign|trust|dealer|combined)$/);
+  const m = factorKey.match(/^(IBF_20D|Flow_Streak|Flow_EWMA)_(foreign|trust|dealer|combined)$/);
   if (!m) return factorKey;
   return (IC_METRIC_LABELS[m[1]] || m[1]) + '／' + (IC_TYPE_LABELS[m[2]] || m[2]);
 }
@@ -895,6 +895,15 @@ const icValidationRows = computed(function () {
         天報酬的 Spearman 等級相關係數（IC），再切成多個不重疊區段分別
         統計，不是只看單一視窗的回測勝率。細節跟為什麼要這樣做，見
         專案根目錄的 <code>PROBLEM_ARCHITECTURE.md</code>。
+      </p>
+      <p class="hint">
+        2026-11-10 新增「買超動量(EWMA)」：三期驗證下來，連續買超天數
+        （外資／合計）在 5 天天期是唯一三期都顯著、同方向的訊號，但
+        「連續天數」遇到任何一天不符合條件就整個歸零，跟「動量應該隨
+        時間自然淡化、不是被單一一天一次性清零」的實證結果不一致。這個
+        新因子用指數加權移動平均（半衰期 5 個交易日，對應已驗證的
+        horizon）取代硬計數，同一次驗證會自動列出來，可以直接跟
+        「連續買超天數」那幾列比較，看指數衰減版本是不是訊號更強／更穩定。
       </p>
       <div class="schedule-time-inputs">
         <input v-model="icValidationForm.startDate" type="date" required>
