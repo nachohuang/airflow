@@ -446,6 +446,20 @@ function formatPct01(v) {
   return Math.round(v * 100) + '%';
 }
 
+/** 「穩健」／「潛力」／空字串三層標籤（對應後端 robust／promising 兩個
+ *  互斥的布林欄位），跟對應的顏色——有自己顏色的只有這兩層，其他列
+ *  維持本文預設色，不特別強調。 */
+function tierLabel(row) {
+  if (row.robust) return '穩健';
+  if (row.promising) return '潛力';
+  return '-';
+}
+function tierColor(row) {
+  if (row.robust) return 'var(--green)';
+  if (row.promising) return 'var(--amber)';
+  return 'var(--text)';
+}
+
 /** 哪幾段期間送出去查詢時完全沒有資料（因為資料源本身查不到，不是因子
  *  沒訊號）——跟「每個因子的驗證結果」分開顯示，不要混在同一張表裡。 */
 const icValidationPeriodWarnings = computed(function () {
@@ -477,13 +491,18 @@ const icValidationRows = computed(function () {
         periodsSignificant: entry.periodsSignificant,
         crossPeriodConsistency: entry.crossPeriodConsistency,
         robust: entry.robust,
+        promising: entry.promising,
         periodIcList: meanIcs.map(formatIc).join('、')
       });
     });
   });
+  // 排序：robust 最前面，再來 promising，同一層級內再依顯著期數、跨期
+  // 方向一致性排序——tierRank 把兩個布林欄位併成一個排序鍵，不用另外
+  // 判斷兩次。
+  function tierRank(row) { return row.robust ? 2 : (row.promising ? 1 : 0); }
   rows.sort(function (a, b) {
-    const ra = a.robust ? 1 : 0, rb = b.robust ? 1 : 0;
-    if (ra !== rb) return rb - ra;
+    const ta = tierRank(a), tb = tierRank(b);
+    if (ta !== tb) return tb - ta;
     if (a.periodsSignificant !== b.periodsSignificant) return b.periodsSignificant - a.periodsSignificant;
     return (b.crossPeriodConsistency || 0) - (a.crossPeriodConsistency || 0);
   });
@@ -967,12 +986,12 @@ const icValidationRows = computed(function () {
       </template>
 
       <template v-if="icValidationRows.length">
-        <h3 style="margin-top:16px;">跨期驗證結果（依「是否穩健」「顯著期數」「跨期方向一致性」排序）</h3>
+        <h3 style="margin-top:16px;">跨期驗證結果（依「穩健/潛力」「顯著期數」「跨期方向一致性」排序）</h3>
         <div class="table-wrap">
           <table class="history-table">
             <thead>
               <tr>
-                <th>因子／身份別</th><th>天期</th><th>穩健？</th><th>已測期數</th>
+                <th>因子／身份別</th><th>天期</th><th>等級</th><th>已測期數</th>
                 <th>顯著期數</th><th>跨期方向一致性</th><th>各期平均 IC</th>
               </tr>
             </thead>
@@ -980,9 +999,7 @@ const icValidationRows = computed(function () {
               <tr v-for="row in icValidationRows" :key="row.factorKey + '_' + row.horizon">
                 <td>{{ row.displayName }}</td>
                 <td>{{ row.horizon }}</td>
-                <td :style="{ color: row.robust ? 'var(--green)' : 'var(--text)' }">
-                  {{ row.robust ? '是' : '否' }}
-                </td>
+                <td :style="{ color: tierColor(row) }">{{ tierLabel(row) }}</td>
                 <td>{{ row.periodsTested }}</td>
                 <td>{{ row.periodsSignificant }} / {{ row.periodsTested }}</td>
                 <td>{{ formatPct01(row.crossPeriodConsistency) }}</td>
@@ -992,12 +1009,17 @@ const icValidationRows = computed(function () {
           </table>
         </div>
         <p class="hint">
-          「穩健」要求每一段獨立期間都顯著、而且每一段都是同方向
-          （跨期方向一致性 100%）才算——這是這個 session 一路用來判斷
+          <strong>穩健</strong>要求每一段獨立期間都顯著、而且每一段都是
+          同方向（跨期方向一致性 100%）——這是這個 session 一路用來判斷
           「這個訊號到底站不站得住腳」的標準（見
           <code>PROBLEM_ARCHITECTURE.md</code> 的 G5），不是某一期看起來
-          漂亮就採信。「顯著」本身是單一期間內 |t-stat| ≥ 2 的粗略經驗
-          法則判定，不是精確 p-value。
+          漂亮就採信。<strong>潛力</strong>是 2026-11-10 新增的中間層級：
+          方向 100% 一致（從未反轉），但容許最多 1 期沒有達到顯著——
+          daily IC 本來就有雜訊，一個真實存在的效應也可能剛好某一期效果
+          量太小沒跨過門檻，不代表方向錯了；跟完全沒方向性、顯著期數也
+          稀少的列區分開，不要被埋沒在同一個「普通」裡。兩層都至少要測過
+          2 段獨立期間才會成立，只測 1 期不算驗證過。「顯著」本身是單一
+          期間內 |t-stat| ≥ 2 的粗略經驗法則判定，不是精確 p-value。
         </p>
       </template>
     </div>

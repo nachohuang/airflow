@@ -258,7 +258,7 @@ function runIcValidationBatch_(rows, factorFields, horizons, foldSizeDays, minSa
  * 完全獨立期間各自跑出來的 `{ [因子]: { h5: {...}, h10: {...} } }`。
  *
  * 回傳 `{ [因子]: { h5: { periods: [...], periodsTested, periodsSignificant,
- * crossPeriodConsistency, robust }, ... } }`：
+ * crossPeriodConsistency, robust, promising }, ... } }`：
  * - `periods`：每一段期間的 `{ periodIndex, meanIc, significant, n }`，
  *   保留原始數字，不是只給結論——使用者可以自己攤開看每一期實際多少，
  *   不用只相信一個聚合後的判定。
@@ -267,10 +267,21 @@ function runIcValidationBatch_(rows, factorFields, horizons, foldSizeDays, minSa
  * - `crossPeriodConsistency`：跟多數期數同方向（正/負）的比例，0~1——
  *   概念上跟 `walkForwardIcReport_.signConsistency` 一樣，只是這次是跨
  *   「獨立期間」而不是跨「同一期間裡的 fold」，是更嚴格的穩定性檢定。
- * - `robust`：每一期都顯著、而且每一期都同方向（`crossPeriodConsistency
- *   === 1`）才是 `true`——這是這個 session 一路手動判斷「這個訊號到底
- *   站不站得住腳」用的標準，現在直接變成系統算出來的布林值。
+ * - `robust`：測過至少 `MIN_PERIODS_FOR_ROBUSTNESS_` 期、每一期都顯著、
+ *   而且每一期都同方向（`crossPeriodConsistency === 1`）才是 `true`——
+ *   這是這個 session 一路手動判斷「這個訊號到底站不站得住腳」用的標準，
+ *   現在直接變成系統算出來的布林值。
+ * - `promising`：2026-11-10 新增的第二層級——`robust` 的門檻（每一期都要
+ *   顯著）用 5 段真實期間實測下來發現可能太嚴：daily IC 本來就有雜訊，
+ *   一個真實存在的效應也可能剛好某一期效果量太小沒跨過顯著門檻，不代表
+ *   方向錯了。`promising` 放寬成「方向 100% 一致（從未反轉），但允許最多
+ *   1 期沒有達到顯著」，跟 `robust` 互斥（`robust` 的情況不會同時是
+ *   `promising`）——用意是不要讓「5 期裡 4 期顯著、方向從未反轉」這種
+ *   接近穩健的列，跟「5 期裡只有 1 期顯著、方向還亂跳」這種真的毫無訊號
+ *   的列，在畫面上長得一模一樣（都只是一個「否」）。
  */
+var MIN_PERIODS_FOR_ROBUSTNESS_ = 2; // 跟 PROBLEM_ARCHITECTURE.md G5「至少要有兩個以上不重疊區段」的門檻一致——只測過 1 期，不管顯不顯著，都不該被當成「驗證過」
+
 function aggregateAcrossPeriods_(periodReports) {
   var agg = {};
   periodReports.forEach(function (report, periodIndex) {
@@ -301,7 +312,11 @@ function aggregateAcrossPeriods_(periodReports) {
       entry.periodsTested = withData.length;
       entry.periodsSignificant = significantCount;
       entry.crossPeriodConsistency = withData.length ? dominantCount / withData.length : null;
-      entry.robust = withData.length > 0 && significantCount === withData.length && entry.crossPeriodConsistency === 1;
+
+      var meetsMinPeriods = withData.length >= MIN_PERIODS_FOR_ROBUSTNESS_;
+      entry.robust = meetsMinPeriods && significantCount === withData.length && entry.crossPeriodConsistency === 1;
+      entry.promising = !entry.robust && meetsMinPeriods &&
+        entry.crossPeriodConsistency === 1 && (withData.length - significantCount) <= 1;
     });
   });
 

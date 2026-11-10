@@ -284,6 +284,7 @@ function dateStrAt(baseIdx) {
   assert.strictEqual(streak.periodsSignificant, 3, '第四期不顯著，4 期裡只有 3 期顯著');
   assert.strictEqual(streak.crossPeriodConsistency, 1, '4 期全部正向，方向一致性應該是 1（即使第四期不顯著，符號還是正的）');
   assert.strictEqual(streak.robust, false, '不是每一期都顯著（3/4），不該判定為 robust，即使方向一致性是滿分');
+  assert.strictEqual(streak.promising, true, '方向從未反轉、只差 1 期沒顯著，應該落在 promising 這個中間層級');
   assert.strictEqual(streak.periods.length, 4);
   assert.ok(approxEqual(streak.periods[3].meanIc, 0.001), '原始逐期數字要完整保留，不是只有聚合後的結論');
 
@@ -292,8 +293,9 @@ function dateStrAt(baseIdx) {
   assert.strictEqual(trust.periodsSignificant, 3, '第一期不顯著');
   assert.strictEqual(trust.crossPeriodConsistency, 1, '4 期全部正向');
   assert.strictEqual(trust.robust, false, '同樣因為不是每期都顯著，不該判定為 robust');
+  assert.strictEqual(trust.promising, true, '同樣只差 1 期，應該是 promising');
 
-  console.log('Test aggregateAcrossPeriods_ (reconstructs this session\'s real 4-period pattern: direction-consistent but not every period significant -> not robust) passed.');
+  console.log('Test aggregateAcrossPeriods_ (reconstructs this session\'s real 4-period pattern: direction-consistent but not every period significant -> not robust, but promising) passed.');
 }
 
 // --- aggregateAcrossPeriods_：完全 robust 的情況，跟缺資料（null）期間的排除 ---
@@ -309,7 +311,8 @@ function dateStrAt(baseIdx) {
     return report;
   }
 
-  // 3 期全部顯著、全部正向 -> robust 應該是 true。
+  // 3 期全部顯著、全部正向 -> robust 應該是 true，robust 跟 promising 互斥
+  // （已經 robust 就不用再算一次 promising）。
   const allRobust = fv.aggregateAcrossPeriods_([
     buildReport({ F: { h5: { meanIc: 0.05, significant: true, n: 40 } } }),
     buildReport({ F: { h5: { meanIc: 0.06, significant: true, n: 40 } } }),
@@ -317,8 +320,10 @@ function dateStrAt(baseIdx) {
   ]);
   assert.strictEqual(allRobust.F.h5.robust, true);
   assert.strictEqual(allRobust.F.h5.crossPeriodConsistency, 1);
+  assert.strictEqual(allRobust.F.h5.promising, false, 'robust 已經是 true，promising 不該同時也是 true');
 
-  // 正負各半 -> 方向一致性應該是 0.5，不該是 robust。
+  // 正負各半 -> 方向一致性應該是 0.5，不該是 robust，也不該是 promising
+  // （promising 一樣要求方向 100% 一致，不是只看顯著期數）。
   const mixedSign = fv.aggregateAcrossPeriods_([
     buildReport({ F: { h5: { meanIc: 0.05, significant: true, n: 40 } } }),
     buildReport({ F: { h5: { meanIc: -0.05, significant: true, n: 40 } } }),
@@ -327,6 +332,31 @@ function dateStrAt(baseIdx) {
   ]);
   assert.strictEqual(mixedSign.F.h5.crossPeriodConsistency, 0.5, '正負各半，方向一致性應該是 0.5');
   assert.strictEqual(mixedSign.F.h5.robust, false);
+  assert.strictEqual(mixedSign.F.h5.promising, false, '方向都亂跳了，即使全部顯著也不該是 promising');
+
+  // 方向 100% 一致，但只有 2/5 顯著（差了 3 期，超過 promising 容許的
+  // 「最多 1 期不顯著」）——不該被放進 promising，這樣才不會把真的雜訊
+  // 放進這個中間層級。
+  const tooWeakForPromising = fv.aggregateAcrossPeriods_([
+    buildReport({ F: { h5: { meanIc: 0.05, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: 0.01, significant: false, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: 0.02, significant: false, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: 0.06, significant: true, n: 40 } } }),
+    buildReport({ F: { h5: { meanIc: 0.01, significant: false, n: 40 } } })
+  ]);
+  assert.strictEqual(tooWeakForPromising.F.h5.crossPeriodConsistency, 1);
+  assert.strictEqual(tooWeakForPromising.F.h5.periodsSignificant, 2);
+  assert.strictEqual(tooWeakForPromising.F.h5.promising, false, '5 期只有 2 期顯著，差太多，不該是 promising');
+
+  // 只測過 1 期：不管那一期顯不顯著，都不該判定成 robust 或 promising
+  // ——跟 PROBLEM_ARCHITECTURE.md G5「至少要兩個以上不重疊區段」一致，
+  // 1 期不算驗證過。
+  const onlyOnePeriod = fv.aggregateAcrossPeriods_([
+    buildReport({ F: { h5: { meanIc: 0.05, significant: true, n: 40 } } })
+  ]);
+  assert.strictEqual(onlyOnePeriod.F.h5.periodsTested, 1);
+  assert.strictEqual(onlyOnePeriod.F.h5.robust, false, '只測過 1 期，不該是 robust，即使那一期顯著');
+  assert.strictEqual(onlyOnePeriod.F.h5.promising, false, '只測過 1 期，同樣不該是 promising');
 
   // 某一期完全沒有算出數字（meanIc 是 null，例如那段期間資料不足）——
   // 這期要從 periodsTested 的分母排除，不是當成「不顯著」的一期去扣分
