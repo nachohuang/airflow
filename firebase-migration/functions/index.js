@@ -1047,22 +1047,34 @@ async function runFactorIcValidationForPeriod_(bigQueryConfig, startStr, endStr,
 
 /**
  * 「深度命題」第四層：對**多段完全獨立的期間**分別跑
- * `runFactorIcValidationForPeriod_`（平行跑，不是依序——每段期間各自
- * 獨立抓 BigQuery／算因子，互不依賴，平行執行只是縮短總等待時間，不影響
- * 正確性；跟 CPU 配額那個問題不是同一回事，那個是 Cloud Functions 部署
- * 時搶 Cloud Run revision 配額，這裡是同一支已經在執行的函式內部平行發
- * BigQuery 查詢，不會觸發那個問題），再用
+ * `runFactorIcValidationForPeriod_`，再用
  * `factorValidationLib.aggregateAcrossPeriods_` 把每段期間各自的結果
  * 彙總成「這個因子跨幾段獨立期間一致不一致」的報告——見
  * `aggregateAcrossPeriods_` 開頭的說明，這是為了取代「手動跑幾次、在
  * 對話裡靠人工記憶比對」這件不可靠的事。
+ *
+ * 2026-11-11 修正：原本用 `Promise.all` 平行跑全部期間，使用者實測 3
+ * 段期間就卡住——`jobs/factorIcValidation` 永遠停在 `running`，
+ * `run_log` 完全沒有新紀錄（連失敗都沒記到）。追下去是因為每段期間
+ * 都要讀「要求區間 + 150 天暖機」的全市場歷史、對每一列算 12 個身份別
+ * 因子欄位，平行跑 3-4 段代表這些資料同時攤在同一個函式實例的記憶體
+ * 裡——`2GiB` 的上限很可能被瞬間衝破，Cloud Run 的 OOM killer 直接砍掉
+ * 整個執行序，不會經過這裡的 try/catch，所以兩種「至少會留下紀錄」的
+ * 路徑（成功寫 `succeeded`、失敗寫 `failed`）都沒機會執行——這解釋了
+ * 「狀態卡住不變」跟「連失敗紀錄都沒有」這兩個症狀。跟這個 session 更
+ * 早之前的 CPU 配額教訓是同一類錯誤，只是這次換成記憶體：為了縮短等待
+ * 時間引入平行處理，卻沒有驗證過實際資源用量撐不撐得住。
+ *
+ * 修正：改回依序（不是平行）逐段處理，每次只有一段期間的資料在記憶體
+ * 裡，peak 用量不會隨期間數等比例增加；`onProgress` 回呼讓使用者看得到
+ * 「跑到第幾段」而不是整段過程只有一個不會動的「執行中」。
  *
  * 只有真的跑出 `report`（沒有 `warning`）的期間才會送進
  * `aggregateAcrossPeriods_`——缺資料的期間不該假裝有數字進去污染彙總
  * 結果，但完整的 `periods` 陣列（含警告）還是會原樣回傳，使用者看得到
  * 哪幾段期間資料不足。
  */
-async function runFactorIcValidationMultiCore_(bigQueryConfig, periods, horizons, foldSizeDays) {
+async function runFactorIcValidationMultiCore_(bigQueryConfig, periods, horizons, foldSizeDays, onProgress) {
   const factorFields = [];
   flowFactorsLib.INSTITUTIONAL_TYPES.forEach(function (type) {
     factorFields.push('IBF_20D_' + type.key);
@@ -1070,9 +1082,13 @@ async function runFactorIcValidationMultiCore_(bigQueryConfig, periods, horizons
     factorFields.push('Flow_EWMA_' + type.key);
   });
 
-  const periodResults = await Promise.all(periods.map(function (p) {
-    return runFactorIcValidationForPeriod_(bigQueryConfig, p.startDate, p.endDate, horizons, foldSizeDays, factorFields);
-  }));
+  const periodResults = [];
+  for (let i = 0; i < periods.length; i++) {
+    const p = periods[i];
+    const r = await runFactorIcValidationForPeriod_(bigQueryConfig, p.startDate, p.endDate, horizons, foldSizeDays, factorFields);
+    periodResults.push(r);
+    if (onProgress) await onProgress({ completed: i + 1, total: periods.length });
+  }
 
   const reportsOnly = periodResults.filter(function (p) { return p.report; }).map(function (p) { return p.report; });
   const aggregated = reportsOnly.length ? factorValidationLib.aggregateAcrossPeriods_(reportsOnly) : {};
@@ -1085,7 +1101,11 @@ async function runFactorIcValidationMultiCore_(bigQueryConfig, periods, horizons
 
 var DEFAULT_IC_VALIDATION_HORIZONS_ = [5, 10, 20];
 var DEFAULT_IC_VALIDATION_FOLD_SIZE_DAYS_ = 20; // ~1 個月交易日，見 PROBLEM_ARCHITECTURE.md／README 的說明
-var IC_VALIDATION_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '2GiB', timeoutSeconds: 900 }); // 多段期間平行查 BigQuery，比單段回測需要更寬裕的時間預算
+// 2026-11-11：memory 從 2GiB 提高到 4GiB，跟「改回依序處理」是兩道獨立的
+// 防線——依序處理從根本上限制 peak 用量不會隨期間數等比例增加，多留一點
+// 記憶體餘裕則是處理單一期間本身（全市場歷史 + 12 個身份別因子欄位）的
+// 既有需求，兩者疊加比單靠任何一個更不容易再次 OOM。
+var IC_VALIDATION_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '4GiB', timeoutSeconds: 900 });
 
 exports.runFactorIcValidation = onCall(IC_VALIDATION_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
@@ -1101,6 +1121,7 @@ exports.runFactorIcValidation = onCall(IC_VALIDATION_RUNTIME_OPTS_, async functi
   await writeJobStatus_('factorIcValidation', {
     status: 'running', startedAt: startTime,
     params: { periods: periods, horizons: horizons, foldSizeDays: foldSizeDays },
+    progress: { completed: 0, total: periods.length },
     error: null
   });
   try {
@@ -1108,7 +1129,9 @@ exports.runFactorIcValidation = onCall(IC_VALIDATION_RUNTIME_OPTS_, async functi
     if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
       throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
     }
-    const result = await runFactorIcValidationMultiCore_(appConfig.bigQuery, periods, horizons, foldSizeDays);
+    const result = await runFactorIcValidationMultiCore_(appConfig.bigQuery, periods, horizons, foldSizeDays, async function (p) {
+      await writeJobStatus_('factorIcValidation', { progress: p });
+    });
     const durationMs = Date.now() - startTime;
     const summaryMsg = periods.length + ' 段期間（' + result.periodsWithData + ' 段有資料）、' +
       Object.keys(result.aggregated).length + ' 個因子';

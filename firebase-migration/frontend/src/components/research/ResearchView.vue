@@ -508,6 +508,28 @@ const icValidationRows = computed(function () {
   });
   return rows;
 });
+
+// 複製結果（跟 DebugLogPanel.vue copyAll 同一套 navigator.clipboard 模式）
+// ——整張跨期彙總表格複製成 tab 分隔的純文字，方便直接貼到別處（例如
+// 貼回來給 Claude 看），不用截圖或手動謄打。
+const icValidationCopyState = ref('idle');
+async function copyIcValidationResults() {
+  const header = ['因子／身份別', '天期', '等級', '已測期數', '顯著期數', '跨期方向一致性', '各期平均IC'];
+  const lines = [header.join('\t')];
+  icValidationRows.value.forEach(function (row) {
+    lines.push([
+      row.displayName, row.horizon, tierLabel(row), row.periodsTested,
+      row.periodsSignificant + ' / ' + row.periodsTested, formatPct01(row.crossPeriodConsistency), row.periodIcList
+    ].join('\t'));
+  });
+  try {
+    await navigator.clipboard.writeText(lines.join('\n'));
+    icValidationCopyState.value = 'copied';
+  } catch (e) {
+    icValidationCopyState.value = 'failed';
+  }
+  setTimeout(function () { icValidationCopyState.value = 'idle'; }, 2000);
+}
 </script>
 
 <template>
@@ -974,7 +996,13 @@ const icValidationRows = computed(function () {
           <span class="signal-badge" :style="{ color: jobStatusColor(icValidationJobStatusLabel) }">{{ icValidationJobStatusLabel }}</span>
         </div>
         <div class="hint">
-          <template v-if="icValidationJob.status === 'running'">還在驗證中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態（多段期間平行查詢，通常比單段稍慢一些）。</template>
+          <template v-if="icValidationJob.status === 'running'">
+            還在驗證中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態
+            （改成依序處理每一段期間，比單段驗證慢，期間數越多等越久）。
+            <template v-if="icValidationJob.progress">
+              目前進度：第 {{ icValidationJob.progress.completed }} / {{ icValidationJob.progress.total }} 段。
+            </template>
+          </template>
           <template v-else-if="icValidationJob.error">{{ icValidationJob.error }}</template>
         </div>
       </div>
@@ -986,7 +1014,12 @@ const icValidationRows = computed(function () {
       </template>
 
       <template v-if="icValidationRows.length">
-        <h3 style="margin-top:16px;">跨期驗證結果（依「穩健/潛力」「顯著期數」「跨期方向一致性」排序）</h3>
+        <div class="run-log-status-card-top" style="margin-top:16px;">
+          <h3 style="margin:0;">跨期驗證結果（依「穩健/潛力」「顯著期數」「跨期方向一致性」排序）</h3>
+          <button type="button" @click="copyIcValidationResults">
+            {{ icValidationCopyState === 'copied' ? '已複製' : icValidationCopyState === 'failed' ? '複製失敗' : '複製結果' }}
+          </button>
+        </div>
         <div class="table-wrap">
           <table class="history-table">
             <thead>
