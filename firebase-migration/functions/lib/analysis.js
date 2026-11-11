@@ -30,6 +30,7 @@ var shiftN = utils.shiftN;
 var rollingMin = utils.rollingMin;
 var daysBetween = utils.daysBetween;
 var computeWeightedFactorScore_ = require('./factorModel').computeWeightedFactorScore_;
+var computeStreak_ = require('./factorScan').computeStreak_;
 var financialsLib = require('./financials');
 
 /**
@@ -69,6 +70,16 @@ var SCREENING_STRATEGIES = {
       '價格」（Inst_Accum_Divergence_20D）跟「近期是否還在創新低」（Days_Since_New_Low_Rank），' +
       '三個訊號都過才算命中，訊號雜訊應該比 early_accumulation 少、但命中數也會更少。不需要' +
       '先套用因子迴歸模型。'
+  },
+  trust_momentum: {
+    key: 'trust_momentum', label: '🏦 法人動能（投信連續買超，IC 驗證通過）', needsFactorModel: false,
+    description: '2026-11-11 新增——目前唯一先通過 IC／walk-forward 驗證（lib/factorValidation.js／' +
+      'lib/flowFactors.js，8 段完全獨立期間，20 個交易日 horizon 下 IC 全部同方向、7/8 顯著）' +
+      '才設計成策略的因子，不是像其他規則式策略先訂門檻、事後才回頭驗證。用投信連續買超天數' +
+      '（Trust_Buy_Streak）的橫斷面排名篩選，不要求 Trend_Score===2。已知限制：IC 驗證測的是' +
+      '因子值跟「未來 20 個交易日報酬」的關聯，但這支策略的出場規則沿用其他策略共用的通用規則' +
+      '（回落停損／達標出場），不是真的等 20 個交易日到期才出場，進場訊號的驗證天期跟實際出場' +
+      '時機之間還有落差，見 PROBLEM_ARCHITECTURE.md 的完整討論。'
   }
 };
 var SCREENING_STRATEGY_DEFAULT = 'rule_v17';
@@ -82,6 +93,8 @@ var EARLY_ACCUMULATION_IBF_MIN_PCT = 0.85; // early_accumulation：法人逢低�
 var COMPOSITE_ACCUMULATION_IBF_MIN_PCT = 0.75; // 法人逢低接手率排名門檻
 var COMPOSITE_ACCUMULATION_DIVERGENCE_MIN = 0.3; // Inst_Accum_Divergence_20D 門檻：法人資金流向排名要比價格排名高出至少 30 個百分點，代表「資金流向領先價格」
 var COMPOSITE_ACCUMULATION_STABILITY_MIN_PCT = 0.3; // Days_Since_New_Low_Rank 門檻：排除「最近才創新低」的最極端一批（不用設得太嚴，early_accumulation 已經有 Trend_Score!==0 把關完全空頭的狀況，這裡只是再加一道更細的穩定度篩選）
+
+var TRUST_MOMENTUM_STREAK_RANK_MIN_PCT = 0.85; // trust_momentum：投信連續買超天數排名門檻，單一條件，比照 early_accumulation 的門檻水準（0.85）
 
 /**
  * 幫 rows 補上「因子模型預測抗跌力」以及它在「同一天」全部候選股票裡的橫斷面排名
@@ -184,6 +197,34 @@ function classifyEntrySignal_(row, strategyKey) {
           Math.round(row.Inst_Accum_Divergence_20D * 100) + ' 個百分點（法人買超排名 ' +
           Math.round(row.Inst_Rank_20D * 100) + '% − 漲幅排名 ' + Math.round(row.Price_Rank_20D * 100) +
           '%）；近期穩定度排名 ' + Math.round(row.Days_Since_New_Low_Rank * 100) + '%（距上次創新低天數）'
+      };
+    }
+    return neutral;
+  }
+
+  if (key === 'trust_momentum') {
+    // 2026-11-11 新增：這是整個因子驗證過程裡第一個「先通過 IC／walk-forward
+    // 驗證，才設計成策略」的因子——跟 early_accumulation／composite_accumulation
+    // 不一樣，那兩個策略的門檻是先憑直覺假設訂出來，再事後用回測驗證有沒有用；
+    // 這個策略是先用 lib/factorValidation.js 的 IC 驗證管線，對 8 段完全獨立的
+    // 期間分別檢定過（見 PROBLEM_ARCHITECTURE.md），確認「投信連續買超天數」
+    // 跟「未來 20 個交易日報酬」的 Spearman 等級相關係數 8 期全部同方向、
+    // 7/8 顯著，才回頭把這個因子包成進場規則。
+    //
+    // 已知的設計落差（刻意不隱藏）：IC 驗證測的是這個因子值跟「未來 20 個
+    // 交易日」報酬的關聯，但這支策略沿用跟其他策略共用的通用出場規則
+    // （diagnoseRow_ 的回落停損／達標出場），不是真的等 20 個交易日到期才
+    // 出場——實際出場時機由價格走勢決定，不保證剛好落在驗證過的 20 天窗口，
+    // 這是之後如果要更精確利用這個訊號，可以再補的改進方向（時間到期出場），
+    // 不是這次的範圍。
+    var trustStreakOk = row.Trust_Buy_Streak_Rank !== null && row.Trust_Buy_Streak_Rank !== undefined &&
+      row.Trust_Buy_Streak_Rank >= TRUST_MOMENTUM_STREAK_RANK_MIN_PCT;
+    var trustNotInFreefall = row.Trend_Score !== 0;
+    if (trustStreakOk && trustNotInFreefall) {
+      return {
+        strategy: '🏦 法人動能', action: '建議：分批佈局（IC 驗證通過，但出場規則仍為通用規則）',
+        interpretation: '投信連續買超天數排名前 ' + Math.round((1 - TRUST_MOMENTUM_STREAK_RANK_MIN_PCT) * 100) +
+          '%（8 段獨立期間 IC 驗證：20 天 horizon 全部同方向、7/8 顯著）'
       };
     }
     return neutral;
@@ -329,6 +370,16 @@ function computeFactors_(rows, portfolioMap, financialsIndex) {
       return out;
     })();
 
+    // 2026-11-11 新增，trust_momentum 策略用——投信連續買超天數，先經過
+    // lib/factorValidation.js／lib/flowFactors.js 的 IC 驗證管線確認過
+    // （8 段獨立期間，20 天 horizon 下 IC 全部同方向、7/8 顯著，見
+    // PROBLEM_ARCHITECTURE.md），才搬進這支即時計算，不是先猜門檻再回頭
+    // 驗證。重用 lib/factorScan.js 既有的 computeStreak_（連續天數計數，
+    // 遇到不符合條件的一天整個歸零），跟驗證階段 lib/flowFactors.js
+    // Flow_Streak_trust 同一個定義。
+    var trustBuyTag = group.map(function (r) { return r['投信'] > 0 ? 1 : 0; });
+    var trustBuyStreak = computeStreak_(trustBuyTag);
+
     var holding = portfolioMap[code];
     var adjustedPeak;
     if (holding && holding.buyDate) {
@@ -359,6 +410,7 @@ function computeFactors_(rows, portfolioMap, financialsIndex) {
       group[i].Inst_Net_Sum_20D = instNetSum20D[i];
       group[i].Price_Change_20D = priceChange20D[i];
       group[i].Days_Since_New_Low_Raw = daysSinceNewLowRaw[i];
+      group[i].Trust_Buy_Streak = trustBuyStreak[i];
 
       if (financialsIndex) {
         var dateStr = normalizeDateStr(group[i]['日期']);
@@ -392,6 +444,11 @@ function computeFactors_(rows, portfolioMap, financialsIndex) {
     var instSum20DRank = percentRank(dayRows, 'Inst_Net_Sum_20D');
     var priceChange20DRank = percentRank(dayRows, 'Price_Change_20D');
     var daysSinceNewLowRank = percentRank(dayRows, 'Days_Since_New_Low_Raw');
+    // trust_momentum 策略用——不 COALESCE 成 0.5，維持 percentRank 原本
+    // 「算不出來就是 null」的行為，跟 IBF_20D_Rank／Inst_Part_Rank 同一個
+    // 慣例（classifyEntrySignal_ 裡用明確的 null 檢查，缺值當作沒過門檻，
+    // 不是偷偷塞一個中性值）。
+    var trustBuyStreakRank = percentRank(dayRows, 'Trust_Buy_Streak');
     for (var i = 0; i < dayRows.length; i++) {
       dayRows[i].Inst_Part_Rank = instPartRank[i];
       dayRows[i].IBF_20D_Rank = ibfRank[i];
@@ -400,6 +457,7 @@ function computeFactors_(rows, portfolioMap, financialsIndex) {
       dayRows[i].Price_Rank_20D = priceChange20DRank[i] === null ? 0.5 : priceChange20DRank[i];
       dayRows[i].Days_Since_New_Low_Rank = daysSinceNewLowRank[i] === null ? 0.5 : daysSinceNewLowRank[i];
       dayRows[i].Inst_Accum_Divergence_20D = dayRows[i].Inst_Rank_20D - dayRows[i].Price_Rank_20D;
+      dayRows[i].Trust_Buy_Streak_Rank = trustBuyStreakRank[i];
       var t = dayRows[i].Trend_Score;
       var parts = [instPartRank[i], ibfRank[i], volRatioRank[i], t];
       var hasNull = parts.some(function (p) { return p === null || p === undefined; });

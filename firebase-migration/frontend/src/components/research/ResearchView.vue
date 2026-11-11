@@ -15,7 +15,8 @@ const STRATEGIES = [
   { key: 'factor_model_rank', label: '因子模型排名精選' },
   { key: 'hybrid', label: '規則式門檻＋模型排名混合' },
   { key: 'early_accumulation', label: '🌱 潛伏期（法人逢低接手，趨勢未確立）' },
-  { key: 'composite_accumulation', label: '🧭 綜合吸籌（多因子交叉驗證）' }
+  { key: 'composite_accumulation', label: '🧭 綜合吸籌（多因子交叉驗證）' },
+  { key: 'trust_momentum', label: '🏦 法人動能（投信連續買超，IC 驗證通過）' }
 ];
 
 const form = ref({ strategyKey: 'rule_v17', startDate: '', endDate: '', targetProfit: 5 });
@@ -578,6 +579,12 @@ async function copyIcValidationResults() {
         價格、近期是否還在創新低）才算命中，訊號雜訊應該更少、命中數也會
         更少——戰報卡片的「實相解讀」會直接列出三個訊號各自的百分位數值，
         方便判斷是哪個訊號在推動這次命中。
+        <code>trust_momentum</code>（🏦 法人動能）2026-11-11 新增，是目前
+        唯一先通過下面「IC／walk-forward 因子驗證」卡片驗證（8 段獨立期間，
+        20 天 horizon 全部同方向、7/8 顯著）才設計成策略的因子，不是先訂
+        門檻再回測驗證；已知限制是出場規則仍沿用通用的回落停損／達標
+        出場，不是真的等 20 個交易日到期才出場，建議先用這個回測工具驗證
+        實際勝率/報酬再考慮實際使用。
       </p>
     </div>
 

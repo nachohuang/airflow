@@ -14,7 +14,8 @@ const STRATEGIES = [
   { key: 'factor_model_rank', label: '因子模型排名精選' },
   { key: 'hybrid', label: '規則式門檻＋模型排名混合' },
   { key: 'early_accumulation', label: '🌱 潛伏期（法人逢低接手，趨勢未確立）' },
-  { key: 'composite_accumulation', label: '🧭 綜合吸籌（多因子交叉驗證）' }
+  { key: 'composite_accumulation', label: '🧭 綜合吸籌（多因子交叉驗證）' },
+  { key: 'trust_momentum', label: '🏦 法人動能（投信連續買超，IC 驗證通過）' }
 ];
 
 /**

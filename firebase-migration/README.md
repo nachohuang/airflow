@@ -3979,3 +3979,58 @@ CPU 配額教訓是同一類錯誤，只是這次換成記憶體：為了縮短�
 - 新增「複製結果」按鈕（跟 `DebugLogPanel.vue` 既有的
   `navigator.clipboard` 模式一致）——跨期彙總表格複製成 tab 分隔的純
   文字，不用截圖或手動謄打就能把結果分享出去。
+
+## 2026-11-11：新增 trust_momentum（🏦 法人動能）——第一個「先驗證、才設計」的策略
+
+`PROBLEM_ARCHITECTURE.md` 第 6 節一直講一件事：目前所有規則式策略
+（`rule_v17`／`early_accumulation`／`composite_accumulation`）都是先
+憑經驗訂門檻，事後才回頭用回測看勝率——因子跟未來報酬到底有沒有
+穩定的統計關係，從來沒有先驗證過。這次用上面 8 段獨立期間跨期彙總
+驗證出的最強訊號（`連續買超天數／投信`，20 天 horizon：100% 方向
+一致、7/8 期顯著，判定成「潛力」），第一次反過來做——先確認因子
+站得住腳，才把它設計成一個可以切換的策略，順序跟其他策略完全相反。
+
+**`lib/analysis.js`**：
+- `SCREENING_STRATEGIES` 新增 `trust_momentum`（`needsFactorModel:
+  false`，跟 `early_accumulation`／`composite_accumulation` 一樣不用
+  先套用因子迴歸模型），`description` 裡直接寫明這支策略的驗證依據
+  跟其他策略「先訂門檻、事後驗證」的順序相反。
+- `computeFactors_` 新增 `Trust_Buy_Streak`（投信單日買超/賣超的連續
+  天數，重複利用 `factorScan.js` 既有的 `computeStreak_`，對
+  `投信 > 0` 的布林 tag 算連續天數，不用重新發明一個計算連續天數的
+  函式）跟橫斷面排名 `Trust_Buy_Streak_Rank`（用既有的 `percentRank`，
+  刻意不像 `Inst_Rank_20D`／`Price_Rank_20D` 那樣在缺值時 COALESCE
+  成 0.5——沿用 `IBF_20D_Rank`／`Inst_Part_Rank` 的慣例，因為
+  `classifyEntrySignal_` 本來就會明確檢查 null，COALESCE 反而會讓
+  「缺值」跟「真的排在中位數」混在一起分不出來）。
+- `classifyEntrySignal_` 新增 `trust_momentum` 分支：`Trust_Buy_
+  Streak_Rank >= TRUST_MOMENTUM_STREAK_RANK_MIN_PCT`（`0.85`，前
+  15%）且 `Trend_Score !== 0`（排除正在崩跌的股票，但不要求
+  `Trend_Score === 2` 那樣的趨勢已確立，跟 IC 驗證測的「橫斷面排名」
+  精神一致——驗證的是排名前段的因子值跟未來報酬的關聯，不是「趨勢
+  確立後」這個額外條件，所以策略門檻也不應該多加一個驗證沒測過的
+  條件）才算命中。
+
+**刻意不隱藏的已知限制**：IC 驗證測的是 `Trust_Buy_Streak` 這個因子
+值跟「未來 20 個交易日」報酬的橫斷面關聯，但這支策略的出場規則沿用
+跟其他策略共用的通用規則（`diagnoseRow_` 的回落停損／達標出場），
+不是真的等 20 個交易日到期才出場——進場訊號的驗證天期跟實際出場
+時機之間還有落差。這個落差寫進了 `classifyEntrySignal_` 的程式碼
+註解、策略的 `description` 文案，跟 `ResearchView.vue` 的操作說明
+裡，不是藏起來事後才發現；用回測工具實測這支策略的平均持有天數，
+可以直接看出實際出場時機跟驗證天期差多少，是後續值得繼續看的點，
+但不在這次的範圍內。
+
+**前端**：`AdminView.vue`／`ResearchView.vue` 的 `STRATEGIES` 清單都
+加上 `trust_momentum`；`ResearchView.vue` 的策略說明區塊新增一段
+對應文案；`strategyColor.js` 新增 `'🏦 法人動能': 'var(--text)'`——
+跟 `🌱 潛伏期`／`🧭 綜合吸籌` 用同一個中性色，因為一樣不要求趨勢
+確立，顏色不因為「因子先經過驗證」而標成更「確定」的樣式。
+
+**測試**：`test/analysis.test.js` 新增 Test 11d（`classifyEntrySignal_`：
+排名門檻剛好命中／`Trend_Score===2` 不排除／`Trend_Score===0` 排除／
+門檻以下不命中／null-safe／流動性篩選仍然生效）跟 Test 15
+（`computeFactors_`：兩檔股票的 fixture，一檔投信連續買超 11 天
+streak=11，一檔連續賣出 streak=0，橫斷面排名分別是 1.0／0.5）。全部
+6 個 Parity 測試（確認跟舊版 Apps Script byte-for-byte 一致）維持
+通過，證明新欄位沒有影響既有欄位的計算結果。

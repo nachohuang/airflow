@@ -23,7 +23,12 @@ const STRATEGY_COLOR = {
   // 用同一個中性色；多因子交叉驗證理論上訊號雜訊更少，但顏色上不特別標成
   // 更「確定」的樣式，畢竟還是比 rule_v17 更早、更積極的訊號，不是已經確認
   // 的進場訊號。
-  '🧭 綜合吸籌': 'var(--text)'
+  '🧭 綜合吸籌': 'var(--text)',
+  // 2026-11-11 新增：trust_momentum——趨勢同樣未要求確立，用同一個中性色；
+  // 跟其他策略不同的是這支因子先經過 IC／walk-forward 驗證才設計成策略，
+  // 但顏色上不因此標成更「確定」的樣式，出場規則仍是通用規則，見
+  // lib/analysis.js SCREENING_STRATEGIES.trust_momentum 的說明。
+  '🏦 法人動能': 'var(--text)'
 };
 
 export function strategyColor(strategy) {

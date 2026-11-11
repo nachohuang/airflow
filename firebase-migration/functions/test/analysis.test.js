@@ -388,6 +388,50 @@ function buildSyntheticHistory(days) {
   console.log('Test 11c (classifyEntrySignal_: composite_accumulation — three signals all required, excludes Trend_Score===0, null-safe, liquidity still applies) passed.');
 }
 
+// --- 11d. classifyEntrySignal_：trust_momentum（2026-11-11 新增，第一個先通過 IC 驗證才設計的策略） ---
+{
+  const liquid = { '成交金額': 200000000 };
+
+  // 門檻剛好達標（0.85）、趨勢還沒確立（Trend_Score 1）-> 應該命中
+  const hit = Object.assign({}, liquid, { Trend_Score: 1, Trust_Buy_Streak_Rank: 0.85 });
+  const diag = analysis.classifyEntrySignal_(hit, 'trust_momentum');
+  assert.strictEqual(diag.strategy, '🏦 法人動能');
+  assert.ok(diag.interpretation.indexOf('IC 驗證') !== -1, diag.interpretation);
+
+  // Trend_Score===2（趨勢已經確立）不特別排除，一樣算命中——跟 early_accumulation／
+  // composite_accumulation 同一個設計：不要求「未確立」，只是不要求「確立」。
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 2, Trust_Buy_Streak_Rank: 0.9 }), 'trust_momentum').strategy,
+    '🏦 法人動能'
+  );
+
+  // Trend_Score===0（完全空頭排列）要排除，避免接刀——跟其他新策略同一個保護機制。
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 0, Trust_Buy_Streak_Rank: 0.99 }), 'trust_momentum').strategy,
+    'Neutral', 'Trend_Score===0（完全空頭）要被排除，不管排名多高'
+  );
+
+  // 門檻差一點點不該命中
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 1, Trust_Buy_Streak_Rank: 0.84999 }), 'trust_momentum').strategy,
+    'Neutral'
+  );
+
+  // Trust_Buy_Streak_Rank 是 null（算不出來）要當成沒過門檻，不是拋錯
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { Trend_Score: 1, Trust_Buy_Streak_Rank: null }), 'trust_momentum').strategy,
+    'Neutral'
+  );
+
+  // 流動性門檻一樣適用
+  assert.strictEqual(
+    analysis.classifyEntrySignal_(Object.assign({}, liquid, { '成交金額': 1000000, Trend_Score: 1, Trust_Buy_Streak_Rank: 0.9 }), 'trust_momentum').strategy,
+    'Neutral'
+  );
+
+  console.log('Test 11d (classifyEntrySignal_: trust_momentum — streak rank threshold, excludes Trend_Score===0, null-safe, liquidity still applies) passed.');
+}
+
 // --- 12. computePredictedResistanceRanks_：依日期分組各自排名 ---
 {
   const rowsNoModel = [{ '日期': '2026-07-30', Inst_Participation: 0.5 }];
@@ -531,6 +575,51 @@ function buildSyntheticHistory(days) {
   assert.ok(approxEqual(byCode14.BBBB.Inst_Accum_Divergence_20D, -0.5), byCode14.BBBB.Inst_Accum_Divergence_20D);
 
   console.log('Test 14 (computeFactors_: Inst_Net_Sum_20D / Price_Change_20D / Days_Since_New_Low_Raw / cross-sectional ranks with null-coalesced-to-0.5 / Inst_Accum_Divergence_20D) passed.');
+}
+
+// --- 15. computeFactors_：Trust_Buy_Streak／Trust_Buy_Streak_Rank（trust_momentum 用，2026-11-11 新增） ---
+{
+  function dateStrAt15(baseIdx) {
+    const start = new Date(2026, 0, 1);
+    const d = new Date(start);
+    d.setDate(d.getDate() + baseIdx);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function buildRow15(code, idx, trustNet) {
+    return {
+      '日期': dateStrAt15(idx), '證券代號': code, '證券名稱': code + '_名稱',
+      '外資': 0, '投信': trustNet, '自營商': 0, '三大法人買賣超股數': trustNet,
+      '成交股數': 5000000, '成交筆數': 10000, '成交金額': 100000000,
+      '開盤價': 100, '最高價': 100.5, '最低價': 99.5, '收盤價': 100,
+      '漲跌(+/-)': '+', '漲跌價差': 0,
+      '最後揭示買價': 100, '最後揭示買量': 100, '最後揭示賣價': 100.1, '最後揭示賣量': 100,
+      '殖利率(%)': 2.0, '本益比': 15, '股價淨值比': 3, '財報年/季': '2026Q1'
+    };
+  }
+
+  // AAAA：投信每天都買超（固定 +100）-> streak 持續累加，最後一天（index 10，
+  // 第 11 筆）應該是 11。BBBB：投信每天都賣超（固定 -100）-> streak 一直是 0。
+  const aaaaRows = [];
+  for (let i = 0; i <= 10; i++) aaaaRows.push(buildRow15('AAAA', i, 100));
+  const bbbbRows = [];
+  for (let i = 0; i <= 10; i++) bbbbRows.push(buildRow15('BBBB', i, -100));
+
+  const computed15 = analysis.computeFactors_(aaaaRows.concat(bbbbRows), {});
+  const latestDateStr15 = dateStrAt15(10);
+  const byCode15 = {};
+  computed15.filter(function (r) { return r['日期'] === latestDateStr15; })
+    .forEach(function (r) { byCode15[r['證券代號']] = r; });
+
+  assert.strictEqual(byCode15.AAAA.Trust_Buy_Streak, 11, '投信連續 11 天買超，streak 應該是 11');
+  assert.strictEqual(byCode15.BBBB.Trust_Buy_Streak, 0, '投信從來沒買超過，streak 應該是 0');
+
+  // 兩檔股票同一天橫斷面排名：AAAA 的 streak(11) > BBBB 的 streak(0)，只有兩筆
+  // 資料時 pandas rank(pct=True) 的標準結果是大的 1.0、小的 0.5。
+  assert.strictEqual(byCode15.AAAA.Trust_Buy_Streak_Rank, 1.0);
+  assert.strictEqual(byCode15.BBBB.Trust_Buy_Streak_Rank, 0.5);
+
+  console.log('Test 15 (computeFactors_: Trust_Buy_Streak / Trust_Buy_Streak_Rank, reused from factorScan.js computeStreak_) passed.');
 }
 
 console.log('All analysis.js tests passed.');
