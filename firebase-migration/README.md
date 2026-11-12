@@ -4034,3 +4034,51 @@ CPU 配額教訓是同一類錯誤，只是這次換成記憶體：為了縮短�
 streak=11，一檔連續賣出 streak=0，橫斷面排名分別是 1.0／0.5）。全部
 6 個 Parity 測試（確認跟舊版 Apps Script byte-for-byte 一致）維持
 通過，證明新欄位沒有影響既有欄位的計算結果。
+
+## 2026-11-12：修正「全部策略比較」卡住——區間接近上限時逼近逾時，加逾時/CPU 餘裕+進度顯示
+
+使用者用新增的 `trust_momentum` 跑「全部策略比較」實測出勝率只有
+29.68%（接近 `rule_v17` 的基準水準，遠低於 `composite_accumulation`
+的 54.26%），這本身符合已知限制——IC 驗證測的是因子跟「未來 20 個
+交易日」報酬的關聯，但出場規則沿用通用的回落停損／達標出場，不是
+真的等到 20 天才出場。為了進一步確認（看 `avgDaysHeld` 是不是遠小於
+20 天），使用者把回測區間拉大到 2026-09-16~2026-11-10（56 天，接近
+`BACKTEST_MAX_RANGE_DAYS=60` 上限）重跑一次「全部策略比較」，結果
+`jobs/backtest` 卡在 `running` 不動，「完整紀錄」沒有任何新的一筆
+（不管成功或失敗）。
+
+跟 2026-11-11 那次 `runFactorIcValidation` OOM 是同一類症狀（平台直接
+砍斷整個執行序，不會經過 try/catch，所以 succeeded/failed 兩條路徑
+都沒機會寫入），但 root cause 不一樣：`runBacktestAllStrategies` 本來
+就是單一次同步運算（抓一次資料→算一次因子→依序跑 6 個策略的模擬，
+沒有用 `Promise.all` 平行處理多份資料同時攤在記憶體裡），56 天區間
+（含暖機跟出場追蹤緩衝，總共要處理 270 天以上的全市場資料）疊加新增
+的 `Trust_Buy_Streak` 等因子計算，再乘以 6 個策略各自的模擬，運算時間
+很可能逼近甚至超過 `BACKTEST_RUNTIME_OPTS_` 原本的 `540` 秒逾時——
+逾時被 Cloud Functions 2nd gen 的底層平台直接中止執行，現象（卡住不變
++ 完全沒有紀錄）跟記憶體被砍斷幾乎無法從症狀本身分辨，但因為這支
+函式本來就沒有平行處理可以「改回依序」，所以修法跟上次不同。
+
+**修正**（`index.js`）：
+- 新增 `BACKTEST_ALL_RUNTIME_OPTS_`（只給 `runBacktestAllStrategies`
+  用，`runBacktest`／`runFactorCorrelationScan` 維持原本的
+  `BACKTEST_RUNTIME_OPTS_`，因為只有「全部策略比較」要跑 6 倍的模擬）：
+  `timeoutSeconds` 從 `540` 提高到 `900`，`memory` 從 `2GiB` 提高到
+  `4GiB`——這段運算是單執行緒同步跑完，沒辦法用平行處理優化，但 Cloud
+  Functions 2nd gen 的 CPU 額度是跟著 memory 走的，加大 memory 同時也
+  讓這段運算本身跑快一點，不是只靠拉長逾時硬撐。
+- `runBacktestAllStrategiesCore_` 新增 `onProgress` 參數，在「讀取資料」
+  跟「依序跑完每一個策略」兩個階段回呼，`exports.
+  runBacktestAllStrategies` 接上這個回呼寫入 `jobs/backtest.progress`
+  ——跟 `runFactorIcValidation` 的進度回報同一個目的：以後卡住至少能
+  從進度數字判斷卡在哪個階段，不用像這次一樣完全無跡可尋。原本的
+  `forEach` 迴圈改成 `for` 迴圈純粹是為了能在每個策略之間 `await`
+  這個回呼，邏輯（依序跑、不中斷地累積 `results`）沒有變。
+
+**前端**（`ResearchView.vue`）：「全部策略比較」執行中的狀態文字新增
+`backtestProgressText()` 顯示進度（讀取資料中／第 N / M 個策略：
+策略名稱），跟 IC 驗證卡片「第 N / M 段」的做法一致。
+
+全部後端測試（含 6 個 Parity 測試）跟前端 `npm run build` 都確認
+通過——這次改動只動 `index.js` 的 I/O 邊界跟進度回報，沒有動
+`lib/backtest.js` 任何一個已經測過的純函式，不需要新增測試案例。

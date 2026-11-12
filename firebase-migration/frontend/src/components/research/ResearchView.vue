@@ -60,6 +60,20 @@ function exitLabelColor(exitLabel) {
   return 'var(--amber)'; // ⏳ 未觸發出場
 }
 
+// 2026-11-12 新增：runBacktestAllStrategies 曾經卡在 running 不動（見
+// README 同日那段說明），加 onProgress 回呼之後這裡把進度顯示出來，
+// 跟 IC 驗證卡片「第 N / M 段」的做法一致——不是等卡住了才回頭查，
+// 讓使用者隨時看得到「跑到哪個階段」。
+function backtestProgressText(progress) {
+  if (!progress) return '';
+  if (progress.stage === 'loading') return '（讀取資料中）';
+  if (progress.stage === 'simulating') {
+    return '（第 ' + progress.completed + ' / ' + progress.total + ' 個策略' +
+      (progress.currentStrategy ? '：' + progress.currentStrategy : '') + '）';
+  }
+  return '';
+}
+
 // 按鈕永遠可以按，不因為 job.status === 'running' 鎖住——跟 AdminView.vue
 // 「補抓區間」同一個理由：Cloud Functions 平台逾時強制中止不會走到
 // writeJobStatus_ 的失敗分支，jobs/backtest 可能永遠卡在 'running'，這是
@@ -595,7 +609,9 @@ async function copyIcValidationResults() {
       </div>
       <p class="hint">
         區間 {{ job.params?.startDate }} ~ {{ job.params?.endDate }}
-        <template v-if="job.status === 'running'">，還在執行中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。</template>
+        <template v-if="job.status === 'running'">
+          ，還在執行中{{ backtestProgressText(job.progress) }}，可以放心切走這個頁面，回來這裡會自動顯示最新狀態。
+        </template>
       </p>
       <p v-if="job.status === 'failed' && job.error" class="error-box">{{ job.error }}</p>
 

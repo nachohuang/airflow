@@ -208,12 +208,30 @@ async function runBacktestCore_(bigQueryConfig, appliedFactorModels, startStr, e
  * 不是乘以策略數。需要因子模型的版本（factor_model_rank／hybrid）在因子
  * 迴歸模型功能遷移完成之前，一律回傳「需要先套用模型」的錯誤，不影響
  * rule_v17 照常跑出結果。 */
-async function runBacktestAllStrategiesCore_(bigQueryConfig, appliedFactorModels, startStr, endStr, targetProfit) {
+/**
+ * 2026-11-12 新增 `onProgress`：使用者實測 56 天區間（接近
+ * `BACKTEST_MAX_RANGE_DAYS=60` 上限）時卡在 `running` 不動，跟
+ * `runFactorIcValidation` 那次 OOM 是同一類症狀（逾時／記憶體被平台直接
+ * 砍斷，不會經過 try/catch，所以成功/失敗都沒寫入，job 卡住又沒有任何
+ * log）。但這支函式本來就是單一次同步運算（抓一次資料→算一次因子→依序
+ * 跑 6 個策略的模擬，不是像 IC 驗證那樣用 Promise.all 平行處理），所以
+ * root cause 比較可能是「區間接近上限時，全市場資料量＋6 個策略的模擬
+ * 運算時間加總起來逼近或超過 `timeoutSeconds`」，不是記憶體爆掉——拉長
+ * `timeoutSeconds`、並把 `memory` 提高（Cloud Functions 2nd gen 配置的
+ * CPU 額度跟 memory 掛鉤，加大 memory 同時也讓這段同步運算跑快一點）
+ * 兩者一起處理，見 `BACKTEST_ALL_RUNTIME_OPTS_`。
+ *
+ * 新增 `onProgress` 單純是讓「卡住」這件事以後可以诊斷——跟 IC 驗證一樣，
+ * 卡在哪個階段（抓資料／算因子／跑到第幾個策略）以後可以直接從
+ * `jobs/backtest.progress` 讀出來，不用再像這次一樣完全無跡可尋。
+ */
+async function runBacktestAllStrategiesCore_(bigQueryConfig, appliedFactorModels, startStr, endStr, targetProfit, onProgress) {
   targetProfit = targetProfit || backtestLib.BACKTEST_TARGET_DEFAULT;
 
   const rangeCheck = backtestLib.validateBacktestRange_(startStr, endStr);
   if (rangeCheck.error) return rangeCheck;
 
+  if (onProgress) await onProgress({ stage: 'loading' });
   const loadEndStr = backtestLib.computeBacktestLoadEndStr_(endStr);
   const rows = await loadBacktestFactorRows_(bigQueryConfig, startStr, loadEndStr);
   if (rows.length === 0) {
@@ -223,18 +241,22 @@ async function runBacktestAllStrategiesCore_(bigQueryConfig, appliedFactorModels
   const hasResistanceModel = !!appliedFactorModels.downsideResistance;
   if (hasResistanceModel) analysisLib.computePredictedResistanceRanks_(rows, appliedFactorModels);
 
+  const strategyKeys = Object.keys(analysisLib.SCREENING_STRATEGIES);
   const results = {};
-  Object.keys(analysisLib.SCREENING_STRATEGIES).forEach(function (key) {
+  for (let i = 0; i < strategyKeys.length; i++) {
+    const key = strategyKeys[i];
     const def = analysisLib.SCREENING_STRATEGIES[key];
+    if (onProgress) await onProgress({ stage: 'simulating', completed: i, total: strategyKeys.length, currentStrategy: def.label });
     if (def.needsFactorModel && !hasResistanceModel) {
       results[key] = {
         strategyKey: key, strategyLabel: def.label,
         error: '需要先套用一版抗跌力因子迴歸模型，尚未遷移因子迴歸模型功能，請先切換回 rule_v17。'
       };
-      return;
+      continue;
     }
     results[key] = backtestLib.simulateBacktestForStrategy_(rows, startStr, endStr, targetProfit, key);
-  });
+  }
+  if (onProgress) await onProgress({ stage: 'simulating', completed: strategyKeys.length, total: strategyKeys.length, currentStrategy: null });
 
   return { startDay: startStr, endDay: endStr, targetProfit: targetProfit, results: results };
 }
@@ -931,6 +953,17 @@ function errorToHttpsError_(result) {
 
 var BACKTEST_RUNTIME_OPTS_ = Object.assign({}, RUNTIME_OPTS_, { memory: '2GiB', timeoutSeconds: 540 });
 
+/**
+ * 2026-11-12 新增：`runBacktestAllStrategies` 比單一策略回測多跑 6 倍的模擬
+ * 運算（同一批資料依序跑過每個策略），區間接近 `BACKTEST_MAX_RANGE_DAYS`
+ * 上限時曾經卡在 `running` 不動超過 `BACKTEST_RUNTIME_OPTS_` 的 540 秒逾時
+ * ——拉高到 `900` 秒（跟 IC 驗證的 `IC_VALIDATION_RUNTIME_OPTS_` 同一個
+ * 量級），`memory` 一併提高到 `4GiB`：Cloud Functions 2nd gen 的 CPU 額度
+ * 是跟著 memory 走的，這段是單執行緒同步運算（沒有平行處理可以優化），
+ * 加大 memory 同時也讓這段運算本身跑快一點，不是只靠拉長逾時硬撐。
+ */
+var BACKTEST_ALL_RUNTIME_OPTS_ = Object.assign({}, BACKTEST_RUNTIME_OPTS_, { memory: '4GiB', timeoutSeconds: 900 });
+
 // 2026-10-08：跟 getFinancialsCoverage 上方同一個「Firebase CLI 把
 // rerun_failed_jobs 的重跑誤判成內容沒變而跳過」問題，這支（接了
 // loadBacktestFactorRows_ 新增的基本面因子）卡住了，改一次原始碼重試。
@@ -968,7 +1001,7 @@ exports.runBacktest = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
   }
 });
 
-exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function (request) {
+exports.runBacktestAllStrategies = onCall(BACKTEST_ALL_RUNTIME_OPTS_, async function (request) {
   assertOwnerAuth_(request);
   const data = request.data || {};
   if (!data.startDate || !data.endDate) {
@@ -978,6 +1011,7 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function
   await writeJobStatus_('backtest', {
     status: 'running', startedAt: startTime, mode: 'all',
     params: { startDate: data.startDate, endDate: data.endDate, targetProfit: data.targetProfit || null },
+    progress: { stage: 'loading' },
     error: null
   });
   try {
@@ -987,7 +1021,8 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_RUNTIME_OPTS_, async function
     }
     const appliedFactorModels = await fetchAppliedFactorModels_();
     const result = errorToHttpsError_(
-      await runBacktestAllStrategiesCore_(appConfig.bigQuery, appliedFactorModels, data.startDate, data.endDate, data.targetProfit)
+      await runBacktestAllStrategiesCore_(appConfig.bigQuery, appliedFactorModels, data.startDate, data.endDate, data.targetProfit,
+        function (p) { return writeJobStatus_('backtest', { progress: p }); })
     );
     const durationMs = Date.now() - startTime;
     const summaryMsg = Object.keys(result.results || {}).map(function (k) {
