@@ -763,6 +763,59 @@ async function logRun_(category, status, message, durationMs) {
  * 刻意吞掉寫入失敗（跟 `logRun_` 同一個理由：這只是狀態顯示用的旁支資訊，
  * 寫失敗不該讓背景工作本身失敗）。
  */
+/**
+ * 2026-11-13 新增：`runBacktestAllStrategies`（全部策略比較）即使進度顯示
+ * 跑到「第 6/6 個策略」（代表 `runBacktestAllStrategiesCore_` 已經算完、
+ * `logRun_` 也已經成功寫入「完整紀錄」、使用者看得到真實的勝率數字），
+ * Firestore 上的 `jobs/backtest` 還是卡在 `status: 'running'` 不變，前端
+ * 「全部策略比較結果」那個區塊（會顯示 avgReturn／avgDaysHeld，見
+ * `ResearchView.vue`）永遠不會出現——兩個症狀其實是同一個根因：
+ * `simulateBacktestForStrategy_` 回傳的每個策略結果都帶著完整的
+ * `trades` 陣列（未截斷，筆數隨區間長度／訊號數量成長），6 個策略的
+ * `trades` 全部塞進同一份 `jobs/backtest` 文件，很容易超過 Firestore
+ * 單一文件 1 MiB 的硬性上限——寫入失敗，但 `writeJobStatus_` 內部的
+ * try/catch 把這個錯誤吞掉（見該函式的說明：這是為了「寫狀態失敗不該讓
+ * 整個流程掛掉」刻意設計的，但也代表失敗會完全無聲，不會丟到外層的
+ * catch 區塊），所以 `status` 永遠停在最後一次成功寫入的值（`running`），
+ * 前端訂閱到的文件從頭到尾沒有變成 `succeeded`，使用者看到的就是
+ * 「進度跑完了，但畫面卡住、也看不到 avgReturn/avgDaysHeld」。
+ *
+ * 跟前一次（2026-11-12）以為是逾時的診斷不同：那次修的是運算本身要
+ * 多少時間（逾時／CPU），這次卡住的位置在運算「已經算完之後」要把結果
+ * 寫回 Firestore 這一步，是另一個獨立的 root cause，不是同一個問題
+ * 還沒修好。
+ *
+ * 修正：「全部策略比較」畫面本來就只顯示每個策略的 `summary`（見
+ * `ResearchView.vue` 638-657 行的「全部策略比較結果」區塊），從頭到尾
+ * 沒有用到 `results[key].trades`——單一策略模式（`mode==='single'`）才會
+ * 顯示逐筆 `trades` 表格，那邊策略數量固定是 1，文件大小風險小得多，
+ * 不用動。所以只要在「全部策略比較」寫回 Firestore 之前，把每個策略
+ * 結果裡的 `trades` 拿掉就好，不用改 `lib/backtest.js` 任何已經測過的
+ * 純函式、也不用改 onCall 本身回傳給呼叫端的 `result`（HTTPS callable
+ * 回應沒有 Firestore 文件那種 1 MiB 限制，拿掉只是為了瘦身 Firestore
+ * 那一份存檔，不影響當次呼叫拿到的完整資料）。
+ */
+function stripTradesForJobDoc_(result) {
+  if (!result || !result.results) return result;
+  const trimmedResults = {};
+  Object.keys(result.results).forEach(function (key) {
+    const r = result.results[key];
+    if (r && r.trades) {
+      // 不能直接寫 { trades: undefined }——Firestore SDK 預設不接受欄位值是
+      // undefined（會丟例外，跟文件過大是同一種「被 writeJobStatus_ 吞掉、
+      // 完全無聲」的失敗），用 delete 整個拿掉這個 key 才是安全的做法。
+      const copy = Object.assign({}, r);
+      const tradeCount = copy.trades.length;
+      delete copy.trades;
+      copy.tradeCount = tradeCount;
+      trimmedResults[key] = copy;
+    } else {
+      trimmedResults[key] = r;
+    }
+  });
+  return Object.assign({}, result, { results: trimmedResults });
+}
+
 async function writeJobStatus_(jobKey, patch) {
   try {
     await admin.firestore().collection('jobs').doc(jobKey).set(
@@ -1025,12 +1078,21 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_ALL_RUNTIME_OPTS_, async func
         function (p) { return writeJobStatus_('backtest', { progress: p }); })
     );
     const durationMs = Date.now() - startTime;
+    // 2026-11-13：只印勝率不夠用——使用者這次是為了比較「平均持有天數」
+    // 是不是明顯小於因子驗證的天期（見 trust_momentum 的已知限制），但
+    // 「完整紀錄」這行摘要原本只有勝率，逼得使用者得等畫面上的「全部
+    // 策略比較結果」卡片渲染出來才看得到，而那個卡片剛好又卡在上面
+    // `stripTradesForJobDoc_` 修的那個 bug 上，兩邊一起卡住就完全看不到
+    // 這兩個數字。摘要行直接把 avgReturn／avgDaysHeld 也印出來，不用
+    // 依賴畫面渲染成功才看得到。
     const summaryMsg = Object.keys(result.results || {}).map(function (k) {
       const r = result.results[k];
-      return r.strategyLabel + '：' + (r.summary ? '勝率 ' + r.summary.winRate + '%' : (r.error || r.warning));
+      return r.strategyLabel + '：' + (r.summary
+        ? '勝率 ' + r.summary.winRate + '%、平均報酬 ' + r.summary.avgReturn + '%、平均持有 ' + r.summary.avgDaysHeld + ' 天'
+        : (r.error || r.warning));
     }).join('　');
     await logRun_('v17.0回測', '成功', summaryMsg, durationMs);
-    await writeJobStatus_('backtest', { status: 'succeeded', finishedAt: Date.now(), mode: 'all', result: result, error: null });
+    await writeJobStatus_('backtest', { status: 'succeeded', finishedAt: Date.now(), mode: 'all', result: stripTradesForJobDoc_(result), error: null });
     return result;
   } catch (e) {
     await logRun_('v17.0回測', '失敗', String(e.message || e), Date.now() - startTime);
