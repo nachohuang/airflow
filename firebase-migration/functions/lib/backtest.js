@@ -241,6 +241,65 @@ function simulateBacktestForStrategy_(rows, startStr, endStr, targetProfit, stra
   };
 }
 
+/**
+ * 2026-11-13 新增：跨期回測比較，直接回應「每次只能測一段區間，結果來
+ * 回貼來貼去太手動」這個問題——跟 `lib/factorValidation.js
+ * aggregateAcrossPeriods_` 同一個精神（這個 session 已經因為「單一區間
+ * 回測結果會因為那段期間剛好的市場狀況大幅擺動」反覆踩過坑：trust_momentum
+ * 在三個不同區間分別是墊底／最高／偏弱，單看一段完全不夠），把「跨幾段
+ * 獨立期間一致不一致」變成系統自動算出來的數字，不用再靠人工在對話裡
+ * 回頭比對。
+ *
+ * `periodResults`：`[{startDate, endDate, results: {策略key: {strategyLabel,
+ * summary|null, warning?, error?}}}, ...]`，由 `index.js
+ * runBacktestAllStrategiesMultiCore_` 對每段期間呼叫
+ * `simulateBacktestForStrategy_`（經由 `runBacktestAllStrategiesCore_`）
+ * 收集而來，這支函式純粹做彙總運算，不碰 BigQuery。
+ *
+ * 回傳 `{策略key: {strategyLabel, periods: [...], aggregate: {...}}}`——
+ * `periods` 保留每一段的原始數字（含沒有訊號／因子模型沒套用的 warning／
+ * error），`aggregate` 只對「有 summary」的期間計算平均報酬/勝率/平均
+ * 持有的均值，跟最大回落的「跨期最差」（風險指標取最差，不是取平均——
+ * 一次嚴重的回落就該被看見，不該被其他期間的溫和表現平均掉），以及
+ * `positivePeriods`／`positiveRate`（平均報酬是正的期數／比例，最直接
+ * 回答「這個策略在大部分測過的期間是不是真的賺錢」）。
+ */
+function aggregateBacktestAcrossPeriods_(periodResults) {
+  var agg = {};
+  periodResults.forEach(function (period) {
+    var results = period.results || {};
+    Object.keys(results).forEach(function (key) {
+      var r = results[key];
+      if (!agg[key]) agg[key] = { strategyKey: key, strategyLabel: r.strategyLabel, periods: [] };
+      agg[key].periods.push({
+        startDate: period.startDate,
+        endDate: period.endDate,
+        summary: r.summary || null,
+        warning: r.warning || null,
+        error: r.error || null
+      });
+    });
+  });
+
+  Object.keys(agg).forEach(function (key) {
+    var withSummary = agg[key].periods.filter(function (p) { return p.summary; });
+    var n = withSummary.length;
+    var positivePeriods = withSummary.filter(function (p) { return p.summary.avgReturn > 0; }).length;
+    agg[key].aggregate = {
+      periodsTested: agg[key].periods.length,
+      periodsWithSignal: n,
+      avgReturnMean: n ? round_(mean_(withSummary.map(function (p) { return p.summary.avgReturn; })), 2) : null,
+      winRateMean: n ? round_(mean_(withSummary.map(function (p) { return p.summary.winRate; })), 2) : null,
+      avgDaysHeldMean: n ? round_(mean_(withSummary.map(function (p) { return p.summary.avgDaysHeld; })), 1) : null,
+      maxDrawdownWorst: n ? round_(Math.max.apply(null, withSummary.map(function (p) { return p.summary.maxDrawdown; })), 2) : null,
+      positivePeriods: positivePeriods,
+      positiveRate: n ? round_(positivePeriods / n * 100, 1) : null
+    };
+  });
+
+  return agg;
+}
+
 module.exports = {
   BACKTEST_TARGET_DEFAULT: BACKTEST_TARGET_DEFAULT,
   BACKTEST_MAX_HOLD_DAYS: BACKTEST_MAX_HOLD_DAYS,
@@ -249,5 +308,6 @@ module.exports = {
   simulateTradeForward_: simulateTradeForward_,
   validateBacktestRange_: validateBacktestRange_,
   computeBacktestLoadEndStr_: computeBacktestLoadEndStr_,
-  simulateBacktestForStrategy_: simulateBacktestForStrategy_
+  simulateBacktestForStrategy_: simulateBacktestForStrategy_,
+  aggregateBacktestAcrossPeriods_: aggregateBacktestAcrossPeriods_
 };

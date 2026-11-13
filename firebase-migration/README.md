@@ -4262,3 +4262,75 @@ IC 驗證的優勢兌現成實際報酬」這個假設，驗證完再決定要�
 動到任何其他策略的回測行為，只有 `trust_momentum` 的回測出場參數
 改變——等使用者用這次修正過的版本重新驗證過實際報酬／最大回落有
 沒有真的改善，再決定下一步。
+
+## 2026-11-13：跨期回測比較——「測試來來回回太手動」，比照 IC 驗證改成一次送出多段期間自動彙總
+
+`trust_momentum` 這一路調整出場規則（延後停損→發現漏洞→加毀滅性停損），
+每一版都要使用者手動挑一個區間、跑「全部策略比較」、把結果貼回對話裡
+才能判斷這一版是不是真的有效——而且單一區間的結果本來就會因為那段
+期間剛好的市場狀況大幅擺動，這個 session 已經實測出 `trust_momentum`
+在三個不同區間分別是墊底、最高、偏弱，光看一段完全不夠。使用者直接
+點名「這一切測試來來回回太手動了」，要求做功能優化。
+
+跟 2026-11-10 把 IC 驗證從單段期間改成多段期間自動彙總是同一個教訓
+（當時也是先手動跑了四次、靠人工在對話裡比對出過一次誤判，才改成
+系統自動彙總），這次直接比照同一套模式套用到回測。
+
+**`lib/backtest.js`** 新增 `aggregateBacktestAcrossPeriods_(periodResults)`
+（純函式，不碰 BigQuery）：
+- 輸入 `[{startDate, endDate, results: {策略key: {strategyLabel,
+  summary|null, warning?, error?}}}, ...]`（由 `index.js` 對每段期間
+  重複呼叫既有的 `runBacktestAllStrategiesCore_` 收集而來，不重寫任何
+  已經測過的邏輯）。
+- 輸出 `{策略key: {strategyLabel, periods: [...], aggregate: {...}}}`——
+  `periods` 保留每一段的原始數字（含沒有訊號／因子模型沒套用的
+  warning／error，不是直接丟掉），`aggregate` 對「有 summary」的期間
+  計算平均報酬／勝率／平均持有的均值，跟最大回落的**跨期最差**（不是
+  平均——一次嚴重的回落就該被看見，不該被其他期間的溫和表現平均掉），
+  以及 `positivePeriods`／`positiveRate`（平均報酬是正的期數／比例，
+  直接回答「這個策略在大部分測過的期間是不是真的賺錢」）。
+
+**`index.js`** 新增 `runBacktestAllStrategiesMultiCore_`（依序、不是
+`Promise.all`——跟 `runFactorIcValidationMultiCore_` 當初的 OOM 教訓
+同一個理由，見 2026-11-11 那次修正說明）跟 `exports.
+runBacktestAllStrategiesMulti`：
+- 用獨立的 `jobs/backtestMulti`（不是沿用 `jobs/backtest`）——跟
+  `jobs/factorIcValidation` 用自己獨立的 job key 同一個理由，欄位形狀
+  （`periods`／`aggregated`）整個不一樣，混在同一個 key 裡要多判斷
+  一層，不如分開。
+- `BACKTEST_MULTI_RUNTIME_OPTS_`：沿用 `BACKTEST_ALL_RUNTIME_OPTS_` 的
+  `4GiB`，`timeoutSeconds` 拉到 `1800`（30 分鐘）——多段期間依序疊加，
+  總時間會隨期間數線性增加。
+- 寫回 Firestore 前一樣呼叫 `stripTradesForJobDoc_`（逐段重用，不用
+  另外寫一次）拿掉每段每個策略的逐筆 `trades`，避免重演 2026-11-12
+  那次 Firestore 單一文件 1 MiB 上限的卡住問題——多段期間疊加起來，
+  文件大小風險只會更高，不是更低。
+
+**`ResearchView.vue`** 新增「📈 跨期回測比較」卡片：跟 IC 驗證卡片
+一樣可以動態加減多段期間，執行中顯示「第 N / M 段」進度，結果表格
+依「正報酬期數比例」「平均報酬均值」排序，每個策略一列。
+
+**複製結果按鈕**（使用者明確要求「最後結果最好都可以有複製按鈕」）：
+單一策略回測、全部策略比較、跨期回測比較三個結果區塊都補上（跟
+`DebugLogPanel.vue`／IC 驗證卡片同一套 `navigator.clipboard` 模式），
+之前只有 IC 驗證卡片有複製按鈕，回測這三種結果都要手動截圖或謄打，
+這次一併補齊。
+
+**順便修正一個既有的小落差**：`ResearchView.vue` 的 `runAll()`
+呼叫 `callFn('runBacktestAllStrategies', ..., 540000)`，client 端逾時
+還是舊的 540 秒，但後端 `BACKTEST_ALL_RUNTIME_OPTS_` 的
+`timeoutSeconds` 在 2026-11-12 那次修正早就改成 900 了，前端沒有跟著
+改——之前沒人踩到是因為結果本來就是靠 Firestore 訂閱顯示，不是靠
+這次呼叫的回傳值，client 端提早逾時頂多讓這次呼叫的 promise 丟錯誤、
+不影響背景真正的執行，但還是在這次順手對齊成 900000。
+
+**測試**（`test/backtest.test.js`）新增 Test 12：用這個 session 實際
+跑過的 `trust_momentum`／`composite_accumulation` 真實數字（三段，
+含一段因子模型沒套用的 error）重建，確認：`error` 那段會保留在
+`periods` 裡但不會汙染 `aggregate`（分母只看有 summary 的期間）；
+`maxDrawdownWorst` 真的是取最差不是取平均；`positivePeriods`／
+`positiveRate` 算對。
+
+全部後端測試（含 6 個 Parity 測試）跟前端 `npm run build` 都確認
+通過。這次新增的是全新的跨期比較功能，完全沒有動到任何既有的單期
+回測邏輯。

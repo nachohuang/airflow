@@ -1102,6 +1102,89 @@ exports.runBacktestAllStrategies = onCall(BACKTEST_ALL_RUNTIME_OPTS_, async func
 });
 
 /**
+ * 2026-11-13 新增：跨期回測比較——使用者反映「這一切測試來來回回太手動了」：
+ * trust_momentum 這一路調整出場規則，每次都要手動挑一個區間、跑「全部策略
+ * 比較」、把結果貼回對話裡，才能判斷這一版改動是不是真的有效，而且單一區間
+ * 的結果本來就會因為那段期間剛好的市場狀況大幅擺動（這個 session 已經實測
+ * 出 trust_momentum 在三個不同區間分別是墊底／最高／偏弱）——跟
+ * `runFactorIcValidation` 當初從單段期間改成多段期間自動彙總是同一個教訓，
+ * 這裡直接比照同一個模式：一次送出多段期間，依序（不是 `Promise.all`，見
+ * `runFactorIcValidationMultiCore_` 當初的 OOM 教訓）對每一段呼叫既有的
+ * `runBacktestAllStrategiesCore_`（不重寫任何已經測過的邏輯），再用
+ * `backtestLib.aggregateBacktestAcrossPeriods_` 彙總成「每個策略跨幾段期間
+ * 的平均報酬／勝率／最大回落（取最差）／正報酬期數」，不用再手動比對貼來
+ * 貼去的對話紀錄。
+ *
+ * 用獨立的 `jobs/backtestMulti`（不是沿用 `jobs/backtest`）——跟
+ * `jobs/factorIcValidation` 用自己獨立的 job key 同一個理由：這是另一種
+ * 「模式」，欄位形狀（`periods`／`aggregated`，不是 `mode: 'single'/'all'`）
+ * 整個不一樣，混在同一個 key 裡要多判斷一層，不如分開。
+ */
+async function runBacktestAllStrategiesMultiCore_(bigQueryConfig, appliedFactorModels, periods, targetProfit, onProgress) {
+  const periodResults = [];
+  for (let i = 0; i < periods.length; i++) {
+    const p = periods[i];
+    const r = await runBacktestAllStrategiesCore_(bigQueryConfig, appliedFactorModels, p.startDate, p.endDate, targetProfit);
+    periodResults.push(r.error
+      ? { startDate: p.startDate, endDate: p.endDate, error: r.error }
+      : { startDate: p.startDate, endDate: p.endDate, results: r.results });
+    if (onProgress) await onProgress({ completed: i + 1, total: periods.length });
+  }
+  const periodsWithResults = periodResults.filter(function (p) { return p.results; });
+  const aggregated = backtestLib.aggregateBacktestAcrossPeriods_(periodsWithResults);
+  return { periods: periodResults, targetProfit: targetProfit || backtestLib.BACKTEST_TARGET_DEFAULT, aggregated: aggregated };
+}
+
+/** 跟 `stripTradesForJobDoc_` 同一個理由（Firestore 單一文件 1 MiB 上限，
+ *  見 2026-11-13 那次卡住的修正說明）——多期版本每一段期間的 `results` 形狀
+ *  跟單期版本一樣，直接重用同一支函式逐段瘦身，不用另外重寫一次。 */
+function stripTradesForMultiJobDoc_(result) {
+  if (!result || !Array.isArray(result.periods)) return result;
+  const trimmedPeriods = result.periods.map(function (p) { return stripTradesForJobDoc_(p); });
+  return Object.assign({}, result, { periods: trimmedPeriods });
+}
+
+var BACKTEST_MULTI_RUNTIME_OPTS_ = Object.assign({}, BACKTEST_ALL_RUNTIME_OPTS_, { timeoutSeconds: 1800 });
+
+exports.runBacktestAllStrategiesMulti = onCall(BACKTEST_MULTI_RUNTIME_OPTS_, async function (request) {
+  assertOwnerAuth_(request);
+  const data = request.data || {};
+  if (!Array.isArray(data.periods) || data.periods.length === 0) {
+    throw new HttpsError('invalid-argument', '請提供至少一段 periods（[{startDate,endDate}]）。');
+  }
+  const startTime = Date.now();
+  await writeJobStatus_('backtestMulti', {
+    status: 'running', startedAt: startTime,
+    params: { periods: data.periods, targetProfit: data.targetProfit || null },
+    progress: { completed: 0, total: data.periods.length },
+    error: null
+  });
+  try {
+    const appConfig = await fetchAppConfig_();
+    if (!appConfig.bigQuery || !appConfig.bigQuery.projectId) {
+      throw new HttpsError('failed-precondition', 'config/app 沒有設定 BigQuery 專案 ID。');
+    }
+    const appliedFactorModels = await fetchAppliedFactorModels_();
+    const result = await runBacktestAllStrategiesMultiCore_(appConfig.bigQuery, appliedFactorModels, data.periods, data.targetProfit,
+      function (p) { return writeJobStatus_('backtestMulti', { progress: p }); });
+    const durationMs = Date.now() - startTime;
+    const summaryMsg = Object.keys(result.aggregated || {}).map(function (k) {
+      const a = result.aggregated[k];
+      return a.strategyLabel + '：' + a.aggregate.periodsWithSignal + '/' + a.aggregate.periodsTested + ' 期有訊號、平均報酬均值 ' +
+        (a.aggregate.avgReturnMean === null ? 'N/A' : a.aggregate.avgReturnMean + '%') +
+        '、正報酬期數 ' + a.aggregate.positivePeriods + '/' + a.aggregate.periodsWithSignal;
+    }).join('　');
+    await logRun_('v17.0回測(跨期)', '成功', summaryMsg, durationMs);
+    await writeJobStatus_('backtestMulti', { status: 'succeeded', finishedAt: Date.now(), result: stripTradesForMultiJobDoc_(result), error: null });
+    return result;
+  } catch (e) {
+    await logRun_('v17.0回測(跨期)', '失敗', String(e.message || e), Date.now() - startTime);
+    await writeJobStatus_('backtestMulti', { status: 'failed', finishedAt: Date.now(), error: String(e.message || e) });
+    throw e;
+  }
+});
+
+/**
  * 「深度命題」第三層（見 PROBLEM_ARCHITECTURE.md）：IC／walk-forward
  * 驗證管線的 I/O 外殼，對**單一一段期間**——讀 BigQuery 歷史（跟回測
  * 同一套 loadStartStr 暖機邏輯，20 天 rolling 因子要有足夠的暖機資料才

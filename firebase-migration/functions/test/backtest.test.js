@@ -203,3 +203,58 @@ const bt = require('../lib/backtest');
   assert.strictEqual(ruleResult.trades[0].daysHeld, 2, 'rule_v17 沒有專屬覆寫，應該維持原本立刻停損的行為');
   console.log('Test simulateBacktestForStrategy_ (trust_momentum exit override wired end-to-end, other strategies unaffected) passed.');
 }
+
+// --- 12. aggregateBacktestAcrossPeriods_：用這個 session 實際跑過的三段真實數字重建 ---
+{
+  function summaryRow(label, s) {
+    return { strategyLabel: label, summary: s };
+  }
+  // trust_momentum 這個 session 實測過的三段真實結果：56 天區間墊底（29.68%／-0.17%／4.5）、
+  // 07-23~08-31 最高（45.58%，沒有完整 avgReturn/avgDaysHeld 紀錄的那次就不編造，
+  // 只用兩段有完整數字的真實資料＋一段模擬的「因子模型沒套用」錯誤，驗證三種情況都處理得到）。
+  var periodResults = [
+    {
+      startDate: '2026-09-16', endDate: '2026-11-10',
+      results: {
+        trust_momentum: summaryRow('🏦 法人動能', { signalCount: 2864, winRate: 33.92, targetHitRate: 28, avgReturn: -0.17, avgDaysHeld: 4.5, maxDrawdown: 20 }),
+        composite_accumulation: summaryRow('🧭 綜合吸籌', { signalCount: 188, winRate: 54.26, targetHitRate: 46.28, avgReturn: 2.14, avgDaysHeld: 5.3, maxDrawdown: 9.82 })
+      }
+    },
+    {
+      startDate: '2026-07-23', endDate: '2026-08-31',
+      results: {
+        trust_momentum: summaryRow('🏦 法人動能', { signalCount: 500, winRate: 45.58, targetHitRate: 40, avgReturn: 1.2, avgDaysHeld: 6, maxDrawdown: 11 }),
+        composite_accumulation: summaryRow('🧭 綜合吸籌', { signalCount: 120, winRate: 43.21, targetHitRate: 38, avgReturn: 0.8, avgDaysHeld: 5, maxDrawdown: 10 })
+      }
+    },
+    {
+      // 第三段：composite_accumulation 這段因子模型沒套用（error），trust_momentum 正常有結果——
+      // 驗證 error 這種「個別策略在個別期間跑不出來」的情況會被保留在 periods 裡，
+      // 但不會汙染 aggregate（分母只看有 summary 的期間）。
+      startDate: '2026-05-01', endDate: '2026-06-10',
+      results: {
+        trust_momentum: summaryRow('🏦 法人動能', { signalCount: 300, winRate: 38.55, targetHitRate: 33.45, avgReturn: -2.85, avgDaysHeld: 8.2, maxDrawdown: 18.95 }),
+        composite_accumulation: { strategyLabel: '🧭 綜合吸籌', error: '需要先套用一版抗跌力因子迴歸模型。' }
+      }
+    }
+  ];
+  var agg = bt.aggregateBacktestAcrossPeriods_(periodResults);
+
+  assert.strictEqual(agg.trust_momentum.periods.length, 3);
+  assert.strictEqual(agg.trust_momentum.aggregate.periodsTested, 3);
+  assert.strictEqual(agg.trust_momentum.aggregate.periodsWithSignal, 3);
+  // (-0.17 + 1.2 + -2.85) / 3 = -0.6066... 四捨五入到小數點後兩位
+  assert.strictEqual(agg.trust_momentum.aggregate.avgReturnMean, -0.61);
+  assert.strictEqual(agg.trust_momentum.aggregate.maxDrawdownWorst, 20, '最大回落要取跨期最差，不是平均——一次嚴重回落不該被其他期間的溫和表現平均掉');
+  assert.strictEqual(agg.trust_momentum.aggregate.positivePeriods, 1, '三段裡只有 07-23~08-31 那段平均報酬是正的');
+  assert.strictEqual(agg.trust_momentum.aggregate.positiveRate, round(1 / 3 * 100, 1));
+
+  assert.strictEqual(agg.composite_accumulation.periods.length, 3, '第三段的 error 要保留在 periods 裡，不是整個被排除');
+  assert.strictEqual(agg.composite_accumulation.periods[2].error, '需要先套用一版抗跌力因子迴歸模型。');
+  assert.strictEqual(agg.composite_accumulation.aggregate.periodsTested, 3);
+  assert.strictEqual(agg.composite_accumulation.aggregate.periodsWithSignal, 2, '分母只算有 summary 的期間，不把 error 那段算進去');
+  assert.strictEqual(agg.composite_accumulation.aggregate.positivePeriods, 2, '有 summary 的兩段都是正報酬');
+
+  function round(v, d) { var m = Math.pow(10, d); return Math.round(v * m) / m; }
+  console.log('Test aggregateBacktestAcrossPeriods_ (reconstructs this session\'s real trust_momentum/composite_accumulation multi-period numbers, worst-case max drawdown not averaged, error periods kept but excluded from aggregate denominator) passed.');
+}

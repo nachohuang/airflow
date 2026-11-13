@@ -107,7 +107,11 @@ async function runAll() {
       startDate: form.value.startDate,
       endDate: form.value.endDate,
       targetProfit: Number(form.value.targetProfit) || undefined
-    }, 540000);
+    }, 900000); // 2026-11-13 修正：原本寫 540000，但後端 BACKTEST_ALL_RUNTIME_OPTS_
+    // 的 timeoutSeconds 早就改成 900 了（見同日「全部策略比較卡住」那次修正），
+    // 前端這裡沒跟著改——之前沒人踩到是因為 jobs/backtest 的結果本來就是靠
+    // Firestore 訂閱顯示，不是靠這次呼叫的回傳值，client 端提早逾時頂多讓這個
+    // function 的 promise 丟錯誤、不影響背景真正的執行，但還是該跟後端對齊。
   } catch (e) {
     const code = e.code || '';
     if (code.indexOf('invalid-argument') >= 0 || code.indexOf('failed-precondition') >= 0 || code.indexOf('permission-denied') >= 0) {
@@ -116,6 +120,164 @@ async function runAll() {
   } finally {
     starting.value = false;
   }
+}
+
+// 複製結果（跟 DebugLogPanel.vue copyAll／下面 IC 驗證 copyIcValidationResults
+// 同一套 navigator.clipboard 模式）——單一策略回測的逐筆交易明細複製成 tab
+// 分隔的純文字。
+const singleCopyState = ref('idle');
+async function copySingleResult() {
+  const r = job.value && job.value.result;
+  if (!r || !r.summary) return;
+  const lines = [
+    r.strategyLabel + '\t' + r.startDay + ' ~ ' + r.endDay,
+    '訊號數\t勝率\t達標率\t平均報酬\t平均持有\t最大回落',
+    [r.summary.signalCount, r.summary.winRate + '%', r.summary.targetHitRate + '%', r.summary.avgReturn + '%', r.summary.avgDaysHeld + ' 天', r.summary.maxDrawdown + '%'].join('\t'),
+    '',
+    ['代號', '名稱', '進場日', '訊號', '出場日', '出場', '持有天數', '最終報酬', '最高報酬', '最大回落'].join('\t')
+  ];
+  (r.trades || []).forEach(function (t) {
+    lines.push([t.code, t.name, t.entryDate, t.entryStrategy, t.exitDate, t.exitLabel, t.daysHeld, t.finalReturnPct + '%', t.peakReturnPct + '%', t.worstDrawdownPct + '%'].join('\t'));
+  });
+  try {
+    await navigator.clipboard.writeText(lines.join('\n'));
+    singleCopyState.value = 'copied';
+  } catch (e) {
+    singleCopyState.value = 'failed';
+  }
+  setTimeout(function () { singleCopyState.value = 'idle'; }, 2000);
+}
+
+// 「全部策略比較」結果複製——每個策略一列，跟畫面上卡片顯示的數字一致。
+const allCopyState = ref('idle');
+async function copyAllResult() {
+  const results = job.value && job.value.result && job.value.result.results;
+  if (!results) return;
+  const header = ['策略', '訊號數', '勝率', '達標率', '平均報酬', '平均持有', '最大回落', '備註'].join('\t');
+  const lines = [header];
+  Object.keys(results).forEach(function (key) {
+    const r = results[key];
+    if (r.summary) {
+      lines.push([r.strategyLabel, r.summary.signalCount, r.summary.winRate + '%', r.summary.targetHitRate + '%',
+        r.summary.avgReturn + '%', r.summary.avgDaysHeld + ' 天', r.summary.maxDrawdown + '%', ''].join('\t'));
+    } else {
+      lines.push([r.strategyLabel, '', '', '', '', '', '', r.error || r.warning || ''].join('\t'));
+    }
+  });
+  try {
+    await navigator.clipboard.writeText(lines.join('\n'));
+    allCopyState.value = 'copied';
+  } catch (e) {
+    allCopyState.value = 'failed';
+  }
+  setTimeout(function () { allCopyState.value = 'idle'; }, 2000);
+}
+
+// 2026-11-13 新增：跨期回測比較——使用者反映「這一切測試來來回回太手動了」，
+// 單一區間的回測結果本來就會因為那段期間剛好的市場狀況大幅擺動（trust_momentum
+// 這個 session 實測過的三個區間分別是墊底／最高／偏弱），改成一次送出多段
+// 期間，後端依序跑完自動彙總——跟上面 IC 驗證卡片「跨期彙總」同一個模式，
+// 不用再手動一段一段跑、把結果貼回對話裡人工比對。
+const backtestPeriods = ref([{ startDate: '', endDate: '' }]);
+const backtestMultiStarting = ref(false);
+const backtestMultiStartError = ref('');
+const backtestMultiJob = ref(null);
+let unsubscribeBacktestMultiJob = null;
+
+function addBacktestPeriod() {
+  backtestPeriods.value.push({ startDate: '', endDate: '' });
+}
+function removeBacktestPeriod(index) {
+  backtestPeriods.value.splice(index, 1);
+}
+
+onMounted(function () {
+  unsubscribeBacktestMultiJob = onSnapshot(doc(db, 'jobs', 'backtestMulti'), function (snap) {
+    backtestMultiJob.value = snap.exists() ? snap.data() : null;
+  });
+});
+onUnmounted(function () {
+  if (unsubscribeBacktestMultiJob) unsubscribeBacktestMultiJob();
+});
+
+const backtestMultiJobStatusLabel = computed(function () {
+  if (!backtestMultiJob.value) return '';
+  const labels = { running: '執行中', succeeded: '成功', failed: '失敗' };
+  return labels[backtestMultiJob.value.status] || backtestMultiJob.value.status;
+});
+
+async function runBacktestMultiNow() {
+  backtestMultiStarting.value = true;
+  backtestMultiStartError.value = '';
+  try {
+    await callFn('runBacktestAllStrategiesMulti', {
+      periods: backtestPeriods.value,
+      targetProfit: Number(form.value.targetProfit) || undefined
+    }, 1800000); // 跟後端 BACKTEST_MULTI_RUNTIME_OPTS_ 宣告的 timeoutSeconds: 1800 對齊
+  } catch (e) {
+    backtestMultiStartError.value = e.message || String(e);
+  } finally {
+    backtestMultiStarting.value = false;
+  }
+}
+
+/** 哪幾段期間整段查不到資料／日期區間本身不合法——跟 IC 驗證的
+ *  icValidationPeriodWarnings 同一個用途，分開顯示不混進策略比較表。 */
+const backtestMultiPeriodErrors = computed(function () {
+  const result = backtestMultiJob.value && backtestMultiJob.value.result;
+  if (!result || !Array.isArray(result.periods)) return [];
+  return result.periods.filter(function (p) { return p.error; });
+});
+
+/** 把 aggregated（{策略key: {strategyLabel, periods, aggregate}}）攤平成
+ *  表格列，依「正報酬期數比例」「平均報酬均值」排序——直接回答「這個策略
+ *  在大部分測過的期間是不是真的賺錢」，不是只看單一期的數字好不好看。 */
+const backtestMultiRows = computed(function () {
+  const result = backtestMultiJob.value && backtestMultiJob.value.result;
+  if (!result || !result.aggregated) return [];
+  const rows = Object.keys(result.aggregated).map(function (key) {
+    const entry = result.aggregated[key];
+    return {
+      strategyKey: key,
+      strategyLabel: entry.strategyLabel,
+      periodsTested: entry.aggregate.periodsTested,
+      periodsWithSignal: entry.aggregate.periodsWithSignal,
+      avgReturnMean: entry.aggregate.avgReturnMean,
+      winRateMean: entry.aggregate.winRateMean,
+      avgDaysHeldMean: entry.aggregate.avgDaysHeldMean,
+      maxDrawdownWorst: entry.aggregate.maxDrawdownWorst,
+      positivePeriods: entry.aggregate.positivePeriods,
+      positiveRate: entry.aggregate.positiveRate
+    };
+  });
+  rows.sort(function (a, b) {
+    if ((b.positiveRate || 0) !== (a.positiveRate || 0)) return (b.positiveRate || 0) - (a.positiveRate || 0);
+    return (b.avgReturnMean || 0) - (a.avgReturnMean || 0);
+  });
+  return rows;
+});
+
+const backtestMultiCopyState = ref('idle');
+async function copyBacktestMultiResults() {
+  const header = ['策略', '已測期數', '有訊號期數', '平均報酬均值', '勝率均值', '平均持有均值', '最大回落(最差)', '正報酬期數'];
+  const lines = [header.join('\t')];
+  backtestMultiRows.value.forEach(function (row) {
+    lines.push([
+      row.strategyLabel, row.periodsTested, row.periodsWithSignal,
+      row.avgReturnMean === null ? 'N/A' : row.avgReturnMean + '%',
+      row.winRateMean === null ? 'N/A' : row.winRateMean + '%',
+      row.avgDaysHeldMean === null ? 'N/A' : row.avgDaysHeldMean + ' 天',
+      row.maxDrawdownWorst === null ? 'N/A' : row.maxDrawdownWorst + '%',
+      row.positivePeriods + ' / ' + row.periodsWithSignal
+    ].join('\t'));
+  });
+  try {
+    await navigator.clipboard.writeText(lines.join('\n'));
+    backtestMultiCopyState.value = 'copied';
+  } catch (e) {
+    backtestMultiCopyState.value = 'failed';
+  }
+  setTimeout(function () { backtestMultiCopyState.value = 'idle'; }, 2000);
 }
 
 // ---- 因子相關性掃描（functions/lib/factorScan.js）----
@@ -624,7 +786,12 @@ async function copyIcValidationResults() {
 
       <!-- 單一策略結果 -->
       <template v-if="job.status === 'succeeded' && job.mode === 'single' && job.result">
-        <h3>{{ job.result.strategyLabel }}</h3>
+        <div class="run-log-status-card-top">
+          <h3 style="margin:0;">{{ job.result.strategyLabel }}</h3>
+          <button v-if="job.result.summary" type="button" @click="copySingleResult">
+            {{ singleCopyState === 'copied' ? '已複製' : singleCopyState === 'failed' ? '複製失敗' : '複製結果' }}
+          </button>
+        </div>
         <p v-if="job.result.warning" class="hint">{{ job.result.warning }}</p>
         <template v-else-if="job.result.summary">
           <div class="card-body">
@@ -660,6 +827,12 @@ async function copyIcValidationResults() {
 
       <!-- 全部策略比較結果 -->
       <template v-if="job.status === 'succeeded' && job.mode === 'all' && job.result">
+        <div class="run-log-status-card-top" style="margin-top:4px;">
+          <span></span>
+          <button type="button" @click="copyAllResult">
+            {{ allCopyState === 'copied' ? '已複製' : allCopyState === 'failed' ? '複製失敗' : '複製結果' }}
+          </button>
+        </div>
         <div v-for="key in Object.keys(job.result.results || {})" :key="key" class="form-card" style="margin-top:12px;">
           <h3>{{ job.result.results[key].strategyLabel }}</h3>
           <p v-if="job.result.results[key].error" class="error-box">{{ job.result.results[key].error }}</p>
@@ -676,6 +849,89 @@ async function copyIcValidationResults() {
               最大回落：{{ job.result.results[key].summary.maxDrawdown }}%
             </div>
           </div>
+        </div>
+      </template>
+    </div>
+
+    <div class="form-card">
+      <h3>📈 跨期回測比較</h3>
+      <p class="hint">
+        2026-11-13 新增：單一區間的回測結果會因為那段期間剛好的市場狀況
+        大幅擺動（<code>trust_momentum</code> 這個 session 實測過的三個
+        區間，表現分別是墊底／最高／偏弱），一次只跑一段很容易被單一區間
+        誤導。這裡一次送出多段獨立期間，後端依序跑完「全部策略比較」再
+        自動彙總——每個策略會列出跨幾段期間的平均報酬／勝率／平均持有的
+        均值，跟最大回落的「跨期最差」（取最差不是取平均，一次嚴重的回落
+        不該被其他期間的溫和表現平均掉），還有「正報酬期數／已測期數」，
+        直接回答「這個策略在大部分測過的期間是不是真的賺錢」，不用再手動
+        一段一段跑、把結果貼來貼去人工比對。目標報酬沿用上面表單設定的
+        數值。建議至少測 3 段互不重疊的期間。
+      </p>
+      <div v-for="(p, idx) in backtestPeriods" :key="idx" class="schedule-time-inputs" style="margin-top:4px;">
+        <input v-model="p.startDate" type="date" required>
+        <span>~</span>
+        <input v-model="p.endDate" type="date" required>
+        <button v-if="backtestPeriods.length > 1" type="button" @click="removeBacktestPeriod(idx)">移除</button>
+      </div>
+      <div class="form-actions">
+        <button type="button" @click="addBacktestPeriod">+ 新增一段期間</button>
+        <button type="button" :disabled="backtestMultiStarting" @click="runBacktestMultiNow">
+          {{ backtestMultiStarting ? '送出中...' : '開始跨期比較' }}
+        </button>
+      </div>
+      <p v-if="backtestMultiStartError" class="error-box">{{ backtestMultiStartError }}</p>
+
+      <div v-if="backtestMultiJob" class="run-log-status-card" style="margin-top:8px;">
+        <div class="run-log-status-card-top">
+          <span>執行狀態</span>
+          <span class="signal-badge" :style="{ color: jobStatusColor(backtestMultiJobStatusLabel) }">{{ backtestMultiJobStatusLabel }}</span>
+        </div>
+        <div class="hint">
+          <template v-if="backtestMultiJob.status === 'running'">
+            還在跑中，可以放心切走這個頁面，回來這裡會自動顯示最新狀態
+            （依序處理每一段期間，期間數越多等越久）。
+            <template v-if="backtestMultiJob.progress">
+              目前進度：第 {{ backtestMultiJob.progress.completed }} / {{ backtestMultiJob.progress.total }} 段。
+            </template>
+          </template>
+          <template v-else-if="backtestMultiJob.error">{{ backtestMultiJob.error }}</template>
+        </div>
+      </div>
+
+      <template v-if="backtestMultiPeriodErrors.length">
+        <p v-for="e in backtestMultiPeriodErrors" :key="e.startDate + '_' + e.endDate" class="error-box">
+          {{ e.startDate }} ~ {{ e.endDate }}：{{ e.error }}
+        </p>
+      </template>
+
+      <template v-if="backtestMultiRows.length">
+        <div class="run-log-status-card-top" style="margin-top:16px;">
+          <h3 style="margin:0;">跨期彙總結果（依「正報酬期數比例」「平均報酬均值」排序）</h3>
+          <button type="button" @click="copyBacktestMultiResults">
+            {{ backtestMultiCopyState === 'copied' ? '已複製' : backtestMultiCopyState === 'failed' ? '複製失敗' : '複製結果' }}
+          </button>
+        </div>
+        <div class="table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>策略</th><th>已測期數</th><th>有訊號期數</th><th>平均報酬均值</th>
+                <th>勝率均值</th><th>平均持有均值</th><th>最大回落(最差)</th><th>正報酬期數</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in backtestMultiRows" :key="row.strategyKey">
+                <td>{{ row.strategyLabel }}</td>
+                <td>{{ row.periodsTested }}</td>
+                <td>{{ row.periodsWithSignal }}</td>
+                <td>{{ row.avgReturnMean === null ? 'N/A' : row.avgReturnMean + '%' }}</td>
+                <td>{{ row.winRateMean === null ? 'N/A' : row.winRateMean + '%' }}</td>
+                <td>{{ row.avgDaysHeldMean === null ? 'N/A' : row.avgDaysHeldMean + ' 天' }}</td>
+                <td>{{ row.maxDrawdownWorst === null ? 'N/A' : row.maxDrawdownWorst + '%' }}</td>
+                <td>{{ row.positivePeriods }} / {{ row.periodsWithSignal }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </template>
     </div>
