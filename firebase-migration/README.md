@@ -4136,3 +4136,73 @@ running）拆解開來看，答案很明確：**運算本身早就跑完了，�
 全部後端測試（含 6 個 Parity 測試）維持通過——`stripTradesForJobDoc_`
 只是純粹的資料整形，沒有動 `lib/backtest.js` 任何已經測過的純函式，
 是 `index.js` I/O 邊界上的修正,不需要新增測試案例。
+
+## 2026-11-13：trust_momentum 專屬出場規則——把進場驗證的天期跟回測出場對齊
+
+修好上面兩個卡住的 bug 之後，使用者實際跑出來的數字把假設釘死了：
+🏦 法人動能（`trust_momentum`）的平均持有只有 **4.5 天**——只有 IC
+驗證天期（20 個交易日）的四分之一不到，平均報酬 -0.17%，沒有把 IC
+驗證測出來的優勢兌現。同時拿三個不同區間（56 天、07-23~08-31、這次）
+一起比對，🧭 綜合吸籌（`composite_accumulation`）三次裡兩次最強、
+從未被 🏦 法人動能明顯贏過——單一因子的 IC 驗證再扎實，出場時機跟
+驗證天期完全沒對齊，實際報酬還是兌現不出來。使用者要求做新的開發
+項目，把出場規則對齊驗證天期。
+
+**設計決策**：只動**回測模擬**，不動「戰報與持股」對既有持股的
+止盈/止損判斷——那段邏輯目前刻意對所有策略一致（`diagnoseRow_` 的
+說明：「既有持股的判斷固定不變」），`portfolioMap` 也還沒有記錄
+「這個持股是哪個策略進場的」，要套用到真正的持股監控需要先補上這個
+欄位，是更大的架構改動。在回測裡先驗證「對齊出場天期是不是真的能把
+IC 驗證的優勢兌現成實際報酬」這個假設，驗證完再決定要不要往下做，
+跟 `PROBLEM_ARCHITECTURE.md` 一路強調的「先驗證、後設計」順序一致。
+
+**出場參數怎麼選**：
+- 達標出場（🎯）完全不受影響——提早達到目標報酬就立刻出場，沒有理由
+  逼使用者多等,鎖定獲利永遠不是壞事。
+- 移動停損延後到**第 15 天**之後才開始生效，不是整個 20 天驗證天期
+  內完全不設防——留最後 5 個交易日讓停損繼續當安全網。這支策略還是
+  要真的拿來交易，不是單純比對 IC 驗證方法論本身（那樣的話應該完全
+  不設停損、強制等到第 20 天才出場）。
+- 最長持有天數對齊到 **20 天**，取代其他策略共用的 40 天上限。
+
+**修正**（`lib/backtest.js`）：
+- 新增 `STRATEGY_EXIT_OVERRIDE_`（目前只有 `trust_momentum` 一項：
+  `{ maxHoldDays: 20, minHoldDaysBeforeStop: 15 }`）跟
+  `resolveExitParams_(strategyKey)`，沒有覆寫的策略退回原本共用的
+  `BACKTEST_MAX_HOLD_DAYS`（40）／`minHoldDaysBeforeStop: 0`，行為
+  完全不變。
+- `simulateTradeForward_` 新增第 6 個參數 `minHoldDaysBeforeStop`
+  （選填，預設 0）：進場後這幾個交易日內，就算觸發移動停損也不出場，
+  只延後停損，不影響達標出場的判斷順序。沒傳這個參數的既有呼叫端／
+  既有測試行為完全不變。
+- `simulateBacktestForStrategy_` 改成呼叫 `resolveExitParams_` 取得
+  每個策略自己的 `maxHoldDays`／`minHoldDaysBeforeStop`，不再對所有
+  策略寫死同一組 `BACKTEST_MAX_HOLD_DAYS`。
+
+**`lib/analysis.js`**：`SCREENING_STRATEGIES.trust_momentum.description`
+跟 `classifyEntrySignal_` 裡 trust_momentum 分支的註解都更新，講清楚
+一個容易混淆的邊界——**這個對齊過的出場規則目前只套用在回測模擬**，
+「戰報與持股」對既有持股的止盈/止損判斷還沒跟著改，使用者如果照這個
+策略的訊號實際買進持有，目前走的仍然是通用規則，不是回測裡驗證的
+這個版本；要接回真正的持股監控是下一步的事，不在這次範圍內。
+`ResearchView.vue` 的策略說明區塊也同步更新同一個邊界說明，避免使用者
+誤以為回測改善了就代表實際持股也跟著改善。
+
+**測試**（`test/backtest.test.js`）新增：
+- Test 9：`resolveExitParams_('trust_momentum')` 回傳專屬覆寫，其他
+  任何策略（含 `rule_v17`／`composite_accumulation`）都退回共用預設值。
+- Test 10：`simulateTradeForward_` 用同一組價格走勢分別驗證——沒給
+  `minHoldDaysBeforeStop` 維持「第 2 天立刻停損」的舊行為；給
+  `minHoldDaysBeforeStop=3` 把同一個停損條件延後到第 3 天；另外驗證
+  達標出場不受 `minHoldDaysBeforeStop` 影響，提早達標依然立刻出場。
+- Test 11：`simulateBacktestForStrategy_` 端到端驗證——同一組「第 2 天
+  起觸發停損條件、一路持平到第 15 天」的價格走勢，`trust_momentum`
+  真的被延到第 15 天才出場（保護期剛結束）；換成 `rule_v17` 的進場
+  條件＋`strategyKey`，同一組走勢維持「第 2 天立刻停損」，證明這個
+  改動沒有動到其他策略的行為。
+
+全部後端測試（含 6 個 Parity 測試）跟前端 `npm run build` 都確認
+通過。這次改動完全沒有動到「戰報與持股」既有持股的判斷邏輯，也沒有
+動到任何其他策略的回測行為，只有 `trust_momentum` 的回測出場參數
+改變——是否要把這個出場規則接回真正的持股監控，等這次回測結果出來
+再決定。

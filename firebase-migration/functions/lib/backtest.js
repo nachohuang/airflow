@@ -25,12 +25,53 @@ var BACKTEST_MAX_HOLD_DAYS = 40; // 進場後最多追蹤幾個「交易日」�
 var BACKTEST_MAX_RANGE_DAYS = 60; // 進場區間（起訖日相差的日曆天數）上限，避免單次執行要處理的資料量爆炸
 
 /**
+ * 2026-11-13 新增：`trust_momentum` 專屬出場參數——實測發現這支策略平均
+ * 持有只有 4.5 天（見 README 同日那段說明），但它的進場因子
+ * （`Trust_Buy_Streak`）是用 IC／walk-forward 驗證過「跟未來 20 個交易日
+ * 報酬的關聯」才設計成策略的，沿用所有策略共用的 2.5% 移動停損，大部分
+ * 部位會在驗證過的水平期顯現之前就先被停損出場——不是因子沒用，是出場
+ * 時機跟驗證天期完全沒對齊。
+ *
+ * 這裡只加兩個參數，不是整套重寫：
+ * - `maxHoldDays: 20`——對齊驗證天期，取代其他策略共用的 40 天上限。
+ * - `minHoldDaysBeforeStop: 15`——移動停損延後到第 15 天之後才開始生效
+ *   （達標出場不受影響，提早達標依然立刻出場，沒有理由逼使用者多等）。
+ *   選 15 不選 20，是刻意留最後 5 個交易日讓停損繼續當安全網，不是整個
+ *   驗證天期內完全不設防——這支策略仍然是要真的拿來交易，不是單純比對
+ *   IC 驗證方法論本身（那樣的話應該完全不設停損、強制等到第 20 天）。
+ *
+ * 只套用在回測，還沒套用到「戰報與持股」既有持股的止盈/止損判斷——那段
+ * 邏輯目前是刻意對所有策略一致（見 `analysis.js diagnoseRow_` 的說明：
+ * 「既有持股的判斷固定不變」），portfolioMap 也還沒有記錄「這個持股是
+ * 哪個策略進場的」，要套用到真正的持股監控需要先補上這個欄位，是更大的
+ * 架構改動，在這裡先用回測驗證「對齊出場天期是不是真的能把 IC 驗證的
+ * 優勢兌現成實際報酬」這個假設，驗證完再決定要不要往下做。
+ */
+var STRATEGY_EXIT_OVERRIDE_ = {
+  trust_momentum: { maxHoldDays: 20, minHoldDaysBeforeStop: 15 }
+};
+
+function resolveExitParams_(strategyKey) {
+  var override = STRATEGY_EXIT_OVERRIDE_[strategyKey];
+  return {
+    maxHoldDays: (override && override.maxHoldDays) || BACKTEST_MAX_HOLD_DAYS,
+    minHoldDaysBeforeStop: (override && override.minHoldDaysBeforeStop) || 0
+  };
+}
+
+/**
  * 模擬「在 track[entryIdx] 那天收盤價進場」之後會發生什麼事：用跟正式戰報完全一樣的出場規則
  * （從進場後的最高價回落 trailingStopPct 就出場）逐日往前追蹤，直到達到目標報酬、觸發停損，
  * 或追蹤天數/資料用完為止。track 是同一檔股票依日期排序好的列陣列（每列至少有「日期」
  * 「收盤價」）。抽成獨立純函式方便測試，不用真的接 BigQuery。
+ *
+ * `minHoldDaysBeforeStop`（2026-11-13 新增，選填，預設 0——沒傳就是原本的行為，
+ * 其他呼叫端／既有測試不用跟著改）：進場後這幾個交易日內，就算觸發移動停損也
+ * 不出場，見 `STRATEGY_EXIT_OVERRIDE_` 的說明。只延後停損，不影響達標出場——
+ * 提早達標依然立刻出場。
  */
-function simulateTradeForward_(track, entryIdx, targetProfitPct, trailingStopPct, maxHoldDays) {
+function simulateTradeForward_(track, entryIdx, targetProfitPct, trailingStopPct, maxHoldDays, minHoldDaysBeforeStop) {
+  minHoldDaysBeforeStop = minHoldDaysBeforeStop || 0;
   var entryPrice = toNumber(track[entryIdx]['收盤價']);
   if (!entryPrice) return null;
 
@@ -48,9 +89,10 @@ function simulateTradeForward_(track, entryIdx, targetProfitPct, trailingStopPct
     var cumReturnPct = (close - entryPrice) / entryPrice * 100;
     var drawdownPct = (peakPrice - close) / peakPrice * 100;
     worstDrawdownPct = Math.max(worstDrawdownPct, drawdownPct);
+    var daysSinceEntry = i - entryIdx;
 
     if (cumReturnPct >= targetProfitPct) { exitLabel = '🎯 達標'; break; }
-    if (drawdownPct >= trailingStopPct * 100) { exitLabel = '🛑 止損'; break; }
+    if (daysSinceEntry >= minHoldDaysBeforeStop && drawdownPct >= trailingStopPct * 100) { exitLabel = '🛑 止損'; break; }
   }
 
   var exitPrice = toNumber(track[exitIdx]['收盤價']) || entryPrice;
@@ -118,7 +160,9 @@ function simulateBacktestForStrategy_(rows, startStr, endStr, targetProfit, stra
     var entryDateStr = normalizeDateStr(r['日期']);
     var entryIdx = track.findIndex(function (t) { return normalizeDateStr(t['日期']) === entryDateStr; });
     if (entryIdx === -1) return;
-    var sim = simulateTradeForward_(track, entryIdx, targetProfit, config.STRATEGY.TRAILING_STOP_PERCENT, BACKTEST_MAX_HOLD_DAYS);
+    var exitParams = resolveExitParams_(strategyKey);
+    var sim = simulateTradeForward_(track, entryIdx, targetProfit, config.STRATEGY.TRAILING_STOP_PERCENT,
+      exitParams.maxHoldDays, exitParams.minHoldDaysBeforeStop);
     if (!sim) return;
     trades.push({
       code: r['證券代號'],
@@ -172,6 +216,7 @@ module.exports = {
   BACKTEST_TARGET_DEFAULT: BACKTEST_TARGET_DEFAULT,
   BACKTEST_MAX_HOLD_DAYS: BACKTEST_MAX_HOLD_DAYS,
   BACKTEST_MAX_RANGE_DAYS: BACKTEST_MAX_RANGE_DAYS,
+  resolveExitParams_: resolveExitParams_,
   simulateTradeForward_: simulateTradeForward_,
   validateBacktestRange_: validateBacktestRange_,
   computeBacktestLoadEndStr_: computeBacktestLoadEndStr_,

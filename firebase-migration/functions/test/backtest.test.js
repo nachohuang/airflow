@@ -103,3 +103,77 @@ const bt = require('../lib/backtest');
   assert.ok(result.warning, '沒有訊號要帶說明文字，不是靜默回傳空結果');
   console.log('Test simulateBacktestForStrategy_ (no signals in range -> warning, no summary) passed.');
 }
+
+// --- 9. resolveExitParams_：trust_momentum 有專屬覆寫，其他策略退回共用預設值 ---
+{
+  assert.deepStrictEqual(bt.resolveExitParams_('trust_momentum'), { maxHoldDays: 20, minHoldDaysBeforeStop: 15 });
+  assert.deepStrictEqual(bt.resolveExitParams_('rule_v17'), { maxHoldDays: bt.BACKTEST_MAX_HOLD_DAYS, minHoldDaysBeforeStop: 0 });
+  assert.deepStrictEqual(bt.resolveExitParams_('composite_accumulation'), { maxHoldDays: bt.BACKTEST_MAX_HOLD_DAYS, minHoldDaysBeforeStop: 0 });
+  console.log('Test resolveExitParams_ (trust_momentum override vs default fallback for every other strategy) passed.');
+}
+
+// --- 10. simulateTradeForward_：minHoldDaysBeforeStop 延後移動停損，但不影響達標出場 ---
+{
+  // 沒帶 minHoldDaysBeforeStop（沿用舊行為）：從高點 103 回落到 100（2.91%）第 2 天就停損出場。
+  var track = [
+    { '日期': '2026-02-01', '收盤價': 100 },
+    { '日期': '2026-02-02', '收盤價': 103 },
+    { '日期': '2026-02-03', '收盤價': 100 },
+    { '日期': '2026-02-04', '收盤價': 100 },
+    { '日期': '2026-02-05', '收盤價': 100 }
+  ];
+  var simNoOverride = bt.simulateTradeForward_(track, 0, 50, 0.025, 10);
+  assert.strictEqual(simNoOverride.exitLabel, '🛑 止損');
+  assert.strictEqual(simNoOverride.daysHeld, 2, '沒給 minHoldDaysBeforeStop 要維持原本「立刻停損」的行為');
+
+  // 同一組資料，minHoldDaysBeforeStop=3：第 2 天的停損條件被壓下，延到第 3 天才出場。
+  var simWithOverride = bt.simulateTradeForward_(track, 0, 50, 0.025, 10, 3);
+  assert.strictEqual(simWithOverride.exitLabel, '🛑 止損');
+  assert.strictEqual(simWithOverride.daysHeld, 3, 'minHoldDaysBeforeStop 應該把停損往後延，不是直接關掉');
+
+  // 達標出場不受 minHoldDaysBeforeStop 影響：就算設定很長的保護期，提早達標還是立刻出場。
+  var targetTrack = [
+    { '日期': '2026-02-01', '收盤價': 100 },
+    { '日期': '2026-02-02', '收盤價': 110 } // +10%，達標
+  ];
+  var simTarget = bt.simulateTradeForward_(targetTrack, 0, 5, 0.025, 20, 15);
+  assert.strictEqual(simTarget.exitLabel, '🎯 達標');
+  assert.strictEqual(simTarget.daysHeld, 1, '達標出場不該被 minHoldDaysBeforeStop 擋住');
+  console.log('Test simulateTradeForward_ (minHoldDaysBeforeStop delays trailing stop only, target-profit exit unaffected) passed.');
+}
+
+// --- 11. simulateBacktestForStrategy_：trust_momentum 透過 resolveExitParams_ 真的套用到完整流程，其他策略不受影響 ---
+{
+  function momentumRow(date, close, overrides) {
+    return Object.assign({
+      '證券代號': '5678', '證券名稱': '動能測試股', '日期': date, '收盤價': close,
+      '成交金額': 100000000, 'Trend_Score': 0, 'Inst_Part_Rank': 0, 'Vol_Ratio_Rank': 0, 'IBF_20D_Rank': 0,
+      'Trust_Buy_Streak_Rank': 0
+    }, overrides || {});
+  }
+  // 16 個交易日：第 0 天進場，第 1 天衝高到 103，第 2 天起回落到 100（跌幅 2.91% >= 2.5% 門檻）
+  // 並一路持平到第 15 天——一般規則第 2 天就該停損，trust_momentum 的 15 天保護期應該讓它撐到
+  // 第 15 天（保護期剛結束）才出場。
+  var rows = [momentumRow('2026-03-01', 100, { 'Trend_Score': 1, 'Trust_Buy_Streak_Rank': 0.9 })];
+  for (var d = 1; d <= 15; d++) {
+    var dateStr = '2026-03-' + String(d + 1).padStart(2, '0');
+    rows.push(momentumRow(dateStr, d === 1 ? 103 : 100));
+  }
+  var momentumResult = bt.simulateBacktestForStrategy_(rows, '2026-03-01', '2026-03-01', 5, 'trust_momentum');
+  assert.strictEqual(momentumResult.trades.length, 1);
+  assert.strictEqual(momentumResult.trades[0].exitLabel, '🛑 止損');
+  assert.strictEqual(momentumResult.trades[0].daysHeld, 15, 'trust_momentum 應該把停損延到保護期（15 天）結束才觸發');
+
+  // 同一組價格走勢，換成 rule_v17 的進場條件、strategyKey 也改成 rule_v17：
+  // 沒有專屬覆寫，應該維持原本「第 2 天立刻停損」的行為，證明這個改動沒有動到其他策略。
+  var ruleRows = rows.map(function (r, i) {
+    return i === 0
+      ? Object.assign({}, r, { 'Trend_Score': 2, 'Inst_Part_Rank': 0.9, 'Vol_Ratio_Rank': 0.9, 'IBF_20D_Rank': 0.9 })
+      : r;
+  });
+  var ruleResult = bt.simulateBacktestForStrategy_(ruleRows, '2026-03-01', '2026-03-01', 5, 'rule_v17');
+  assert.strictEqual(ruleResult.trades.length, 1);
+  assert.strictEqual(ruleResult.trades[0].exitLabel, '🛑 止損');
+  assert.strictEqual(ruleResult.trades[0].daysHeld, 2, 'rule_v17 沒有專屬覆寫，應該維持原本立刻停損的行為');
+  console.log('Test simulateBacktestForStrategy_ (trust_momentum exit override wired end-to-end, other strategies unaffected) passed.');
+}

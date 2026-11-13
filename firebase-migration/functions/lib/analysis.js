@@ -76,10 +76,13 @@ var SCREENING_STRATEGIES = {
     description: '2026-11-11 新增——目前唯一先通過 IC／walk-forward 驗證（lib/factorValidation.js／' +
       'lib/flowFactors.js，8 段完全獨立期間，20 個交易日 horizon 下 IC 全部同方向、7/8 顯著）' +
       '才設計成策略的因子，不是像其他規則式策略先訂門檻、事後才回頭驗證。用投信連續買超天數' +
-      '（Trust_Buy_Streak）的橫斷面排名篩選，不要求 Trend_Score===2。已知限制：IC 驗證測的是' +
-      '因子值跟「未來 20 個交易日報酬」的關聯，但這支策略的出場規則沿用其他策略共用的通用規則' +
-      '（回落停損／達標出場），不是真的等 20 個交易日到期才出場，進場訊號的驗證天期跟實際出場' +
-      '時機之間還有落差，見 PROBLEM_ARCHITECTURE.md 的完整討論。'
+      '（Trust_Buy_Streak）的橫斷面排名篩選，不要求 Trend_Score===2。2026-11-13 更新：實測發現' +
+      '套用其他策略共用的通用出場規則時平均持有只有 4.5 天（遠低於驗證天期），於是在' +
+      'lib/backtest.js 加了這支策略專屬的回測出場參數（延後移動停損到第 15 天、最長持有對齊' +
+      '20 天驗證天期），結果還沒驗證完。已知限制（仍未解決）：這個對齊過的出場規則目前只套用在' +
+      '回測模擬，「戰報與持股」對既有持股的止盈/止損判斷仍沿用所有策略共用的通用規則（未記錄' +
+      '「這個持股是哪個策略進場的」），還沒套用到真正的持股監控——要套用需要先改 portfolioMap' +
+      '的資料結構，是更大的架構改動，見 PROBLEM_ARCHITECTURE.md 的完整討論。'
   }
 };
 var SCREENING_STRATEGY_DEFAULT = 'rule_v17';
@@ -214,9 +217,14 @@ function classifyEntrySignal_(row, strategyKey) {
     // 已知的設計落差（刻意不隱藏）：IC 驗證測的是這個因子值跟「未來 20 個
     // 交易日」報酬的關聯，但這支策略沿用跟其他策略共用的通用出場規則
     // （diagnoseRow_ 的回落停損／達標出場），不是真的等 20 個交易日到期才
-    // 出場——實際出場時機由價格走勢決定，不保證剛好落在驗證過的 20 天窗口，
-    // 這是之後如果要更精確利用這個訊號，可以再補的改進方向（時間到期出場），
-    // 不是這次的範圍。
+    // 出場——實際出場時機由價格走勢決定，不保證剛好落在驗證過的 20 天窗口。
+    //
+    // 2026-11-13 更新：實測（見 README 同日那段）平均持有只有 4.5 天，證實
+    // 上面這個落差真的在吃掉驗證過的優勢，於是在 lib/backtest.js 加了
+    // `STRATEGY_EXIT_OVERRIDE_`，只對 trust_momentum 的回測模擬延後移動
+    // 停損、把最長持有對齊 20 天——但這裡（classifyEntrySignal_／
+    // diagnoseRow_ 既有持股的判斷）還沒有改，回測的出場參數還沒接回真正的
+    // 持股監控，見下面 SCREENING_STRATEGIES.trust_momentum.description。
     var trustStreakOk = row.Trust_Buy_Streak_Rank !== null && row.Trust_Buy_Streak_Rank !== undefined &&
       row.Trust_Buy_Streak_Rank >= TRUST_MOMENTUM_STREAK_RANK_MIN_PCT;
     var trustNotInFreefall = row.Trend_Score !== 0;
