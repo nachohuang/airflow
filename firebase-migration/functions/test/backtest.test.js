@@ -106,13 +106,14 @@ const bt = require('../lib/backtest');
 
 // --- 9. resolveExitParams_：trust_momentum 有專屬覆寫，其他策略退回共用預設值 ---
 {
-  assert.deepStrictEqual(bt.resolveExitParams_('trust_momentum'), { maxHoldDays: 20, minHoldDaysBeforeStop: 15 });
-  assert.deepStrictEqual(bt.resolveExitParams_('rule_v17'), { maxHoldDays: bt.BACKTEST_MAX_HOLD_DAYS, minHoldDaysBeforeStop: 0 });
-  assert.deepStrictEqual(bt.resolveExitParams_('composite_accumulation'), { maxHoldDays: bt.BACKTEST_MAX_HOLD_DAYS, minHoldDaysBeforeStop: 0 });
+  assert.deepStrictEqual(bt.resolveExitParams_('trust_momentum'), { maxHoldDays: 20, minHoldDaysBeforeStop: 15, catastrophicStopPct: 0.1 });
+  assert.deepStrictEqual(bt.resolveExitParams_('rule_v17'), { maxHoldDays: bt.BACKTEST_MAX_HOLD_DAYS, minHoldDaysBeforeStop: 0, catastrophicStopPct: null });
+  assert.deepStrictEqual(bt.resolveExitParams_('composite_accumulation'), { maxHoldDays: bt.BACKTEST_MAX_HOLD_DAYS, minHoldDaysBeforeStop: 0, catastrophicStopPct: null });
   console.log('Test resolveExitParams_ (trust_momentum override vs default fallback for every other strategy) passed.');
 }
 
-// --- 10. simulateTradeForward_：minHoldDaysBeforeStop 延後移動停損，但不影響達標出場 ---
+// --- 10. simulateTradeForward_：minHoldDaysBeforeStop 延後移動停損，但不影響達標出場；
+//         catastrophicStopPct 讓保護期內的「毀滅性」崩跌還是會立刻出場，不是完全不設防 ---
 {
   // 沒帶 minHoldDaysBeforeStop（沿用舊行為）：從高點 103 回落到 100（2.91%）第 2 天就停損出場。
   var track = [
@@ -126,10 +127,12 @@ const bt = require('../lib/backtest');
   assert.strictEqual(simNoOverride.exitLabel, '🛑 止損');
   assert.strictEqual(simNoOverride.daysHeld, 2, '沒給 minHoldDaysBeforeStop 要維持原本「立刻停損」的行為');
 
-  // 同一組資料，minHoldDaysBeforeStop=3：第 2 天的停損條件被壓下，延到第 3 天才出場。
+  // 同一組資料，只給 minHoldDaysBeforeStop=3、不給 catastrophicStopPct：
+  // 保護期內完全不檢查停損（純函式本身的預設行為——是否要設防由呼叫端決定，
+  // 見 resolveExitParams_ 怎麼幫 trust_momentum 固定帶一個具體門檻）。
   var simWithOverride = bt.simulateTradeForward_(track, 0, 50, 0.025, 10, 3);
   assert.strictEqual(simWithOverride.exitLabel, '🛑 止損');
-  assert.strictEqual(simWithOverride.daysHeld, 3, 'minHoldDaysBeforeStop 應該把停損往後延，不是直接關掉');
+  assert.strictEqual(simWithOverride.daysHeld, 3, '沒給 catastrophicStopPct，minHoldDaysBeforeStop 應該完全關掉停損到保護期結束');
 
   // 達標出場不受 minHoldDaysBeforeStop 影響：就算設定很長的保護期，提早達標還是立刻出場。
   var targetTrack = [
@@ -139,7 +142,29 @@ const bt = require('../lib/backtest');
   var simTarget = bt.simulateTradeForward_(targetTrack, 0, 5, 0.025, 20, 15);
   assert.strictEqual(simTarget.exitLabel, '🎯 達標');
   assert.strictEqual(simTarget.daysHeld, 1, '達標出場不該被 minHoldDaysBeforeStop 擋住');
-  console.log('Test simulateTradeForward_ (minHoldDaysBeforeStop delays trailing stop only, target-profit exit unaffected) passed.');
+
+  // 2026-11-13 新增：保護期內出現「毀滅性」崩跌（15% 回落 >= 10% 的 catastrophicStopPct）
+  // 要立刻出場，不是放到保護期結束才檢查——這是修正第一版「保護期內完全不設防」
+  // 導致真實回測量到 44% 最大回落的那個 bug。
+  var crashTrack = [
+    { '日期': '2026-02-01', '收盤價': 100 },
+    { '日期': '2026-02-02', '收盤價': 85 } // -15%，超過 10% 的毀滅性停損門檻
+  ];
+  var simCatastrophic = bt.simulateTradeForward_(crashTrack, 0, 50, 0.025, 20, 15, 0.1);
+  assert.strictEqual(simCatastrophic.exitLabel, '🛑 止損');
+  assert.strictEqual(simCatastrophic.daysHeld, 1, '保護期內的毀滅性崩跌應該立刻出場，不等保護期結束');
+
+  // 同一個保護期、同一個 catastrophicStopPct，但只是中等回落（5% < 10%）：
+  // 保護期內應該撐過去，不會被毀滅性停損誤觸發（跟一般 2.5% 門檻比起來是更寬的門檻，
+  // 不是更嚴）。
+  var moderateTrack = [
+    { '日期': '2026-02-01', '收盤價': 100 },
+    { '日期': '2026-02-02', '收盤價': 95 }, // -5%，低於 10% 門檻，保護期內不出場
+    { '日期': '2026-02-03', '收盤價': 95 }
+  ];
+  var simModerate = bt.simulateTradeForward_(moderateTrack, 0, 50, 0.025, 20, 15, 0.1);
+  assert.strictEqual(simModerate.exitLabel, '⏳ 未觸發出場', '保護期內中等回落（低於毀滅性門檻）不該被誤觸發出場');
+  console.log('Test simulateTradeForward_ (minHoldDaysBeforeStop delays trailing stop, catastrophicStopPct still catches severe drawdowns, target-profit exit unaffected) passed.');
 }
 
 // --- 11. simulateBacktestForStrategy_：trust_momentum 透過 resolveExitParams_ 真的套用到完整流程，其他策略不受影響 ---
@@ -151,9 +176,10 @@ const bt = require('../lib/backtest');
       'Trust_Buy_Streak_Rank': 0
     }, overrides || {});
   }
-  // 16 個交易日：第 0 天進場，第 1 天衝高到 103，第 2 天起回落到 100（跌幅 2.91% >= 2.5% 門檻）
-  // 並一路持平到第 15 天——一般規則第 2 天就該停損，trust_momentum 的 15 天保護期應該讓它撐到
-  // 第 15 天（保護期剛結束）才出場。
+  // 16 個交易日：第 0 天進場，第 1 天衝高到 103，第 2 天起回落到 100（跌幅 2.91%：
+  // 超過一般 2.5% 門檻，但低於保護期內 10% 的毀滅性停損門檻）並一路持平到第 15 天——
+  // 一般規則第 2 天就該停損，trust_momentum 的保護期內這個跌幅不算毀滅性、應該撐過去，
+  // 直到第 15 天保護期結束、切回 2.5% 敏感門檻才觸發停損。
   var rows = [momentumRow('2026-03-01', 100, { 'Trend_Score': 1, 'Trust_Buy_Streak_Rank': 0.9 })];
   for (var d = 1; d <= 15; d++) {
     var dateStr = '2026-03-' + String(d + 1).padStart(2, '0');

@@ -32,13 +32,27 @@ var BACKTEST_MAX_RANGE_DAYS = 60; // 進場區間（起訖日相差的日曆天�
  * 部位會在驗證過的水平期顯現之前就先被停損出場——不是因子沒用，是出場
  * 時機跟驗證天期完全沒對齊。
  *
- * 這裡只加兩個參數，不是整套重寫：
+ * **第一版只加 `maxHoldDays`／`minHoldDaysBeforeStop` 兩個參數，部署後
+ * 實測發現是錯的**：同一個 56 天區間重測，平均持有確實拉長到 10.8 天，
+ * 但平均報酬崩成 -4.86%（同一區間其他策略都是 -0.5%~+2.14%），最大回落
+ * 衝到 44.32%（其他策略都在 9~12% 之間）。2864 筆交易的平均報酬被拉到
+ * -4.86%，不是單一極端值能解釋的量級——這代表「延後停損」本身是系統性
+ * 地讓虧損部位在觸發前先跌得更深，不是讓獲利部位有更多時間兌現優勢：
+ * 第一版只延後了停損的「觸發時間」，完全沒有限制「保護期內能虧到多深」，
+ * 保護期本身變成一個沒有下限的風險缺口。
+ *
+ * **第二版修正**：保護期內改用一個更寬的「毀滅性停損」
+ * （`catastrophicStopPct`）取代完全不設防——保護期內如果真的崩到這個更寬
+ * 的門檻（例如 10%，是原本 2.5% 的 4 倍）還是會立刻出場，不是等到保護期
+ * 結束；保護期結束後才切回原本更敏感的 `trailingStopPct`（2.5%）。這樣
+ * 保留「給訊號更多時間發揮」的本意，但不再讓保護期變成無底洞。
+ *
  * - `maxHoldDays: 20`——對齊驗證天期，取代其他策略共用的 40 天上限。
- * - `minHoldDaysBeforeStop: 15`——移動停損延後到第 15 天之後才開始生效
- *   （達標出場不受影響，提早達標依然立刻出場，沒有理由逼使用者多等）。
- *   選 15 不選 20，是刻意留最後 5 個交易日讓停損繼續當安全網，不是整個
- *   驗證天期內完全不設防——這支策略仍然是要真的拿來交易，不是單純比對
- *   IC 驗證方法論本身（那樣的話應該完全不設停損、強制等到第 20 天）。
+ * - `minHoldDaysBeforeStop: 15`——第 15 天之後才切回原本敏感的
+ *   `trailingStopPct`（2.5%）。
+ * - `catastrophicStopPct: 0.1`——保護期內（第 1~15 天）用這個更寬的門檻，
+ *   不是完全不設防。達標出場完全不受這兩層停損影響，提早達標依然立刻
+ *   出場，沒有理由逼使用者多等。
  *
  * 只套用在回測，還沒套用到「戰報與持股」既有持股的止盈/止損判斷——那段
  * 邏輯目前是刻意對所有策略一致（見 `analysis.js diagnoseRow_` 的說明：
@@ -48,14 +62,15 @@ var BACKTEST_MAX_RANGE_DAYS = 60; // 進場區間（起訖日相差的日曆天�
  * 優勢兌現成實際報酬」這個假設，驗證完再決定要不要往下做。
  */
 var STRATEGY_EXIT_OVERRIDE_ = {
-  trust_momentum: { maxHoldDays: 20, minHoldDaysBeforeStop: 15 }
+  trust_momentum: { maxHoldDays: 20, minHoldDaysBeforeStop: 15, catastrophicStopPct: 0.1 }
 };
 
 function resolveExitParams_(strategyKey) {
   var override = STRATEGY_EXIT_OVERRIDE_[strategyKey];
   return {
     maxHoldDays: (override && override.maxHoldDays) || BACKTEST_MAX_HOLD_DAYS,
-    minHoldDaysBeforeStop: (override && override.minHoldDaysBeforeStop) || 0
+    minHoldDaysBeforeStop: (override && override.minHoldDaysBeforeStop) || 0,
+    catastrophicStopPct: (override && override.catastrophicStopPct) || null
   };
 }
 
@@ -66,12 +81,24 @@ function resolveExitParams_(strategyKey) {
  * 「收盤價」）。抽成獨立純函式方便測試，不用真的接 BigQuery。
  *
  * `minHoldDaysBeforeStop`（2026-11-13 新增，選填，預設 0——沒傳就是原本的行為，
- * 其他呼叫端／既有測試不用跟著改）：進場後這幾個交易日內，就算觸發移動停損也
- * 不出場，見 `STRATEGY_EXIT_OVERRIDE_` 的說明。只延後停損，不影響達標出場——
+ * 其他呼叫端／既有測試不用跟著改）：進場後這幾個交易日內，改用更寬的
+ * `catastrophicStopPct` 當停損門檻（不是完全不設防，見下方／
+ * `STRATEGY_EXIT_OVERRIDE_` 的說明），保護期結束後才切回原本更敏感的
+ * `trailingStopPct`。只影響停損門檻的寬窄跟切換時機，不影響達標出場——
  * 提早達標依然立刻出場。
+ *
+ * `catastrophicStopPct`（2026-11-13 新增，選填）：`minHoldDaysBeforeStop`
+ * 保護期內使用的門檻，沒給的話預設完全不設防（等於原本第一版「保護期內
+ * 完全不檢查停損」的行為，純函式本身保持彈性、不幫呼叫端偷偷決定要不要
+ * 設防）——實際的安全網是靠 `resolveExitParams_` 幫 `trust_momentum`
+ * 固定帶一個具體的寬門檻（0.1）來保證，不是靠這支函式自己的預設值。
+ * 第一版把保護期內的停損整個關掉部署上線後，實測發現這樣會讓虧損部位在
+ * 保護期內無限惡化（真實回測量到 44% 的最大回落），這個參數就是用來
+ * 避免保護期變成沒有下限的風險缺口。
  */
-function simulateTradeForward_(track, entryIdx, targetProfitPct, trailingStopPct, maxHoldDays, minHoldDaysBeforeStop) {
+function simulateTradeForward_(track, entryIdx, targetProfitPct, trailingStopPct, maxHoldDays, minHoldDaysBeforeStop, catastrophicStopPct) {
   minHoldDaysBeforeStop = minHoldDaysBeforeStop || 0;
+  catastrophicStopPct = catastrophicStopPct || Infinity;
   var entryPrice = toNumber(track[entryIdx]['收盤價']);
   if (!entryPrice) return null;
 
@@ -90,9 +117,11 @@ function simulateTradeForward_(track, entryIdx, targetProfitPct, trailingStopPct
     var drawdownPct = (peakPrice - close) / peakPrice * 100;
     worstDrawdownPct = Math.max(worstDrawdownPct, drawdownPct);
     var daysSinceEntry = i - entryIdx;
+    var inProtectedWindow = daysSinceEntry < minHoldDaysBeforeStop;
+    var effectiveStopPct = inProtectedWindow ? catastrophicStopPct : trailingStopPct;
 
     if (cumReturnPct >= targetProfitPct) { exitLabel = '🎯 達標'; break; }
-    if (daysSinceEntry >= minHoldDaysBeforeStop && drawdownPct >= trailingStopPct * 100) { exitLabel = '🛑 止損'; break; }
+    if (drawdownPct >= effectiveStopPct * 100) { exitLabel = '🛑 止損'; break; }
   }
 
   var exitPrice = toNumber(track[exitIdx]['收盤價']) || entryPrice;
@@ -162,7 +191,7 @@ function simulateBacktestForStrategy_(rows, startStr, endStr, targetProfit, stra
     if (entryIdx === -1) return;
     var exitParams = resolveExitParams_(strategyKey);
     var sim = simulateTradeForward_(track, entryIdx, targetProfit, config.STRATEGY.TRAILING_STOP_PERCENT,
-      exitParams.maxHoldDays, exitParams.minHoldDaysBeforeStop);
+      exitParams.maxHoldDays, exitParams.minHoldDaysBeforeStop, exitParams.catastrophicStopPct);
     if (!sim) return;
     trades.push({
       code: r['證券代號'],
